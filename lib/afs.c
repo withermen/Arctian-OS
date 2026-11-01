@@ -100,7 +100,12 @@ static int perm_ok(uint32_t fuid, uint32_t fgid, uint32_t mode, uint32_t want) {
 static void set_owner(afs_file_t *f, int is_dir) {
     f->uid = s_uid;
     f->gid = s_gid;
-    f->mode = is_dir ? 0755u : 0644u;
+    /* Varsayilan 0755/0644 iken boot sirasinda cekirdek (uid 0) tarafindan
+     * olusturulan agaca uid 1000 ile kosan uygulamalar yazamiyordu; sistem
+     * tek kullanici uzerinden dondugu icin grup/diger bitleri acik
+     * baslar. Kisitlama isteyen chmod ile kapatabilir; uygulama seviyesi
+     * izin kararlari ayrica perm.c karar katmaninda verilir. */
+    f->mode = is_dir ? 0777u : 0666u;
     f->pad = 0;
 }
 
@@ -396,6 +401,22 @@ static int find_idx(const char *name) {
     return -1;
 }
 
+/* Bir yolun icerisindeki dizinin girdi indeksini doner ("C:/a/b.txt" ->
+ * "C:/a/"). Duzenli tek parca adlarda ya da depoda karsiligi olmayan
+ * dizinlerde -1 doner; cagiran taraf o zaman eski denetime duser. */
+static int parent_idx(const char *path) {
+    char p[AFS_NAME_MAX];
+    int n = 0;
+    for (; path && path[n] && n < (int)sizeof(p) - 2; n++) p[n] = path[n];
+    p[n] = 0;
+    if (n > 0 && p[n - 1] == '/') p[--n] = 0;      /* klasor adindaki egik cizgi */
+    int cut = -1;
+    for (int i = 0; i < n; i++) if (p[i] == '/') cut = i;
+    if (cut < 0) return -1;
+    p[cut + 1] = 0;                                 /* "C:/a" -> "C:/" */
+    return find_idx(p);
+}
+
 /* ---- Tutamak yasam dongusu ----
  * Tutamak eskiden ham slot numarasiydi; dosya silinip slot yeniden
  * kullanilinca eldeki eski tutamak yeni dosyaya baglanir, kimse fark
@@ -435,7 +456,12 @@ void *afs_create_handle(const char *name) {
             return hnd_enc((int)i);
     }
     if (first_free < 0) return 0;
+    /* Yeni girdiyi icerisindeki dizinin W biti belirler (dosyanin kendi
+     * modu olusumu engelleyemez); depo duz duzenliyse denetim dusulur. */
     uint32_t i = (uint32_t)first_free;
+    int pi = parent_idx(name);
+    if (pi >= 0 &&
+        !perm_ok(H.files[pi].uid, H.files[pi].gid, H.files[pi].mode, AFS_W)) return 0;
     /* data_next create aninda ilerletilir: onceki haliyle lba ayrilip
      * data_next yalniz ilk yazmayla yukseliyordu; hic yazilmadan ikinci bir
      * dosya olusturulursa iki dosya ayni LBA'yi paylasip verileri ust uste
@@ -495,7 +521,20 @@ int afs_rename(const char *from, const char *to) {
     if (slen(tbuf) >= (int)AFS_NAME_MAX) return -3;
     if (find_idx(tbuf) >= 0) return -2;
 
-    if (!perm_ok(H.files[fi].uid, H.files[fi].gid, H.files[fi].mode, AFS_W)) return -1;
+    /* Tasima her iki yonde de dizin izni ister: kaynak dizinden cikarma
+     * ve hedef dizine girme. Kaynak dizin girdisi yoksa eski dosya
+     * deneti gecerli kalir. */
+    int spi = parent_idx(fbuf);
+    if (spi >= 0) {
+        if (!perm_ok(H.files[spi].uid, H.files[spi].gid, H.files[spi].mode, AFS_W))
+            return -1;
+    } else if (!perm_ok(H.files[fi].uid, H.files[fi].gid, H.files[fi].mode, AFS_W)) {
+        return -1;
+    }
+    int tpi = parent_idx(tbuf);
+    if (tpi >= 0 && tpi != spi &&
+        !perm_ok(H.files[tpi].uid, H.files[tpi].gid, H.files[tpi].mode, AFS_W))
+        return -1;
 
     int fl = slen(fbuf);
     cpy(H.files[fi].name, tbuf);
@@ -573,7 +612,16 @@ int afs_remove(const char *name) {
     if (!mounted) afs_mount();
     int i = find_idx(name);
     if (i < 0) return -1;
-    if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_W)) return -1;
+    /* Silmeye icerisindeki dizin karar verir (POSIX): modu kilitli bir
+     * dosya yazilabilir bir dizinden silinebilir, yazilamayan dizindeki
+     * dosya silinemez. Dizin girdisi yoksa eski dosya deneti gecerli. */
+    int pi = parent_idx(name);
+    if (pi >= 0) {
+        if (!perm_ok(H.files[pi].uid, H.files[pi].gid, H.files[pi].mode, AFS_W))
+            return -1;
+    } else if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_W)) {
+        return -1;
+    }
     H.files[i].used = 0;
     H.files[i].size = 0;
     H.files[i].name[0] = 0;
@@ -659,9 +707,26 @@ int afs_perm_selftest(void) {
     afs_set_subject(1000, 1000);
     chown_deny = (afs_chown("afs_perm_test", 1000, 1000) != 0);
 
+    /* Ebeveyn dizin denetimi: yazilamayan dizine 1000 kullanici dosya
+     * koyamaz; W bitini acinca koyabilmelidir. */
     afs_set_subject(0, 0);
+    afs_remove("C:/afs_pd/alt.txt");
+    afs_remove("C:/afs_pd/");
+    if (afs_ensure_dir("C:/afs_pd") != 0) { afs_set_subject(0, 0); return -5; }
+    if (afs_chmod("C:/afs_pd/", 0755u) != 0) { afs_set_subject(0, 0); return -6; }
+    afs_set_subject(1000, 1000);
+    int mk_deny = (afs_create_handle("C:/afs_pd/alt.txt") == 0);
+    afs_set_subject(0, 0);
+    if (afs_chmod("C:/afs_pd/", 0777u) != 0) { afs_set_subject(0, 0); return -7; }
+    afs_set_subject(1000, 1000);
+    void *h2 = afs_create_handle("C:/afs_pd/alt.txt");
+    int mk_ok = (h2 != 0);
+    afs_set_subject(0, 0);
+    if (h2) afs_remove("C:/afs_pd/alt.txt");
+    afs_remove("C:/afs_pd/");
+
     afs_remove("afs_perm_test");
-    return (owner_ok && other_deny && chown_deny) ? 0 : -4;
+    return (owner_ok && other_deny && chown_deny && mk_deny && mk_ok) ? 0 : -4;
 }
 
 /* ---- Denetim (fsck) ----
@@ -864,6 +929,29 @@ int afs_ensure_dir(const char *path) {
     return 0;
 }
 
+/* Boot, kullaci agacini cekirdek baglaminda (uid 0) olusturur; agac
+ * sonrasi uid/gid 1000'a devredilir cunku tum uygulama processleri o uid
+ * ile kosar (proc.c). Cekirdegin kendi agaci (C:/etc, C:/firmware) root'ta
+ * kalir. Yalnizca sahibi henuz belirlenmemis (0/0) girdiler tasinir. */
+static void migrate_user_ownership(void) {
+    static const char *skip[] = { "C:/etc/", "C:/firmware/" };
+    int changed = 0;
+    for (uint32_t i = 0; i < H.max_files; i++) {
+        if (!H.files[i].used) continue;
+        if (H.files[i].uid != 0 || H.files[i].gid != 0) continue;
+        const char *nm = H.files[i].name;
+        if (nm[0] == 0 || !prefix_of(nm, AFS_USER_ROOT)) continue;
+        int skip_this = 0;
+        for (unsigned k = 0; k < sizeof(skip) / sizeof(skip[0]); k++)
+            if (prefix_of(nm, skip[k])) { skip_this = 1; break; }
+        if (skip_this) continue;
+        H.files[i].uid = 1000;
+        H.files[i].gid = 1000;
+        changed = 1;
+    }
+    if (changed) hdr_commit();
+}
+
 static void afs_ensure_tree(void) {
     afs_ensure_dir(AFS_USER_ROOT);
     afs_ensure_dir(AFS_USER_APPS);
@@ -871,6 +959,7 @@ static void afs_ensure_tree(void) {
     afs_ensure_dir(AFS_USER_DOCS);
     afs_ensure_dir(AFS_USER_DESKTOP);
     afs_ensure_dir(AFS_USER_LOGS);
+    migrate_user_ownership();
 }
 
 void *afs_create_in(const char *path, const char *name, int is_dir) {
