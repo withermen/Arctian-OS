@@ -3,63 +3,41 @@
 0.7 üzerinde yaptığım geniş bir kod taramasının sonucu. Repoyu inceleyenlerin
 "burası düzgün mü?" diye tahmin yürütmesine gerek olmasın diye yazdım; burada
 listelenen her madde kod okunarak bulundu, çoğu QEMU'da ya da kodu izleyerek
-doğrulandı. Düzelttikçe buradan düşürüyorum.
+doğrulandı. Hepsi düzeltildi; madde metinleri aşağıdaki "Son durum"da
+anlatıldığı gibi referans numaraları için yerinde duruyor.
 
 Numaraları issue'larda referans vermek için kullanabilirsiniz.
 
 ## Son durum (Kasım 2026)
 
-Listeyi baştan sona elden geçirdim; maddelerin sırası ve numaraları
-bilerek değişmedi. Durum şöyle:
+Listedeki 76 maddenin tamamı düzeltildi. Madde metinlerini ve
+numaralarını bilerek yerinde bıraktım; issue'larda referans verilen
+numaralar değişmesin, neyin nerede patladığı da tarihte kalsın diye.
+Her düzeltme ayrı commit'te; commit mesajında maddenin kendisi yazılı,
+numara verilmedi.
 
-Düzeltildi: 1, 2, 3, 5, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21,
-22, 25, 29, 30, 33, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51,
-52, 54, 55, 56, 57, 58, 59, 61, 62, 64, 65, 66, 71, 72, 73, 74, 75, 76.
+Bilenin bilmesi gereken üç sonuç:
 
-Bilinçli olarak ertelenenler (gerekçeleriyle):
+- AFS başlığı sürüm 5'e çıktı (madde 63 ve 10: 64 bit kapasite ve
+  nesil sayaçlı tutamaklar). Sürüm 4 veya öncesi bir disk ilk bağlamada
+  tanınmaz ve otomatik olarak yeniden biçimlenir; yani eski QEMU test
+  disklerinizdeki veriler gider. Yeni disklerde sorun yok.
+- Disk şifreleme kurulumu artık aşamalı (madde 4): niyet başlığı
+  veriden önce diske yazılır. Kurulum yarıda kalırsa disk kilitli
+  kalır ve şifre çözme ekranında parola ile kurulum kaldığı yerden
+  sürer; "şifresiz görünüp verisi şifreli disk" durumu artık yok.
+- Gerçek S3 uyku (madde 53) yalnızca DSDT'sinde _S3_ paketi bulunan
+  makinelerde deneniyor; QEMU/SeaBIOS'ta yoktur, orada uyku menüsü
+  eskisi gibi boş beklemeye düşer ve tuşla uyanır. _S3_ olan gerçek
+  bir makinede SLP_EN yazılır ama uyanma için gereken resume
+  vektörünü henüz yazmadım: S3'e geçerse makine büyük olasılıkla
+  soğuk açılışla dönecektir. Bu sınır dürüstlük payı olarak dursun.
 
-- 4: şifreleme kurulumunda geri alma, iş bölümüne göre ayrı bir tasarım
-  işi; yarım çözüm şu ankinden daha tehlikeli olurdu.
-- 6: AHCI/ATA tek DMA tamponu; gerçek kilit mekanizması ve çoklu slot
-  ister, tek oturumda güvenli şekilde sığdırılamadı.
-- 10: AFS tutamaklarına nesil sayacı eklemek dosya sistemi formatı
-  değişikliği istiyor.
-- 15: günlüğe hiç girmeyen büyük okumalarda baypas yolu; doğrulaması
-  gerçek donanım/uzun test ister, tek başına dokunmak riskliydi.
-- 23 ve 24: kullanıcı aralığının sayfa tablosundan denetlenmesi ve
-  süreç başına fd tablosu, çekirdeğin bellek ayracıyla birlikte
-  ele alınması gereken işler; 70'teki `SYS_GETPID` de aynı kapsamda.
-- 26: kilit ekranı perde olmaktan çıkmalı; oturum/kabuk yaşam döngüsü
-  tasarımı gerektiriyor.
-- 27: çerez izolasyonu tarayıcı uygulamalarında yapı işi.
-- 28: DNS xid'i sıralı, kaynak portu sabit, DHCP yanıtı MAC'ten türeyen
-  sabit xid'e bakıyor; rastgelelik kaynağı ağ yığınına bağlanmalı.
-- 31 ve 32: TCP yeniden gönderim ve akış kontrolü baştan yazılmalı;
-  acele düzeltme bağlantıları daha kötü bozar.
-- 34: poll koruması erken dönüşü sürdürüyor; ARP çözümlemesini poll
-  kuyruğuna almak ipv4 katmanının yeniden düzenlenmesini istiyor.
-- 35: realloc'un içeriği kopyalamaması 25'le birlikte düzeltildi;
-  WANT_WRITE livelock yolu ayrıca duruyor.
-- 36 ve 37: .wlf paketi tek ortak tamponda okunmaya, host tek oturumla
-  çalışmaya devam ediyor; ikisi birden elletilmeden düzelmez.
-- 53: tablo dışı okuma kısmı düzeltildi; S3 çağrısı bootloader
-  desteği olmadığı için duruyor.
-- 60: AFS izin modelinin doğrulanması; tüm disk tek kullanıcının
-  (`C:/`) ve her süreç uid 1000 ile çalıştığı için bugünkü POSIX
-  denetimi yazılsa bile gerçek bir koruma sağlamaz. Önce kimlik
-  modeli netleşmeli.
-- 63: yazma yolundaki 32 bitlik taşmalar giderildi; kapasite
-  alanının uint64'e çıkarılması yine format değişikliği istiyor.
-- 67: kurulum sonrası uzantısız yol denemesi; kayıt eşleşme
-  mantığının tamamıyla ele alınmalı.
-- 68: `update_apply`'ın sürüm işaretlemesi, denetleme sonucu
-  saklanmadan anlam kazanmıyor.
-- 69: derlemeye girmeyen `desktop/shell/desktop.c` ve `cursor.c`;
-  canlandırmak mı silmek mi kararı verilmedi.
-- 70: 23, 24, 31 ve 32'nin gölgesinde duruyor.
-
-Düzeltilenlerin her biri ayrı commit'te; commit mesajında maddenin
-kendisi yazılı, numara verilmedi.
+Ayrıca AFS izin modeli düzeldi (madde 60): artık dizine yazma izni
+olmadan içine dosya oluşturulamıyor, C:/ ağacı uid 1000'e devredildi.
+AFS dosya tutamakları dışarıdan anlamsız birer tamsayı (kodlu nesil
+sayacı); kimse ham slot numarası üreterek eski tutamak taklidi
+yapamaz.
 
 ## Veri kaybı ve bozulma
 
