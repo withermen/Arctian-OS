@@ -39,5 +39,6 @@ void ipv4_poll_arp_only(void);   /* poll icinden tetiklenen ARP icin sinirli bos
 int  ipv4_poll_nested(void);     /* 1: dis bir ipv4_poll sirasiyla mesgul */
 void ipv4_set_default_gateway(const uint8_t gw[4]);
 void ipv4_config_dhcp(void);
+int  ipv4_frag_selftest(void);    /* parcalama/birlestirme kendini-sinavi (0=OK) */
 
 #endif

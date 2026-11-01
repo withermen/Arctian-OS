@@ -683,6 +683,7 @@ void kernel_plus_main(void *arg) {
     dns_init();
     net_task_init();
     ipv4_config_dhcp();   /* IP yapilandirmasi (gercek DHCP, olmazsa slirp) */
+    ipv4_frag_selftest(); /* parca birlestirme/parcalama sinavi (madde 70) */
 #ifdef ARCTIAN_NET_SELFTEST
     net_selftest();
 #endif
