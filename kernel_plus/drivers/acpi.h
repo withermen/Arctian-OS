@@ -24,6 +24,7 @@ typedef struct {
     uint8_t  slp_typ_s5b;
     uint8_t  slp_typ_s3a;
     uint8_t  slp_typ_s3b;
+    int      has_s3;        /* DSDT'te _S3_ paketi bulundu mu (0 = uyku yok) */
     uint8_t  century;
     uint32_t flags;
     char     oem_id[7];
@@ -35,6 +36,7 @@ void acpi_init(void);
 int  acpi_present(void);
 void acpi_shutdown(void);        /* S5: gercekten gucu keser (ACPI varsa) */
 int  acpi_enter_sleep(void);     /* S3 dener; basarisizsa 0 doner */
+int  acpi_sleep_supported(void); /* 1 = bu makine S3'e uyutabilir */
 
 /* Guc / pil durumu */
 typedef struct {

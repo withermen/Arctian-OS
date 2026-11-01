@@ -7,6 +7,7 @@
 #include "acpi.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "serial.h"
 
 // ACPI portları
 #define ACPI_SHUTDOWN_PORT 0x604
@@ -62,6 +63,12 @@ void system_reboot(void) {
 
 // Sistem uyku modu: ekran masaustu tarafindan karartilir; burada CPU
 // `hlt` ile bekletilir ve herhangi bir tus/fare hareketi ile uyanilir.
+// Madde 53: once gercek ACPI S3 denenir. Eskiden acpi_enter_sleep() hic
+// cagrilmiyordu, yani "uyku" yalnizca islemcisiz bos beklemeydi. S3 yalnizca
+// DSDT'te _S3_ paketi gorulen makinelerde denenir: boyle bir paket yokken
+// SLP_EN yazmak uyku degil kapatma demek (QEMU/SeaBIOS boyle bir makinedir,
+// orada davranis degismez). Gercek S3'te CPU burada durur; uyanma firmware
+// uzerinden oldugu icin burasi tekrar gorulmez - resume vector'u henuz yok.
 void system_sleep(void) {
     current_state = SYSTEM_SLEEPING;
 
@@ -72,6 +79,14 @@ void system_sleep(void) {
     int lx = m ? m->x : 0, ly = m ? m->y : 0;
     bool lb = m ? m->buttons[MOUSE_BUTTON_LEFT] : false;
     bool rb = m ? m->buttons[MOUSE_BUTTON_RIGHT] : false;
+
+    if (acpi_enter_sleep()) {
+        /* Buraya donduk: firmware istekle bir sey yapmadi ya da uyandik.
+         * Asagidaki bos-bekleme ile uyanma yolu yine calisir. */
+        serial_printf("[sleep] acpi s3 istendi, donuldu; bos beklemeyle surduruluyor\n");
+    } else {
+        serial_printf("[sleep] acpi s3 yok; cpu bos beklemesi (tus/fare ile uyanir)\n");
+    }
 
     for (;;) {
         asm volatile ("sti; hlt");

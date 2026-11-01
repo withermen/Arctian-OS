@@ -107,11 +107,14 @@ static uint64_t aml_int(const uint8_t **pp, const uint8_t *end) {
     return v;
 }
 
-/* DSDT icinde "_S5_" / "_S3_" paketini bulup SLP_TYP degerlerini dondurur. */
-static void dsdt_slp(const uint8_t *dsdt, const char *name, uint8_t *a, uint8_t *b) {
-    if (!dsdt) return;
+/* DSDT icinde "_S5_" / "_S3_" paketini bulup SLP_TYP degerlerini yazar.
+ * Donus: 1 = paket bulundu, 0 = bulunamadi (bulunmayan bir devletin
+ * SLP_TYP'i varsayilanla uyutulamaz; yoksa S3 sanilan bir yazma makineyi
+ * kapatabilir). */
+static int dsdt_slp(const uint8_t *dsdt, const char *name, uint8_t *a, uint8_t *b) {
+    if (!dsdt) return 0;
     uint32_t len = rd32(dsdt + 4);
-    if (len < 36 || len > (16u << 20)) return;
+    if (len < 36 || len > (16u << 20)) return 0;
     const uint8_t *end = dsdt + len;
     for (const uint8_t *p = dsdt + 36; p + 6 < end; p++) {
         if (p[0] != (uint8_t)name[0] || p[1] != (uint8_t)name[1] ||
@@ -120,16 +123,17 @@ static void dsdt_slp(const uint8_t *dsdt, const char *name, uint8_t *a, uint8_t 
         if (*q != 0x12) continue;          /* PackageOp bekleniyor */
         uint32_t plen;
         q = aml_pkglen(q + 1, &plen);
-        if (q >= end) return;
+        if (q >= end) return 0;
         uint8_t nelem = *q++;              /* NumElements */
-        if (nelem < 1) return;
+        if (nelem < 1) return 0;
         uint64_t v0 = aml_int(&q, end);
         uint64_t v1 = v0;
         if (nelem >= 2) v1 = aml_int(&q, end);
         *a = (uint8_t)(v0 & 0x07u);
         *b = (uint8_t)(v1 & 0x07u);
-        return;
+        return 1;
     }
+    return 0;
 }
 
 void acpi_init(void) {
@@ -200,7 +204,7 @@ void acpi_init(void) {
         dsdt = acpi_ensure((uint64_t)(uintptr_t)dsdt, rd32(dsdt + 4));
         g_acpi.has_dsdt = 1;
         dsdt_slp(dsdt, "_S5_", &g_acpi.slp_typ_s5a, &g_acpi.slp_typ_s5b);
-        dsdt_slp(dsdt, "_S3_", &g_acpi.slp_typ_s3a, &g_acpi.slp_typ_s3b);
+        g_acpi.has_s3 = dsdt_slp(dsdt, "_S3_", &g_acpi.slp_typ_s3a, &g_acpi.slp_typ_s3b);
     }
 }
 
@@ -237,8 +241,15 @@ void acpi_shutdown(void) {
     for (;;) { asm volatile("cli"); asm volatile("hlt"); }
 }
 
+/* DSDT'te _S3_ gorulmediyse SLP_TYP degerleri varsayilanlidir; boyle bir
+ * makineye SLP_EN yazmak uyku degil kapatma demek olabilir. Bu yuzden
+ * yalnizca gercekten _S3_ bulunan platformlarda yazilir.
+ * Donus: 1 = istek yazildi (gercek uykuda buraya hic donulmez),
+ *         0 = bu makine uyutulamadi; cagiran bos-beklemeye dusmeli. */
 int acpi_enter_sleep(void) {
-    if (!g_acpi.present || !g_acpi.pm1a_cnt) return 0;
+    if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
+    /* S3 ile S5 ayni tipteyse yazilan komut makineyi kapatir; uyku sanma. */
+    if (g_acpi.slp_typ_s3a == g_acpi.slp_typ_s5a) return 0;
     acpi_enable_sci();
     uint16_t va = (uint16_t)(((uint16_t)g_acpi.slp_typ_s3a & 0x07u) << 10) | 0x2000u;
     outw(g_acpi.pm1a_cnt, va);
@@ -246,7 +257,17 @@ int acpi_enter_sleep(void) {
         uint16_t vb = (uint16_t)(((uint16_t)g_acpi.slp_typ_s3b & 0x07u) << 10) | 0x2000u;
         outw(g_acpi.pm1b_cnt, vb);
     }
+    /* Platform istege uyduysa CPU burada durur; uyduysa burasi gorme
+     * ihtimalimiz yok. Kisa bir bos beklemeden sonra donuyoruz ki cagiran
+     * (system_sleep) hareketsizlige dusup tus/fare ile uyanabilsin. */
+    for (int i = 0; i < 100000; i++) io_wait();
     return 1;
+}
+
+/* Uyku state'i hakkinda bilgi (panel/selftest icin). */
+int acpi_sleep_supported(void) {
+    if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
+    return g_acpi.slp_typ_s3a != g_acpi.slp_typ_s5a;
 }
 
 /* ------------------------------------------------------------------ */
@@ -346,11 +367,12 @@ void acpi_power_poll(acpi_power_t *out) {
 
 int acpi_selftest(void) {
     serial_printf("[acpi] present=%d oem=%s pm1a_cnt=0x%x smi=0x%x "
-                  "S5=%u/%u S3=%u/%u dsdt=%d\n",
+                  "S5=%u/%u S3=%u/%u s3_var=%d dsdt=%d\n",
                   g_acpi.present, g_acpi.oem_id[0] ? g_acpi.oem_id : "-",
                   g_acpi.pm1a_cnt, g_acpi.smi_cmd,
                   g_acpi.slp_typ_s5a, g_acpi.slp_typ_s5b,
-                  g_acpi.slp_typ_s3a, g_acpi.slp_typ_s3b, g_acpi.has_dsdt);
+                  g_acpi.slp_typ_s3a, g_acpi.slp_typ_s3b, g_acpi.has_s3,
+                  g_acpi.has_dsdt);
     smbus_probe();
     acpi_power_t p;
     acpi_power_poll(&p);
