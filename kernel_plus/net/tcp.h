@@ -63,6 +63,9 @@ typedef struct {
     uint32_t recv_buf_tail;
     bool     is_client;
     int8_t   child_id;        /* dinleyici: bekleyen baglanti (-1 = yok) */
+    uint16_t peer_window;     /* karsi tarafin son bildirdigi pencere (bayt) */
+    uint32_t idle_ms;         /* son aktivite (clock_ms kesiti): bekleme
+                               * durumlarinda slot toplama icin */
 } tcp_connection_t;
 
 void tcp_init(void);
@@ -72,6 +75,7 @@ int  tcp_accept(int listen_id);
 bool tcp_send(int conn_id, const uint8_t *data, uint16_t length);
 int  tcp_receive(int conn_id, uint8_t *buf, uint16_t buf_size);
 bool tcp_close(int conn_id);
+void tcp_abort(int conn_id);   /* el sikismasiz/zamanasimli slotu serit */
 int  tcp_state(int conn_id);
 void tcp_poll(void);
 bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t length);

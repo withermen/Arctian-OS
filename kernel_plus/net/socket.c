@@ -224,8 +224,11 @@ int ksock_close(int fd) {
 
     if (s->type == KSOCK_DGRAM && s->local_port)
         udp_unbind(s->local_port, ksock_udp_dispatch);
-    if (s->type == KSOCK_STREAM && s->conn >= 0)
-        tcp_close(s->conn);
+    if (s->type == KSOCK_STREAM && s->conn >= 0) {
+        /* tcp_close yarim durumlarda (ornegin cift kapanis) islemiyordu;
+         * slot o zaman siziyordu. Islemiyorsa slotu zorla serit. */
+        if (!tcp_close(s->conn)) tcp_abort(s->conn);
+    }
 
     memset(s, 0, sizeof(*s));
     s->state = KSOCK_FREE;
