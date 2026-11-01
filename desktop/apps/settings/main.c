@@ -324,8 +324,26 @@ static void s_inst_del_cb(lv_event_t *e) {
     s_page(g_page);
 }
 
+/* Madde 45: DHCP tamamlanana kadar masaüstünün tamamı donuyordu cunku
+ * autoconfig UI olayinin icinde senkron calisiyordu. Gorev arka plan
+ * is parcasina verilir; bittiginde sayfa UI'da yeniden cizilir. */
+static void s_dhcp_work(void *u) {
+    (void)u;
+    if (s_asi && s_asi->net && s_asi->net->autoconfig) s_asi->net->autoconfig();
+}
+
+static void s_dhcp_done(int status, void *user) {
+    (void)status; (void)user;
+    if (g_page == 3) s_page(3);
+}
+
 static void s_dhcp_cb(lv_event_t *e) {
     (void)e;
+    if (s_asi && s_asi->net && s_asi->net->submit &&
+        !(s_asi->net->busy && s_asi->net->busy()) &&
+        s_asi->net->submit(s_dhcp_work, s_dhcp_done, 0) == 0)
+        return;   /* sayfa is bitince yenilenecek */
+    /* Arka plan parasi musait degil: eski haliyle senkron dene. */
     if (s_asi && s_asi->net && s_asi->net->autoconfig) s_asi->net->autoconfig();
     s_page(3);
 }

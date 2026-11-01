@@ -159,8 +159,66 @@ void qc_osd(const char *label, int pct) {
 /* ------------------------------------------------------------------ */
 /* Ekran goruntusu (BMP -> AFS koku, masaustunde gorunur)             */
 /* ------------------------------------------------------------------ */
+/* Madde 45: 2-6 MB'lik BMP yazimi UI olayinin icinde yapiliyordu; AFS
+ * yavas oldugunda masaustu saniyelerce donuyordu. Goruntu artik once
+ * bellek anlik gorusune aliniyor (hizli kopya, ekran o an doner), dosya
+ * yazimi arka plan gorevine devredilir. Yazim sirasinda ekranin
+ * degismesi goruntuyu bozmaz cunku kopya uzerinden yazilir. */
+typedef struct {
+    void     *fh;
+    uint32_t *snap;          /* w*h piksellik framebuffer kopyasi */
+    int       w, h;
+    char      name[24];
+} qc_shot_t;
+static qc_shot_t s_shot;
+static int       s_shot_busy;
+
+static void qc_shot_work(void *u) {
+    qc_shot_t *s = (qc_shot_t *)u;
+    int w = s->w, h = s->h;
+    int stride = ((w * 3 + 3) / 4) * 4;
+    uint32_t fsz = 54 + (uint32_t)stride * (uint32_t)h;
+    unsigned char hdr[54];
+    for (int i = 0; i < 54; i++) hdr[i] = 0;
+    hdr[0] = 'B'; hdr[1] = 'M';
+    hdr[2] = (unsigned char)(fsz); hdr[3] = (unsigned char)(fsz >> 8);
+    hdr[4] = (unsigned char)(fsz >> 16); hdr[5] = (unsigned char)(fsz >> 24);
+    hdr[10] = 54;                       /* piksel verisi ofseti */
+    hdr[14] = 40;                       /* DIB baslik boyutu */
+    hdr[18] = (unsigned char)(w); hdr[19] = (unsigned char)(w >> 8);
+    hdr[22] = (unsigned char)(h); hdr[23] = (unsigned char)(h >> 8);
+    hdr[26] = 1;                        /* planlar */
+    hdr[28] = 24;                       /* bit/piksel */
+    if (g_asi->fs->write) g_asi->fs->write(s->fh, hdr, 54);
+
+    static unsigned char row[3 * 2560 + 4];
+    for (int y = h - 1; y >= 0; y--) {
+        const uint32_t *src = s->snap + (uint32_t)y * (uint32_t)w;
+        int k = 0;
+        for (int x = 0; x < w; x++) {
+            uint32_t p = src[x];
+            row[k++] = (unsigned char)(p & 0xFF);          /* B */
+            row[k++] = (unsigned char)((p >> 8) & 0xFF);   /* G */
+            row[k++] = (unsigned char)((p >> 16) & 0xFF);  /* R */
+        }
+        while (k % 4) row[k++] = 0;
+        if (g_asi->fs->write) g_asi->fs->write(s->fh, row, (uint32_t)k);
+    }
+}
+
+static void qc_shot_done(int status, void *u) {
+    (void)status;
+    qc_shot_t *s = (qc_shot_t *)u;
+    if (s->snap && g_asi->mem && g_asi->mem->free) g_asi->mem->free(s->snap);
+    s->snap = 0;
+    s_shot_busy = 0;
+    qc_osd("Ekran goruntusu", 100);
+    arctian_notify("Ekran goruntusu", s->name);
+}
+
 static void qc_screenshot(void) {
     if (!g_asi || !g_asi->gfx || !g_asi->fs || !g_asi->fs->create) return;
+    if (s_shot_busy) { qc_osd("Goruntu hazirlaniyor", 0); return; }
     uint32_t *fb = g_asi->gfx->framebuffer();
     int w = g_asi->gfx->width(), h = g_asi->gfx->height();
     if (!fb || w < 1 || h < 1 || w > 2560 || h > 2560) return;
@@ -187,37 +245,32 @@ static void qc_screenshot(void) {
     }
     if (!fh) { qc_osd("Ekran goruntusu", 0); return; }
 
-    /* BMP: 54 bayt baslik + BGR satirlar (4 bayt tamponlu, asagidan yukari) */
-    int stride = ((w * 3 + 3) / 4) * 4;
-    uint32_t fsz = 54 + (uint32_t)stride * (uint32_t)h;
-    unsigned char hdr[54];
-    for (int i = 0; i < 54; i++) hdr[i] = 0;
-    hdr[0] = 'B'; hdr[1] = 'M';
-    hdr[2] = (unsigned char)(fsz); hdr[3] = (unsigned char)(fsz >> 8);
-    hdr[4] = (unsigned char)(fsz >> 16); hdr[5] = (unsigned char)(fsz >> 24);
-    hdr[10] = 54;                       /* piksel verisi ofseti */
-    hdr[14] = 40;                       /* DIB baslik boyutu */
-    hdr[18] = (unsigned char)(w); hdr[19] = (unsigned char)(w >> 8);
-    hdr[22] = (unsigned char)(h); hdr[23] = (unsigned char)(h >> 8);
-    hdr[26] = 1;                        /* planlar */
-    hdr[28] = 24;                       /* bit/piksel */
-    g_asi->fs->write(fh, hdr, 54);
+    /* framebuffer kopyasi: ~3 MB'lik düz aktarma, milisaniye sürer. */
+    uint32_t npix = (uint32_t)w * (uint32_t)h;
+    uint32_t *snap = 0;
+    if (g_asi->mem && g_asi->mem->alloc)
+        snap = (uint32_t *)g_asi->mem->alloc(npix * 4u);
+    if (!snap) { qc_osd("Ekran goruntusu", 0); return; }
+    for (uint32_t i = 0; i < npix; i++) snap[i] = fb[i];
 
-    static unsigned char row[3 * 2560 + 4];
-    for (int y = h - 1; y >= 0; y--) {
-        const uint32_t *src = fb + (uint32_t)y * (uint32_t)w;
-        int k = 0;
-        for (int x = 0; x < w; x++) {
-            uint32_t p = src[x];
-            row[k++] = (unsigned char)(p & 0xFF);          /* B */
-            row[k++] = (unsigned char)((p >> 8) & 0xFF);   /* G */
-            row[k++] = (unsigned char)((p >> 16) & 0xFF);  /* R */
-        }
-        while (k % 4) row[k++] = 0;
-        g_asi->fs->write(fh, row, (uint32_t)k);
+    s_shot.fh = fh;
+    s_shot.snap = snap;
+    s_shot.w = w;
+    s_shot.h = h;
+    int l = 0;
+    while (name[l] && l < (int)sizeof(s_shot.name) - 1) { s_shot.name[l] = name[l]; l++; }
+    s_shot.name[l] = 0;
+
+    if (g_asi->net && g_asi->net->submit &&
+        !(g_asi->net->busy && g_asi->net->busy()) &&
+        g_asi->net->submit(qc_shot_work, qc_shot_done, &s_shot) == 0) {
+        s_shot_busy = 1;
+        return;
     }
-    qc_osd("Ekran goruntusu", 100);
-    arctian_notify("Ekran goruntusu", name);
+    /* Arka plan parasi mesgul: eski davranisla senkron yaz (donar ama
+     * kaybetmez); kopya zaten alindigi icin goruntu tutarli kalir. */
+    qc_shot_work(&s_shot);
+    qc_shot_done(0, &s_shot);
 }
 
 
