@@ -47,11 +47,14 @@ static void arp_cache_add(const uint8_t ip[4], const uint8_t mac[6]) {
 }
 
 bool arp_resolve(const uint8_t ip[4], uint8_t mac_out[6]) {
+    /* Bekleme sureleri kaydirarak karsilastir: clock_ms 32 bite siginca
+     * (~49 gun) dogrudan cikarma yanlis sonuc verir. */
+    uint32_t now = arp_now();
     for (int i = 0; i < ARP_CACHE_SIZE; i++) {
         if (arp_cache[i].valid &&
             ip[0] == arp_cache[i].ip[0] && ip[1] == arp_cache[i].ip[1] &&
             ip[2] == arp_cache[i].ip[2] && ip[3] == arp_cache[i].ip[3]) {
-            if (arp_now() - arp_cache[i].timestamp < ARP_CACHE_TIMEOUT) {
+            if ((int32_t)(now - arp_cache[i].timestamp) < (int32_t)ARP_CACHE_TIMEOUT) {
                 for (int j = 0; j < 6; j++) mac_out[j] = arp_cache[i].mac[j];
                 return true;
             }
@@ -83,10 +86,17 @@ bool arp_resolve(const uint8_t ip[4], uint8_t mac_out[6]) {
 
     /* Yanit gelene kadar RX'i yokla (aksi halde kuyruktaki yanit islenmez).
      * Bekleme pause spin'i degil hlt ile yapilir: CPU yanit gelene kadar
-     * bosuna yanip kavurmaz, timer kesintisiyle (1 ms) uyaniip yoklar. */
-    for (int attempt = 0; attempt < 50; attempt++) {
+     * bosuna yanip kavurmaz, timer kesintisiyle (1 ms) uyaniip yoklar.
+     * poll'un icinden cagrildik (ornek: bir protokol isleyicisi sirasinda
+     * gonderim) tam poll kilitli kalir; o zaman yalnizca ARP cercevelerini
+     * isleyen sinirli bosaltmaya duseriz - cozumleme yine tamamlanir
+     * (madde 34). */
+    int attempts = ipv4_poll_nested() ? 10 : 50;  /* poll icindeyken
+                                                   * coklu bekleme yapma */
+    for (int attempt = 0; attempt < attempts; attempt++) {
         clock_sleep_ms(1);
         ipv4_poll();
+        ipv4_poll_arp_only();
         for (int i = 0; i < ARP_CACHE_SIZE; i++) {
             if (arp_cache[i].valid &&
                 ip[0] == arp_cache[i].ip[0] && ip[1] == arp_cache[i].ip[1] &&

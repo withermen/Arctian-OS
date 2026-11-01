@@ -35,6 +35,8 @@ bool ipv4_receive(const uint8_t *packet, uint16_t length,
                   uint8_t *protocol_out, uint8_t *src_ip_out,
                   const uint8_t **payload_out, uint16_t *payload_len_out);
 void ipv4_poll(void);
+void ipv4_poll_arp_only(void);   /* poll icinden tetiklenen ARP icin sinirli bosaltma */
+int  ipv4_poll_nested(void);     /* 1: dis bir ipv4_poll sirasiyla mesgul */
 void ipv4_set_default_gateway(const uint8_t gw[4]);
 void ipv4_config_dhcp(void);
 

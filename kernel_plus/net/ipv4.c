@@ -211,13 +211,21 @@ static bool l4_checksum_ok(const uint8_t *iph, const uint8_t *l4,
 }
 
 /* NIC'ten bekleyen tum kareleri bosaltir ve katmanlara dagitir.
- * Yeniden girise (recursion) karsi korumalidir; cagri sakinleri bu fonksiyon
- * icinden tekrar cagrilabilir (ornegin ARP cozumlemesi). */
-void ipv4_poll(void) {
-    static bool in_poll = false;
-    if (in_poll) return;
-    in_poll = true;
+ * Yeniden giris atomik test-isset ile karsilanir: eski surumde flag
+ * okuma-yazma ile yapiliyordu, ic cagrinin erkenden temizledigi flag
+ * uzerinden poll tekrar girise aciliyordu (madde 34). */
+static volatile uint32_t s_poll_busy;
 
+static int poll_enter(void) {
+    uint32_t busy;
+    __asm__ volatile("lock xchgl %0, %1"
+                     : "=r"(busy), "+m"(s_poll_busy) : "0"(1u) : "memory");
+    return busy == 0;
+}
+
+int ipv4_poll_nested(void) { return s_poll_busy != 0; }
+
+static void ipv4_drain(int handle_ip) {
     for (int n = 0; n < 64; n++) {
         uint8_t rx_buf[NET_PKT_MAX];
         uint16_t rx_len = sizeof(rx_buf);
@@ -229,6 +237,8 @@ void ipv4_poll(void) {
             arp_receive(rx_buf, rx_len);
             continue;
         }
+        if (!handle_ip) continue;   /* ic-ice ARP bosaltmasi: katmanlara
+                                     * dokunma, TCP/UDP kuyrugunu karistir */
         if (ether_type != 0x0800) continue;
 
         uint8_t protocol;
@@ -258,7 +268,24 @@ void ipv4_poll(void) {
         else if (protocol == IPV4_PROTO_UDP)
             udp_dispatch(src_ip, payload, payload_len);
     }
+}
 
-    in_poll = false;
+void ipv4_poll(void) {
+    if (!poll_enter()) return;
+    ipv4_drain(1);
+    s_poll_busy = 0;
+    __asm__ volatile("" ::: "memory");
     net_task_yield_point();
+}
+
+/* ipv4_poll icinden tetiklenen ARP cozumlemesi icin: yalnizca ARP
+ * cercevelerini isler (onekbellek guncellenir, isteklere yanit).
+ * TCP/UDP cerceveleri bu kisitli modda dusurulur; onlar dis dongunun
+ * sonraki turunda yine karsisina cikacaktir. Boylece poll sirasinda
+ * ARP cozumlemek imkansiz olmaktan cikar (madde 34). */
+void ipv4_poll_arp_only(void) {
+    if (!poll_enter()) return;      /* gercekten ic-ice: bekleme yok */
+    ipv4_drain(0);
+    s_poll_busy = 0;
+    __asm__ volatile("" ::: "memory");
 }
