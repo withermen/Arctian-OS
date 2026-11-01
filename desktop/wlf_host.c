@@ -24,10 +24,6 @@ typedef struct {
     char      text[WOLF_MAX_TEXT];
 } wolf_slot_t;
 
-static wolf_slot_t  s_slot[WOLF_MAX_WIDGETS];
-static int          s_n;
-static lv_obj_t    *s_root;
-static lv_obj_t    *s_body;
 static asi_t       *s_asi;
 static wolf_api_t   s_api;
 static int          s_api_ready;
@@ -53,9 +49,102 @@ typedef struct {
 } wolf_ev_t;
 
 #define WOLF_MAX_EV 128
-static wolf_ev_t s_ev_click[WOLF_MAX_EV];
-static wolf_ev_t s_ev_change[WOLF_MAX_EV];
-static int       s_ev_click_n, s_ev_change_n;
+
+/* ---- Madde 37: oturum (session) duzeni ----
+ * Eskiden her sey tek bir kuresel durumdaydi; ikinci bir .wlf penceresi
+ * acilinca wlf_host_reset() ilk uygulamanin widget slotlarini, olay
+ * kayitlarini ve zamanlayicilarini sifirlardi; tiklamalar wid cakismasiyla
+ * yanlis uygulamaya giderdi. Artik her pencere kendi oturumunu tasir:
+ * widget kimligi = oturum*WOLF_MAX_WIDGETS + slot (pencereler arasi wid
+ * cakismasi olmaz), timer kimligi = oturum*WOLF_MAX_TIMER + slot.
+ * ID almayan API cagrilari (root, win_title, fs, timer...) "simdiki
+ * oturum"a isler; bu, API'nin dogal kullanimindan (uygulama kendi
+ * olay/zamanlayici baglaminda) dogru belirlenir. */
+#define WOLF_MAX_LINE 8
+#define WOLF_LINE_MAXPTS 512
+#define WOLF_MAX_CANVAS 8
+#define WOLF_CANVAS_MAXPX (512 * 512)
+#define WOLF_MAX_TIMER 16
+#define WOLF_MAX_TRANS 64
+#define WOLF_MAX_ANIMS 48
+
+typedef struct {
+    lv_obj_t          *obj;
+    lv_point_precise_t pts[WOLF_LINE_MAXPTS];
+    int                n;
+    int                used;
+} wolf_line_t;
+
+typedef struct {
+    lv_obj_t *cv;
+    uint32_t *buf;
+    int       w, h;
+    int       used;
+} wolf_cv_t;
+
+typedef struct {
+    lv_timer_t   *t;
+    wolf_event_fn cb;
+    void         *user;
+    int           used;
+} wolf_timer_t;
+
+/* lv_style_transition_dsc_t + props[] yasamali olmali; dsc props'u
+ * KOPYALAMAZ, isaretcide kalir. Bu yuzden oturumlu arena'da tutulur. */
+typedef struct {
+    lv_style_transition_dsc_t dsc;
+    lv_style_prop_t           props[24];
+} wolf_trans_t;
+
+typedef struct wolf_sess {
+    int      idx;                 /* kendisi (s_sess dizini) */
+    int      dead;                /* govde silindi, slot bosaltildi */
+    uint32_t birth;               /* oturum sirasi (yer kapma icin) */
+    lv_obj_t *body;
+    lv_obj_t *root;
+    wolf_slot_t slot[WOLF_MAX_WIDGETS];
+    int       n;
+    wolf_ev_t ev_click[WOLF_MAX_EV];
+    int       ev_click_n;
+    wolf_ev_t ev_change[WOLF_MAX_EV];
+    int       ev_change_n;
+    wolf_line_t line[WOLF_MAX_LINE];
+    wolf_cv_t   cv[WOLF_MAX_CANVAS];
+    wolf_timer_t timer[WOLF_MAX_TIMER];
+    wolf_trans_t trans[WOLF_MAX_TRANS];
+    int       trans_n;
+    lv_obj_t *anim_objs[WOLF_MAX_ANIMS];   /* anim_in/anim_pulse nesneleri */
+    int       anim_n;
+} wolf_sess_t;
+
+#define WOLF_MAX_SESS 4
+static wolf_sess_t s_sess[WOLF_MAX_SESS];
+static wolf_sess_t *s_cur = &s_sess[0];
+static uint32_t    s_birth_ctr;
+
+/* Eski tek-oturum kodunun okunabilmesi icin makro takma adlar. */
+#define s_slot     s_cur->slot
+#define s_n        s_cur->n
+#define s_root     s_cur->root
+#define s_body     s_cur->body
+#define s_ev_click     s_cur->ev_click
+#define s_ev_click_n   s_cur->ev_click_n
+#define s_ev_change    s_cur->ev_change
+#define s_ev_change_n  s_cur->ev_change_n
+#define s_line     s_cur->line
+#define s_cv       s_cur->cv
+#define s_timer    s_cur->timer
+#define s_trans    s_cur->trans
+#define s_trans_n  s_cur->trans_n
+
+static void sess_release(wolf_sess_t *s);
+static void audio_release(void);
+
+int  wlf_host_cur_sess(void) { return s_cur ? s_cur->idx : 0; }
+void wlf_host_set_sess(int sess) {
+    if (sess >= 0 && sess < WOLF_MAX_SESS && !s_sess[sess].dead)
+        s_cur = &s_sess[sess];
+}
 
 /* ------------------------------------------------------------------ */
 /* Yardimcilar                                                         */
@@ -82,18 +171,21 @@ static void list_row_cb(lv_event_t *e);
 static void anim_release_obj(lv_obj_t *o); /* v2 animasyon temizligi */
 static void anim_opa_cb(void *var, int32_t v);
 static void anim_ty_cb(void *var, int32_t v);
-static int s_trans_n;                   /* gecis arenasi doluluk sayaci */
 
-
+/* widget kimligi oturum kodludur: her pencere kendi slot tablosunu kullanir
+ * ve kimlikler arasi cakisma olmaz (madde 37). */
 static wolf_slot_t *slot_of(wolf_id id) {
-    if (id <= 0 || id > WOLF_MAX_WIDGETS) return 0;
-    wolf_slot_t *s = &s_slot[id - 1];
+    if (id <= 0) return 0;
+    int sess = (int)(((uint32_t)id - 1u) / WOLF_MAX_WIDGETS);
+    int i    = (int)(((uint32_t)id - 1u) % WOLF_MAX_WIDGETS);
+    if (sess < 0 || sess >= WOLF_MAX_SESS || s_sess[sess].dead) return 0;
+    wolf_slot_t *s = &s_sess[sess].slot[i];
     if (!s->used || !s->obj) return 0;
     return s;
 }
 
 static wolf_id slot_new(lv_obj_t *obj, int kind) {
-    if (!obj) return 0;
+    if (!obj || !s_cur) return 0;
     for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
         if (!s_slot[i].used) {
             s_slot[i].used = 1;
@@ -101,7 +193,7 @@ static wolf_id slot_new(lv_obj_t *obj, int kind) {
             s_slot[i].kind = kind;
             s_slot[i].text[0] = 0;
             if (i + 1 > s_n) s_n = i + 1;
-            return i + 1;
+            return (wolf_id)(s_cur->idx * WOLF_MAX_WIDGETS + i + 1);
         }
     }
     lv_obj_delete(obj);
@@ -128,7 +220,10 @@ static lv_obj_t *mk_box(lv_obj_t *parent, int x, int y, int w, int h, int click)
 }
 
 static void ev_click_cb(lv_event_t *e) {
-    int wid = (int)(intptr_t)lv_event_get_user_data(e);
+    wolf_sess_t *sess = (wolf_sess_t *)lv_event_get_user_data(e);
+    if (!sess || sess->dead) return;
+    s_cur = sess;                    /* geri cagri dogru oturumda kosar */
+    int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     for (int i = 0; i < s_ev_click_n; i++) {
         if (s_ev_click[i].wid == wid && s_ev_click[i].cb) {
             s_ev_click[i].cb(wid, s_ev_click[i].user);
@@ -138,7 +233,10 @@ static void ev_click_cb(lv_event_t *e) {
 }
 
 static void ev_change_cb(lv_event_t *e) {
-    int wid = (int)(intptr_t)lv_event_get_user_data(e);
+    wolf_sess_t *sess = (wolf_sess_t *)lv_event_get_user_data(e);
+    if (!sess || sess->dead) return;
+    s_cur = sess;
+    int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     for (int i = 0; i < s_ev_change_n; i++) {
         if (s_ev_change[i].wid == wid && s_ev_change[i].cb) {
             s_ev_change[i].cb(wid, s_ev_change[i].user);
@@ -152,8 +250,9 @@ static void ev_change_cb(lv_event_t *e) {
 /* ------------------------------------------------------------------ */
 
 static wolf_id h_root(void) {
-    if (!s_root) return 0;
-    return 1;   /* kok her zaman 1 (slot 0) */
+    if (!s_cur || !s_cur->root || s_cur->dead) return 0;
+    /* kok her zaman oturumun 1. slotu */
+    return (wolf_id)(s_cur->idx * WOLF_MAX_WIDGETS + 1);
 }
 
 static void h_win_title(const char *title) {
@@ -232,7 +331,8 @@ static wolf_id h_input(wolf_id p, int x, int y, int w, int h, const char *ph) {
     lv_obj_set_style_border_width(t, 1, 0);
     lv_obj_set_style_border_color(t, lv_color_hex(ADL_BORDER), 0);
     wolf_id id = slot_new(t, 4);
-    lv_obj_add_event_cb(t, ev_change_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)id);
+    if (id) lv_obj_set_user_data(t, (void *)(intptr_t)id);
+    lv_obj_add_event_cb(t, ev_change_cb, LV_EVENT_VALUE_CHANGED, s_cur);
     return id;
 }
 
@@ -303,7 +403,8 @@ static wolf_id h_slider(wolf_id p, int x, int y, int w, int h, int pct) {
     lv_obj_set_style_bg_color(s, lv_color_hex(ADL_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s, lv_color_hex(ADL_ACCENT), LV_PART_KNOB);
     wolf_id id = slot_new(s, 8);
-    lv_obj_add_event_cb(s, ev_change_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)id);
+    if (id) lv_obj_set_user_data(s, (void *)(intptr_t)id);
+    lv_obj_add_event_cb(s, ev_change_cb, LV_EVENT_VALUE_CHANGED, s_cur);
     return id;
 }
 
@@ -325,7 +426,8 @@ static wolf_id h_checkbox(wolf_id p, int x, int y, const char *text, int checked
     lv_obj_set_style_text_color(c, lv_color_hex(ADL_TEXT), 0);
     lv_obj_set_style_text_font(c, adl_font(), 0);
     wolf_id id = slot_new(c, 10);
-    lv_obj_add_event_cb(c, ev_change_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)id);
+    if (id) lv_obj_set_user_data(c, (void *)(intptr_t)id);
+    lv_obj_add_event_cb(c, ev_change_cb, LV_EVENT_VALUE_CHANGED, s_cur);
     return id;
 }
 
@@ -461,8 +563,8 @@ static void h_on_click(wolf_id id, wolf_event_fn cb, void *user) {
          * kontrolu ile ayirt edilemez; tek-baglanti kayit tablosu ile
          * saglanir (cift tiklama yaniti boylece olusmaz). */
         lv_obj_add_flag(s->obj, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(s->obj, ev_click_cb, LV_EVENT_CLICKED,
-                            (void *)(intptr_t)id);
+        lv_obj_set_user_data(s->obj, (void *)(intptr_t)id);
+        lv_obj_add_event_cb(s->obj, ev_click_cb, LV_EVENT_CLICKED, s_cur);
     }
     s_ev_click[found].cb = cb;
     s_ev_click[found].user = user;
@@ -494,6 +596,7 @@ static void list_row_cb(lv_event_t *e) {
     lv_obj_t *row = lv_event_get_target(e);
     wolf_slot_t *s = slot_of(id);
     if (!s || !row) return;
+    s_cur = &s_sess[((uint32_t)id - 1u) / WOLF_MAX_WIDGETS];
     int idx = (int)lv_obj_get_index(row);
     s->text[0] = 's'; s->text[1] = 'e'; s->text[2] = 'l'; s->text[3] = ':';
     s->text[4] = (char)('0' + (idx % 10));
@@ -937,28 +1040,26 @@ static void h_style(wolf_id id, int prop, int value, int flags) {
 /* ------------------------------------------------------------------ */
 
 #define WOLF_MAX_LINE   12
-#define WOLF_LINE_MAXPTS 512
-
-typedef struct {
-    lv_obj_t          *obj;
-    lv_point_precise_t pts[WOLF_LINE_MAXPTS];
-    int                n;
-    int                used;
-} wolf_line_t;
-
-static wolf_line_t s_line[WOLF_MAX_LINE];
-
-static void line_del_cb(lv_event_t *e) {
-    int k = (int)(intptr_t)lv_event_get_user_data(e) - 1;
-    if (k >= 0 && k < WOLF_MAX_LINE) { s_line[k].used = 0; s_line[k].n = 0; }
-}
-
 static wolf_line_t *line_entry(wolf_id id) {
     wolf_slot_t *s = slot_of(id);
     if (!s || s->kind != 11) return 0;
+    int sess = (int)(((uint32_t)id - 1u) / WOLF_MAX_WIDGETS);
     for (int i = 0; i < WOLF_MAX_LINE; i++)
-        if (s_line[i].used && s_line[i].obj == s->obj) return &s_line[i];
+        if (s_sess[sess].line[i].used && s_sess[sess].line[i].obj == s->obj)
+            return &s_sess[sess].line[i];
     return 0;
+}
+
+/* user_data: (sess*WOLF_MAX_LINE + k + 1) — satir silinince dogru
+ * oturumun tablosu temizlenir. */
+static void line_del_cb(lv_event_t *e) {
+    int code = (int)(intptr_t)lv_event_get_user_data(e) - 1;
+    int sess = code / WOLF_MAX_LINE, k = code % WOLF_MAX_LINE;
+    if (sess < 0 || sess >= WOLF_MAX_SESS) return;
+    if (k >= 0 && k < WOLF_MAX_LINE) {
+        s_sess[sess].line[k].used = 0;
+        s_sess[sess].line[k].n = 0;
+    }
 }
 
 static wolf_id h_line(wolf_id p, int x, int y) {
@@ -973,7 +1074,7 @@ static wolf_id h_line(wolf_id p, int x, int y) {
     s_line[k].n = 0;
     lv_line_set_points(l, s_line[k].pts, 0);
     lv_obj_add_event_cb(l, line_del_cb, LV_EVENT_DELETE,
-                        (void *)(intptr_t)(k + 1));
+                        (void *)(intptr_t)(s_cur->idx * WOLF_MAX_LINE + k + 1));
     return slot_new(l, 11);
 }
 
@@ -1019,32 +1120,26 @@ static void h_arc_set(wolf_id id, int start, int end, int rot) {
 /* ABI v2: piksel tuvali (ARGB8888 = 0xAARRGGBB)                       */
 /* ------------------------------------------------------------------ */
 
-#define WOLF_MAX_CANVAS   8
-#define WOLF_CANVAS_MAXPX (512 * 512)
-
-typedef struct {
-    lv_obj_t *cv;
-    uint32_t *buf;
-    int       w, h;
-    int       used;
-} wolf_cv_t;
-
-static wolf_cv_t s_cv[WOLF_MAX_CANVAS];
-
-static void cv_del_cb(lv_event_t *e) {
-    int k = (int)(intptr_t)lv_event_get_user_data(e) - 1;
-    if (k < 0 || k >= WOLF_MAX_CANVAS || !s_cv[k].used) return;
-    if (s_cv[k].buf && s_asi && s_asi->mem) s_asi->mem->free(s_cv[k].buf);
-    s_cv[k].used = 0;
-    s_cv[k].buf = 0;
-}
-
 static wolf_cv_t *cv_of(wolf_id id) {
     wolf_slot_t *s = slot_of(id);
     if (!s || s->kind != 13) return 0;
+    int sess = (int)(((uint32_t)id - 1u) / WOLF_MAX_WIDGETS);
     for (int i = 0; i < WOLF_MAX_CANVAS; i++)
-        if (s_cv[i].used && s_cv[i].cv == s->obj) return &s_cv[i];
+        if (s_sess[sess].cv[i].used && s_sess[sess].cv[i].cv == s->obj)
+            return &s_sess[sess].cv[i];
     return 0;
+}
+
+/* user_data: (sess*WOLF_MAX_CANVAS + k + 1) */
+static void cv_del_cb(lv_event_t *e) {
+    int code = (int)(intptr_t)lv_event_get_user_data(e) - 1;
+    int sess = code / WOLF_MAX_CANVAS, k = code % WOLF_MAX_CANVAS;
+    if (sess < 0 || sess >= WOLF_MAX_SESS) return;
+    wolf_cv_t *c = &s_sess[sess].cv[k];
+    if (k < 0 || k >= WOLF_MAX_CANVAS || !c->used) return;
+    if (c->buf && s_asi && s_asi->mem) s_asi->mem->free(c->buf);
+    c->used = 0;
+    c->buf = 0;
 }
 
 static wolf_id h_canvas(wolf_id p, int x, int y, int w, int h) {
@@ -1067,8 +1162,17 @@ static wolf_id h_canvas(wolf_id p, int x, int y, int w, int h) {
     s_cv[k].w = w;
     s_cv[k].h = h;
     lv_obj_add_event_cb(cv, cv_del_cb, LV_EVENT_DELETE,
-                        (void *)(intptr_t)(k + 1));
-    return slot_new(cv, 13);
+                        (void *)(intptr_t)(s_cur->idx * WOLF_MAX_CANVAS + k + 1));
+    wolf_id cid = slot_new(cv, 13);
+    if (!cid) {          /* slot havuzu dolu: tamponu burada birak */
+        lv_obj_delete(cv);   /* DELETE olayi used=1 iken calisir ve birakir */
+        if (s_cv[k].used) {
+            s_cv[k].used = 0;
+            if (s_asi && s_asi->mem) s_asi->mem->free(buf);
+        }
+        return 0;
+    }
+    return cid;
 }
 
 /* tamsayi karekok (Newton); 512'lik tuvalde guvenli */
@@ -1301,60 +1405,48 @@ static void h_audio_set_vol(int percent) {
 /* ABI v2: zamanlayici                                                 */
 /* ------------------------------------------------------------------ */
 
-#define WOLF_MAX_TIMER 16
-
-typedef struct {
-    lv_timer_t   *t;
-    wolf_event_fn cb;
-    void         *user;
-    int           used;
-} wolf_timer_t;
-
-static wolf_timer_t s_timer[WOLF_MAX_TIMER];
+/* timer kimligi oturum kodludur: sess*WOLF_MAX_TIMER + slot + 1 */
+static wolf_id timer_make_id(wolf_sess_t *s, int k) {
+    return (wolf_id)(s->idx * WOLF_MAX_TIMER + k + 1);
+}
 
 static void timer_fire(lv_timer_t *t) {
-    int k = (int)(intptr_t)lv_timer_get_user_data(t) - 1;
-    if (k < 0 || k >= WOLF_MAX_TIMER || !s_timer[k].used) return;
-    if (s_timer[k].cb) s_timer[k].cb((wolf_id)(k + 1), s_timer[k].user);
+    int code = (int)(intptr_t)lv_timer_get_user_data(t) - 1;
+    int sess = code / WOLF_MAX_TIMER, k = code % WOLF_MAX_TIMER;
+    if (sess < 0 || sess >= WOLF_MAX_SESS) return;
+    s_cur = &s_sess[sess];          /* geri cagri dogru oturumda kosar */
+    if (s_cur->dead || !s_timer[k].used) return;
+    if (s_timer[k].cb) s_timer[k].cb(timer_make_id(s_cur, k), s_timer[k].user);
 }
 
 static wolf_id h_timer(uint32_t period_ms, wolf_event_fn cb, void *user) {
-    if (!cb) return 0;
+    if (!cb || !s_cur || s_cur->dead) return 0;
     if (period_ms < 10u) period_ms = 10u;
     for (int i = 0; i < WOLF_MAX_TIMER; i++) {
         if (s_timer[i].used) continue;
         s_timer[i].used = 1;
         s_timer[i].cb = cb;
         s_timer[i].user = user;
+        int code = s_cur->idx * WOLF_MAX_TIMER + i + 1;
         s_timer[i].t = lv_timer_create(timer_fire, period_ms,
-                                       (void *)(intptr_t)(i + 1));
+                                       (void *)(intptr_t)code);
         if (!s_timer[i].t) { s_timer[i].used = 0; return 0; }
-        return (wolf_id)(i + 1);
+        return timer_make_id(s_cur, i);
     }
     return 0;
 }
 
 static void h_timer_cancel(wolf_id tid) {
-    int k = (int)tid - 1;
-    if (k < 0 || k >= WOLF_MAX_TIMER || !s_timer[k].used) return;
-    if (s_timer[k].t) lv_timer_delete(s_timer[k].t);
-    s_timer[k].t = 0;
-    s_timer[k].cb = 0;
-    s_timer[k].used = 0;
-}
-
-static void v2_session_clear(void) {
-    for (int i = 0; i < WOLF_MAX_TIMER; i++) {
-        if (s_timer[i].used && s_timer[i].t) lv_timer_delete(s_timer[i].t);
-        s_timer[i].t = 0;
-        s_timer[i].cb = 0;
-        s_timer[i].used = 0;
-    }
-    /* anim_in/anim_pulse animlari + gecis arenasi (widget agaci silinir) */
-    lv_anim_delete(NULL, anim_opa_cb);
-    lv_anim_delete(NULL, anim_ty_cb);
-    s_trans_n = 0;
-    audio_release();
+    if (tid <= 0) return;
+    int sess = (int)(((uint32_t)tid - 1u) / WOLF_MAX_TIMER);
+    int k    = (int)(((uint32_t)tid - 1u) % WOLF_MAX_TIMER);
+    if (sess < 0 || sess >= WOLF_MAX_SESS) return;
+    wolf_timer_t *e = &s_sess[sess].timer[k];
+    if (!e->used) return;
+    if (e->t) lv_timer_delete(e->t);
+    e->t = 0;
+    e->cb = 0;
+    e->used = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1376,20 +1468,13 @@ static void h_to_back(wolf_id id) {
 /* ------------------------------------------------------------------ */
 
 /* lv_style_transition_dsc_t + props[] yasamali olmali; dsc props'u
- * KOPYALAMAZ, isaretcide kalir. Bu yuzden oturumlu arena'da tutulur.
- * wlf_host_reset() arenayi bastan doldurur (widget agaci da silinir). */
-#define WOLF_MAX_TRANS 64
-typedef struct {
-    lv_style_transition_dsc_t dsc;
-    lv_style_prop_t           props[24];
-} wolf_trans_t;
-static wolf_trans_t s_trans[WOLF_MAX_TRANS];
-static int          s_trans_n;
+ * KOPYALAMAZ, isaretcide kalir. Bu yuzden oturumlu arena'da tutulur
+ * (wolf_sess_t.icinde). */
 
 static void h_transition(wolf_id id, unsigned mask, int dur, int delay,
                          int easing) {
     wolf_slot_t *s = slot_of(id);
-    if (!s || !mask) return;
+    if (!s || !mask || !s_cur || s_cur->dead) return;
     if (dur < 0) dur = 0;
     if (delay < 0) delay = 0;
     if (s_trans_n >= WOLF_MAX_TRANS) {
@@ -1462,10 +1547,32 @@ static void anim_ty_cb(void *var, int32_t v) {
     lv_obj_set_style_translate_y((lv_obj_t *)var, v, 0);
 }
 
+/* anim_in/anim_pulse nesneleri oturumda izlenir; pencere kapaninca yalniz
+ * o pencerenin animasyonlari silinir; eskiden lv_anim_delete(NULL,...)
+ * diger pencerelerin animlerini de sonlandiriyordu (madde 37). */
+static void anim_obj_del_cb(lv_event_t *e) {
+    wolf_sess_t *s = (wolf_sess_t *)lv_event_get_user_data(e);
+    lv_obj_t *o = lv_event_get_target(e);
+    if (!s) return;
+    for (int i = 0; i < s->anim_n; i++)
+        if (s->anim_objs[i] == o) { s->anim_objs[i] = 0; return; }
+}
+
+static void anim_track_obj(lv_obj_t *o) {
+    if (!o || !s_cur || s_cur->dead) return;
+    for (int i = 0; i < s_cur->anim_n; i++)
+        if (s_cur->anim_objs[i] == o) return;
+    if (s_cur->anim_n < WOLF_MAX_ANIMS) {
+        lv_obj_add_event_cb(o, anim_obj_del_cb, LV_EVENT_DELETE, s_cur);
+        s_cur->anim_objs[s_cur->anim_n++] = o;
+    }
+}
+
 static void h_anim_in(wolf_id id, int dy, int dur, int delay) {
     wolf_slot_t *s = slot_of(id);
     if (!s) return;
     lv_obj_t *o = s->obj;
+    anim_track_obj(o);
     if (dur <= 0) { /* hareketsiz gorunur ol */
         lv_obj_set_style_opa(o, LV_OPA_COVER, 0);
         lv_obj_set_style_translate_y(o, 0, 0);
@@ -1496,6 +1603,7 @@ static void h_anim_in(wolf_id id, int dy, int dur, int delay) {
 static void h_anim_pulse(wolf_id id, int period, int low) {
     wolf_slot_t *s = slot_of(id);
     if (!s || period <= 0) return;
+    anim_track_obj(s->obj);
     lv_opa_t lo = opa_from(low);
     uint32_t half = (uint32_t)(period / 2 > 0 ? period / 2 : 1);
     lv_anim_t a;
@@ -1520,6 +1628,78 @@ static void anim_release_obj(lv_obj_t *o) {
 /* ------------------------------------------------------------------ */
 /* Kurulum / sifirlama                                                 */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* Kurulum / sifirlama                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Pencere govdesi silindiginde oturumu geri kazan: timer'lari sil, tuval
+ * tamponlarini birak, animlari durdur. Boylece ikinci pencere ilkini
+ * bozmadan kendi oturumunda yasar (madde 37). */
+static void sess_release(wolf_sess_t *s) {
+    if (!s || s->dead) return;
+    for (int i = 0; i < WOLF_MAX_TIMER; i++) {
+        if (s->timer[i].used && s->timer[i].t) lv_timer_delete(s->timer[i].t);
+        s->timer[i].t = 0;
+        s->timer[i].cb = 0;
+        s->timer[i].user = 0;
+        s->timer[i].used = 0;
+    }
+    for (int i = 0; i < WOLF_MAX_CANVAS; i++) {
+        if (s->cv[i].used && s->cv[i].buf && s_asi && s_asi->mem)
+            s_asi->mem->free(s->cv[i].buf);
+        s->cv[i].used = 0;
+        s->cv[i].buf = 0;
+        s->cv[i].cv = 0;
+    }
+    for (int i = 0; i < s->anim_n; i++)
+        if (s->anim_objs[i]) anim_release_obj(s->anim_objs[i]);
+    s->anim_n = 0;
+    s->dead = 1;
+    s->body = 0;
+    s->root = 0;
+    if (s_cur == s) s_cur = &s_sess[0];
+}
+
+static void sess_body_del_cb(lv_event_t *e) {
+    sess_release((wolf_sess_t *)lv_event_get_user_data(e));
+}
+
+static wolf_sess_t *sess_acquire(lv_obj_t *body) {
+    wolf_sess_t *s = 0;
+    for (int i = 0; i < WOLF_MAX_SESS; i++)
+        if (!s_sess[i].dead) { s = &s_sess[i]; break; }
+    if (!s) {
+        /* yer yok: en eski oturumu geri al (penceresiyle birlikte
+         * gecersiz sayilir; eskiden her pencereyi sifirlamak gibi) */
+        s = &s_sess[0];
+        for (int i = 1; i < WOLF_MAX_SESS; i++)
+            if (s_sess[i].birth < s->birth) s = &s_sess[i];
+        sess_release(s);
+    }
+    s->idx = (int)(s - s_sess);
+    s->birth = ++s_birth_ctr;
+    s->body = body;
+    s->dead = 0;
+    s->n = 0;
+    s->ev_click_n = 0;
+    s->ev_change_n = 0;
+    s->trans_n = 0;
+    s->anim_n = 0;
+    for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
+        s->slot[i].used = 0;
+        s->slot[i].obj = 0;
+        s->slot[i].kind = 0;
+        s->slot[i].text[0] = 0;
+    }
+    for (int i = 0; i < WOLF_MAX_LINE; i++) {
+        s->line[i].used = 0;
+        s->line[i].obj = 0;
+        s->line[i].n = 0;
+    }
+    s_cur = s;
+    return s;
+}
 
 static void api_fill(void) {
     for (unsigned i = 0; i < sizeof(s_api); i++) ((char *)&s_api)[i] = 0;
@@ -1622,21 +1802,13 @@ static void api_fill(void) {
 }
 
 void wlf_host_reset(lv_obj_t *body) {
-    /* v2: onceki oturumun zamanlayicilari/sesi birakilir (lv_timer'lari
-     * LVGL listesinde yasamaya devam ederdi — sarkik geri cagri riski). */
-    v2_session_clear();
-    s_body = body;
+    if (!body) return;
+    /* Madde 37: her govde kendi oturumunu alir; onceki oturuma dokunulmaz.
+     * Eskiden tek kuresel oturum vardi ve her acilista o sifirlaniyordu. */
+    wolf_sess_t *s = sess_acquire(body);
     s_asi = g_asi;
-    s_n = 0;
-    s_ev_click_n = 0;
-    s_ev_change_n = 0;
-    for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
-        s_slot[i].used = 0;
-        s_slot[i].obj = 0;
-        s_slot[i].kind = 0;
-        s_slot[i].text[0] = 0;
-    }
     if (!s_api_ready) { api_fill(); s_api_ready = 1; }
+    lv_obj_add_event_cb(body, sess_body_del_cb, LV_EVENT_DELETE, s);
 
     /* 0.7: uygulamanin izinleri artik yetki maskesi degil, kapidir
      * (perm.c + caps_fs_guard); burada s_perms bakilmaz. */
@@ -1657,13 +1829,21 @@ void wlf_host_reset(lv_obj_t *body) {
 }
 
 wolf_api_t *wlf_api_get(lv_obj_t *body) {
-    if (!s_root || s_body != body) wlf_host_reset(body);
+    /* Ayni govde cagrilinca oturum ona ayarlanir; ID almayan API
+     * cagrilari boylece dogru pencereye yonelenir. */
+    if (body) {
+        wolf_sess_t *s = 0;
+        for (int i = 0; i < WOLF_MAX_SESS; i++)
+            if (!s_sess[i].dead && s_sess[i].body == body) { s = &s_sess[i]; break; }
+        if (s) s_cur = s;
+        else wlf_host_reset(body);
+    }
     if (!s_api_ready) { api_fill(); s_api_ready = 1; }
     return &s_api;
 }
 
 void wlf_host_error(const char *msg) {
-    if (!s_body) return;
+    if (!s_body || s_cur->dead) return;
     lv_obj_t *l = lv_label_create(s_body);
     lv_label_set_text(l, msg ? msg : "Uygulama baslatilamadi");
     lv_obj_set_style_text_color(l, lv_color_hex(ADL_DANGER), 0);

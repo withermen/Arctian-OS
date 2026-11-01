@@ -698,6 +698,10 @@ void dyn_scan_afs(void);
 wolf_api_t *wlf_api_get(lv_obj_t *body);
 void wlf_host_reset(lv_obj_t *body);
 void wlf_host_error(const char *msg);
+/* simdidiki host oturum numarasi (VM'nin timer baglamini geri yuklemesi
+ * icin; madde 37) */
+int  wlf_host_cur_sess(void);
+void wlf_host_set_sess(int sess);
 /* 0.7: terminal modu. sink verilirse log/notify/dialog oraya yazilir;
  * arg, rol=cli/runtime uygulamasina verilen "birlikte ac" dosyasidir. */
 void wlf_host_set_sink(void (*fn)(const char *s));
