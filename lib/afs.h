@@ -5,7 +5,8 @@
 #include "asi.h"
 
 #define AFS_BASE_LBA   20000u  /* disktaki temel LBA (modul bolgesinin sonrasi) */
-#define AFS_VERSION    4u      /* header surumu; uymayan disk yeniden formatlanir */
+#define AFS_VERSION    5u      /* header surumu; uymayan disk yeniden formatlanir
+                                * (5: kapasite alani 64 bit, tablo ofseti kaydi) */
 #define AFS_NAME_MAX   64u     /* dosya/klasor adi azami bayt (+ sonlandirici) */
 
 /* Kullanici diski (C:/) kok yolu. Sistem dosyalari (ayar, .dpk) ham kokte

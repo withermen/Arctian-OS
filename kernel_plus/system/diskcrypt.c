@@ -54,15 +54,15 @@ static void xts_do(mbedtls_aes_xts_context *ctx, int mode, uint8_t *p, uint64_t 
     mbedtls_aes_crypt_xts(ctx, mode, DISKCRYPT_SECTOR, du, p, p);
 }
 
-static int dc_read(uint32_t lba, uint32_t count, void *buf) {
+static int dc_read(uint64_t lba, uint32_t count, void *buf) {
     if (storage_raw_read(lba, count, buf) != 0) return -1;
     uint8_t *p = (uint8_t *)buf;
     for (uint32_t i = 0; i < count; i++)
-        xts_do(&s_dec, MBEDTLS_AES_DECRYPT, p + (size_t)i * DISKCRYPT_SECTOR, (uint64_t)lba + i);
+        xts_do(&s_dec, MBEDTLS_AES_DECRYPT, p + (size_t)i * DISKCRYPT_SECTOR, lba + i);
     return 0;
 }
 
-static int dc_write(uint32_t lba, uint32_t count, const void *buf) {
+static int dc_write(uint64_t lba, uint32_t count, const void *buf) {
     const uint8_t *src = (const uint8_t *)buf;
     uint32_t done = 0;
     while (done < count) {
@@ -72,7 +72,7 @@ static int dc_write(uint32_t lba, uint32_t count, const void *buf) {
             s_scratch[i] = src[(size_t)done * DISKCRYPT_SECTOR + i];
         for (uint32_t i = 0; i < n; i++)
             xts_do(&s_enc, MBEDTLS_AES_ENCRYPT, s_scratch + (size_t)i * DISKCRYPT_SECTOR,
-                   (uint64_t)lba + done + i);
+                   lba + done + i);
         if (storage_raw_write(lba + done, n, s_scratch) != 0) return -1;
         done += n;
     }

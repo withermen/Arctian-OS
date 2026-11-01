@@ -14,9 +14,9 @@
  *   12 count        kullanilan dosya sayisi
  *   16 data_next    veri alaninda siradaki bos LBA
  *   20 hdr_sectors  header'in sektor sayisi
- *   24 capacity     kullanilabilir son LBA (haric)
- *   28 flags        rezerve
- *   32 files[max_files]
+ *   24 capacity     kullanilabilir son LBA (haric, 64 bit)
+ *   32 flags        rezerve
+ *   36 files[max_files]
  */
 #include "afs.h"
 #include "storage.h"
@@ -25,7 +25,7 @@
 
 #define AFS_MAGIC          0x53464121u  /* "!AFS" */
 #define AFS_MAX_FILES_HARD  512u
-#define AFS_HEADER_BASE     32u         /* magic..flags */
+#define AFS_HEADER_BASE     36u         /* magic..flags + 64 bit kapasite */
 #define AFS_ENTRY_SIZE      (AFS_NAME_MAX + 28u)  /* ad + lba + size + used + uid + gid + mode + pad */
 #define AFS_HDR_MAX_SEC \
     ((AFS_HEADER_BASE + AFS_MAX_FILES_HARD * AFS_ENTRY_SIZE + 511u) / 512u)
@@ -50,7 +50,9 @@ typedef struct __attribute__((packed)) {
     uint32_t count;
     uint32_t data_next;
     uint32_t hdr_sectors;
-    uint32_t capacity;
+    uint64_t capacity;   /* 5. surumde 64 bite cikti; 2 TB ustu disklerde
+                          * 32 bitlik alan tasiyor ve erisilemeyen alan
+                          * olusuyordu */
     uint32_t flags;
     afs_file_t files[AFS_MAX_FILES_HARD];
 } afs_hdr_t;
@@ -118,8 +120,11 @@ static int prefix_of(const char *s, const char *p) {
     return 1;
 }
 
-/* Disk boyutundan kullanilabilir son LBA'yi hesaplar. Dis sect. */
-static uint32_t compute_capacity(void) {
+/* Disk boyutundan kullanilabilir son LBA'yi hesaplar. Dis sect.
+ * Kapasite alani 5. surumde 64 bite cikti; dosya girdilerindeki LBA
+ * hala 32 bit oldugu icin kullanim siniri simdilik 2 TB'da kaliyor,
+ * suruculerin uctan uca 64 bit LBA destegi gelince bu tavan kalkar. */
+static uint64_t compute_capacity(void) {
     uint64_t secs = storage_sector_count();
     if (secs == 0) {              /* storage henuz hazir degilse tembel baslat */
         storage_init();
@@ -131,8 +136,8 @@ static uint32_t compute_capacity(void) {
     }
     cap = secs > AFS_RESERVE_SEC ? secs - AFS_RESERVE_SEC : secs;
     if (cap > 0xFFFFFFFEull) cap = 0xFFFFFFFEull;
-    if (cap < AFS_BASE_LBA + AFS_CLUSTER_SEC) cap = AFS_BASE_LBA + AFS_CLUSTER_SEC;
-    return (uint32_t)cap;
+    if (cap < (uint64_t)AFS_BASE_LBA + AFS_CLUSTER_SEC) cap = (uint64_t)AFS_BASE_LBA + AFS_CLUSTER_SEC;
+    return cap;
 }
 
 static void hdr_sync_size(void) {
@@ -287,9 +292,9 @@ static void journal_replay(void) {
      * saglam bir header duruyorsa bu kayit onceki oturumdan kalmistir ve
      * uygulanmaz; eskiden yalniz CRC'ye bakildigi icin eski bir gunluk kaydi
      * guncel tablonun ustune yazilabiliyordu. */
-    uint32_t cur_hdr[8];
+    uint32_t cur_hdr[9];
     if (storage_read(AFS_BASE_LBA, 1, cur_hdr) != 0) return;
-    if (cur_hdr[0] == AFS_MAGIC && cur_hdr[7] != rec->prev_crc) {
+    if (cur_hdr[0] == AFS_MAGIC && cur_hdr[8] != rec->prev_crc) {
         journal_clear(jl);
         return;
     }
@@ -312,7 +317,7 @@ void afs_format(void) {
         H.capacity -= AFS_JOURNAL_SEC;
     H.flags = 0;
 
-    uint32_t room = H.capacity - AFS_BASE_LBA;
+    uint32_t room = (uint32_t)(H.capacity - AFS_BASE_LBA);
     uint32_t mf = room / AFS_CLUSTER_SEC;
     if (mf < 32u) mf = 32u;
     if (mf > AFS_MAX_FILES_HARD) mf = AFS_MAX_FILES_HARD;
@@ -353,8 +358,8 @@ void afs_mount(void) {
     H.count = first[3];
     H.data_next = first[4];
     H.hdr_sectors = first[5];
-    H.capacity = first[6];
-    H.flags = first[7];
+    H.capacity = (uint64_t)first[6] | ((uint64_t)first[7] << 32);
+    H.flags = first[8];
 
     if (H.max_files < 32u || H.max_files > AFS_MAX_FILES_HARD ||
         H.hdr_sectors == 0 || H.hdr_sectors > AFS_HDR_MAX_SEC) {

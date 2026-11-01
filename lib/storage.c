@@ -28,12 +28,12 @@ int storage_init(void) {
     return 0;
 }
 
-int storage_raw_read(uint32_t lba, uint32_t count, void *buf) {
+int storage_raw_read(uint64_t lba, uint32_t count, void *buf) {
     if (s_cur < 0) return -1;
     return blockdev_read(s_cur, lba, count, buf);
 }
 
-int storage_raw_write(uint32_t lba, uint32_t count, const void *buf) {
+int storage_raw_write(uint64_t lba, uint32_t count, const void *buf) {
     if (s_cur < 0) return -1;
     return blockdev_write(s_cur, lba, count, buf);
 }
@@ -55,53 +55,55 @@ int storage_flush(void) {
 
 int storage_crypt_active(void) { return s_crypt_on; }
 
-int storage_read(uint32_t lba, uint32_t count, void *buf) {
+int storage_read(uint64_t lba, uint32_t count, void *buf) {
     if (s_cur < 0) return -1;
     if (!s_crypt_on) return blockdev_read(s_cur, lba, count, buf);
-    uint32_t base = s_crypt.base_lba, end = s_crypt.end_lba;
-    /* lba+count uint32'te tasabilir (2^32 sektör ~>2TB sinirinda); bugun
-     * istek yanlis siniflanip sifreli bolgeye duz veri / tersi yazilabiliyordu.
-     * Aralik matematisi 64 bite tasinir. */
-    uint64_t e = (uint64_t)lba + count;
+    uint64_t base = s_crypt.base_lba, end = s_crypt.end_lba;
+    /* Aralik matematisi tamamiyla 64 bit: 2 TB ustu disklerde 32 bitlik
+     * lba+count tasari istegi yanlis siniflandirip sifreli bolgeye duz
+     * veri yazabiliyordu. */
+    uint64_t e = lba + count;
     if (lba >= end || e <= base) return blockdev_read(s_cur, lba, count, buf);
     if (lba >= base && e <= end) return s_crypt.read(lba, count, buf);
     uint32_t done = 0;
     if (lba < base) {
-        uint32_t n = base - lba;
-        if (blockdev_read(s_cur, lba, n, buf) != 0) return -1;
-        done = n;
+        uint64_t n = base - lba;
+        if (n > count) n = count;
+        if (blockdev_read(s_cur, lba, (uint32_t)n, buf) != 0) return -1;
+        done = (uint32_t)n;
     }
-    uint32_t l2 = lba + done;
+    uint64_t l2 = lba + done;
     uint32_t n2 = count - done;
-    if ((uint64_t)l2 + n2 > end) n2 = (uint32_t)(end - l2);
-    if (n2 && s_crypt.read(l2, n2, (uint8_t *)buf + done * 512u) != 0) return -1;
+    if (l2 + n2 > end) n2 = (uint32_t)(end - l2);
+    if (n2 && s_crypt.read(l2, n2, (uint8_t *)buf + (size_t)done * 512u) != 0) return -1;
     done += n2;
     if (done < count)
-        if (blockdev_read(s_cur, lba + done, count - done, (uint8_t *)buf + done * 512u) != 0) return -1;
+        if (blockdev_read(s_cur, lba + done, count - done, (uint8_t *)buf + (size_t)done * 512u) != 0) return -1;
     return 0;
 }
 
-int storage_write(uint32_t lba, uint32_t count, const void *buf) {
+int storage_write(uint64_t lba, uint32_t count, const void *buf) {
     if (s_cur < 0) return -1;
     if (!s_crypt_on) return blockdev_write(s_cur, lba, count, buf);
-    uint32_t base = s_crypt.base_lba, end = s_crypt.end_lba;
+    uint64_t base = s_crypt.base_lba, end = s_crypt.end_lba;
     /* storage_read'teki ile ayni 64-bit aralik gerekcesi */
-    uint64_t e = (uint64_t)lba + count;
+    uint64_t e = lba + count;
     if (lba >= end || e <= base) return blockdev_write(s_cur, lba, count, buf);
     if (lba >= base && e <= end) return s_crypt.write(lba, count, buf);
     uint32_t done = 0;
     if (lba < base) {
-        uint32_t n = base - lba;
-        if (blockdev_write(s_cur, lba, n, buf) != 0) return -1;
-        done = n;
+        uint64_t n = base - lba;
+        if (n > count) n = count;
+        if (blockdev_write(s_cur, lba, (uint32_t)n, buf) != 0) return -1;
+        done = (uint32_t)n;
     }
-    uint32_t l2 = lba + done;
+    uint64_t l2 = lba + done;
     uint32_t n2 = count - done;
-    if ((uint64_t)l2 + n2 > end) n2 = (uint32_t)(end - l2);
-    if (n2 && s_crypt.write(l2, n2, (const uint8_t *)buf + done * 512u) != 0) return -1;
+    if (l2 + n2 > end) n2 = (uint32_t)(end - l2);
+    if (n2 && s_crypt.write(l2, n2, (const uint8_t *)buf + (size_t)done * 512u) != 0) return -1;
     done += n2;
     if (done < count)
-        if (blockdev_write(s_cur, lba + done, count - done, (const uint8_t *)buf + done * 512u) != 0) return -1;
+        if (blockdev_write(s_cur, lba + done, count - done, (const uint8_t *)buf + (size_t)done * 512u) != 0) return -1;
     return 0;
 }
 
