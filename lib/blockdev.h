@@ -54,6 +54,7 @@ void blockdev_cache_enable(int on);
 int  blockdev_cache_enabled(void);
 int blockdev_cache_flush_all(void);   /* 0 = hepsi indi, -1 = en az bir yazma hatasi */
 void blockdev_cache_invalidate(void);
+void blockdev_cache_reset(void);      /* flush + gecersiz kirma, tek atomik hareket */
 void blockdev_cache_stats(uint32_t *hits, uint32_t *misses);
 
 /* ATA bus-master DMA denetimi (test/tani icin; varsayilan acik). */

@@ -40,9 +40,9 @@ int storage_raw_write(uint64_t lba, uint32_t count, const void *buf) {
 
 void storage_set_crypt(const storage_crypt_t *c) {
     /* Sifreleme durumu degisirken onbellekteki sektorlerin anlami degisir:
-     * once kirli veriyi diske indir, sonra onbellegi temizle. */
-    blockdev_cache_flush_all();
-    blockdev_cache_invalidate();
+     * kirli veriyi indir + onbellegi temizle tek atomik hareket olsun ki
+     * iki adim arasina eski anahtarla yazim sikismasin. */
+    blockdev_cache_reset();
     if (!c) { s_crypt_on = 0; return; }
     s_crypt = *c;
     s_crypt_on = 1;

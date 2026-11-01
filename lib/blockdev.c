@@ -33,6 +33,31 @@ static int       s_bc_on = 0;
 static uint32_t  s_bc_hits = 0;
 static uint32_t  s_bc_misses = 0;
 
+/* ---- Islemci kilidi ----
+ * AHCI/ATA/NVMe suruculerinin hepsinde tek ortak DMA tamponu ve tek
+ * komut slotu var; blok onbellegi de tek tablo. Zamanlayici calisirken
+ * iki is ayni anda diske dokunursa veriler ayni tamponda/slotta karisir,
+ * onbellegi iki is birdan gunceller. Tum halka acik girisler bu kilitte
+ * siraya girer.
+ * Kilit polling boyunca tutulur: normal islem milisaniyelerde biter;
+ * aygit zamanasiminda bekleyen is bir sure bosuna doner ama diskteki
+ * veri bozulmaz. Kilit sirali (reentrant) DEGIL: ic yollar kilit alan
+ * halka acik fonksiyonu yeniden cagirmaz. */
+static volatile uint32_t s_bk;
+
+static void blk_enter(void) {
+    uint32_t busy;
+    for (;;) {
+        __asm__ volatile ("lock xchgl %0, %1"
+                          : "=r"(busy), "+m"(s_bk) : "0"(1u) : "memory");
+        if (!busy) return;
+        __asm__ volatile ("pause");
+    }
+}
+static void blk_leave(void) {
+    __asm__ volatile ("movl $0, %0" :: "m"(s_bk) : "memory");
+}
+
 static int bd_raw_read(int idx, uint64_t lba, uint32_t count, void *buf) {
     return s_ops[idx].read(s_ops[idx].ctx, lba, count, buf);
 }
@@ -116,7 +141,7 @@ static int bc_write(int idx, uint64_t lba, uint32_t count, const void *buf) {
 void blockdev_cache_enable(int on) { s_bc_on = on ? 1 : 0; }
 int  blockdev_cache_enabled(void) { return s_bc_on; }
 
-int blockdev_cache_flush_all(void) {
+static int bc_flush_all_locked(void) {
     int err = 0;
     for (int i = 0; i < BC_SECTORS; i++) {
         if (s_bc[i].valid && s_bc[i].dirty) {
@@ -131,11 +156,32 @@ int blockdev_cache_flush_all(void) {
     return err;
 }
 
+int blockdev_cache_flush_all(void) {
+    blk_enter();
+    int err = bc_flush_all_locked();
+    blk_leave();
+    return err;
+}
+
 void blockdev_cache_invalidate(void) {
+    blk_enter();
     for (int i = 0; i < BC_SECTORS; i++) {
         s_bc[i].valid = 0;
         s_bc[i].dirty = 0;
     }
+    blk_leave();
+}
+
+/* Sifreleme anahtari degisirken onbellegi tek atomik hareketle bosalt:
+ * flush ile gecersiz kilma arasina baska isin yazimi sikismasin. */
+void blockdev_cache_reset(void) {
+    blk_enter();
+    bc_flush_all_locked();
+    for (int i = 0; i < BC_SECTORS; i++) {
+        s_bc[i].valid = 0;
+        s_bc[i].dirty = 0;
+    }
+    blk_leave();
 }
 
 void blockdev_cache_stats(uint32_t *hits, uint32_t *misses) {
@@ -176,6 +222,7 @@ int blockdev_info(int idx, blockdev_info_t *out) {
 
 int blockdev_read(int idx, uint64_t lba, uint32_t count, void *buf) {
     if (idx < 0 || idx >= s_count || !s_ops[idx].read) return -1;
+    blk_enter();
     if (!s_bc_on || count == 0 || count > BC_BYPASS) {
         int r = bd_raw_read(idx, lba, count, buf);
         /* Bypass okumasi diska dogrudan gider; ama onbellekte bu araliga
@@ -190,13 +237,17 @@ int blockdev_read(int idx, uint64_t lba, uint32_t count, void *buf) {
                 if (l) memcpy(p + (size_t)i * 512u, l->data, 512);
             }
         }
+        blk_leave();
         return r;
     }
-    return bc_read(idx, lba, count, buf);
+    int r = bc_read(idx, lba, count, buf);
+    blk_leave();
+    return r;
 }
 
 int blockdev_write(int idx, uint64_t lba, uint32_t count, const void *buf) {
     if (idx < 0 || idx >= s_count || !s_ops[idx].write) return -1;
+    blk_enter();
     if (!s_bc_on || count == 0 || count > BC_BYPASS) {
         int r = bd_raw_write(idx, lba, count, buf);
         /* Bypass yazimi diska dogrudan gider. Onbellekte bu araliga ait
@@ -209,17 +260,22 @@ int blockdev_write(int idx, uint64_t lba, uint32_t count, const void *buf) {
                 bc_line_t *l = bc_find(idx, lba + i);
                 if (l) { l->valid = 0; l->dirty = 0; }
             }
+        blk_leave();
         return r;
     }
-    return bc_write(idx, lba, count, buf);
+    int r = bc_write(idx, lba, count, buf);
+    blk_leave();
+    return r;
 }
 
 int blockdev_flush(int idx) {
     if (idx < 0 || idx >= s_count) return -1;
+    blk_enter();
     int r = 0;
-    if (s_bc_on) r = blockdev_cache_flush_all();
-    if (!s_ops[idx].flush) return r;
+    if (s_bc_on) r = bc_flush_all_locked();
+    if (!s_ops[idx].flush) { blk_leave(); return r; }
     if (s_ops[idx].flush(s_ops[idx].ctx) != 0) r = -1;
+    blk_leave();
     return r;
 }
 
