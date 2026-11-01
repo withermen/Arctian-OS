@@ -395,6 +395,28 @@ static int find_idx(const char *name) {
     return -1;
 }
 
+/* ---- Tutamak yasam dongusu ----
+ * Tutamak eskiden ham slot numarasiydi; dosya silinip slot yeniden
+ * kullanilinca eldeki eski tutamak yeni dosyaya baglanir, kimse fark
+ * etmezdi. Slot basina bellek-ici bir nesil sayaci tutulur; tutamaga
+ * nesil de kodlanir, silme/olusturma sayaci yukseltir. Bayat tutamak
+ * bir daha hicbir dosyaya baglanmaz. */
+static uint32_t s_hgen[AFS_MAX_FILES_HARD];
+
+static void *hnd_enc(int slot) {
+    /* duzen: slot << 13 | (nesil & 0x1FFF) << 1 | 1 */
+    return (void *)(uintptr_t)(((uint32_t)slot << 13) | ((s_hgen[slot] & 0x1FFFu) << 1) | 1u);
+}
+
+static int hnd_dec(void *h) {
+    uint32_t v = (uint32_t)(uintptr_t)h;
+    if ((v & 1u) == 0) return -1;
+    int slot = (int)(v >> 13);
+    if (slot < 0 || slot >= (int)H.max_files || !H.files[slot].used) return -1;
+    if (((v >> 1) & 0x1FFFu) != (s_hgen[slot] & 0x1FFFu)) return -1;  /* bayat tutamak */
+    return slot;
+}
+
 void *afs_create_handle(const char *name) {
     if (!mounted) afs_mount();
     /* Ad sigmiyorsa kirpik adla dosya uretme; iki farkli dosya ayni
@@ -409,7 +431,7 @@ void *afs_create_handle(const char *name) {
             continue;
         }
         if (seq(H.files[i].name, name))
-            return (void *)(intptr_t)(i + 1);
+            return hnd_enc((int)i);
     }
     if (first_free < 0) return 0;
     uint32_t i = (uint32_t)first_free;
@@ -425,14 +447,15 @@ void *afs_create_handle(const char *name) {
     set_owner(&H.files[i], afs_is_dir(name));
     cpy(H.files[i].name, name);
     H.count++;
+    s_hgen[i]++;
     hdr_commit();
-    return (void *)(intptr_t)(i + 1);
+    return hnd_enc((int)i);
 }
 
 void *afs_find_handle(const char *name) {
     if (!mounted) afs_mount();
     int i = find_idx(name);
-    return i < 0 ? 0 : (void *)(intptr_t)(i + 1);
+    return i < 0 ? 0 : hnd_enc(i);
 }
 
 /* ---- Yeniden adlandirma / tasima (0.6) ----
@@ -498,8 +521,8 @@ int afs_rename(const char *from, const char *to) {
 }
 
 int afs_write_handle(void *h, const void *data, uint32_t size) {
-    int i = (int)(intptr_t)h - 1;
-    if (i < 0 || i >= (int)H.max_files || !H.files[i].used) return -1;
+    int i = hnd_dec(h);
+    if (i < 0) return -1;
     if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_W)) return -1;
     uint64_t secs = ((uint64_t)size + 511) / 512;
     if (secs == 0) secs = 1;
@@ -520,8 +543,8 @@ int afs_write_handle(void *h, const void *data, uint32_t size) {
  * yazabiliyordu (ornegin 1000 baytlik tampona 1024 bayt); burada kopya
  * her seferinde yalniz istenen araliga yapilir. */
 uint32_t afs_read_at(void *h, void *buf, uint32_t size, uint32_t off) {
-    int i = (int)(intptr_t)h - 1;
-    if (i < 0 || i >= (int)H.max_files || !H.files[i].used) return 0;
+    int i = hnd_dec(h);
+    if (i < 0) return 0;
     if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_R)) return 0;
     if (off >= H.files[i].size) return 0;          /* dosya sonu */
     uint32_t n = H.files[i].size - off;
@@ -553,6 +576,7 @@ int afs_remove(const char *name) {
     H.files[i].used = 0;
     H.files[i].size = 0;
     H.files[i].name[0] = 0;
+    s_hgen[i]++;                     /* bu slota ait eski tutamaklar olur */
     if (H.count) H.count--;
     hdr_commit();
     return 0;
@@ -583,8 +607,8 @@ int afs_stat(const char *path, asi_stat_t *out) {
 }
 
 int afs_stat_handle(void *h, asi_stat_t *out) {
-    int i = (int)(intptr_t)h - 1;
-    if (i < 0 || i >= (int)H.max_files || !H.files[i].used || !out) return -1;
+    int i = hnd_dec(h);
+    if (i < 0 || !out) return -1;
     out->uid = H.files[i].uid;
     out->gid = H.files[i].gid;
     out->mode = H.files[i].mode;
@@ -760,6 +784,7 @@ int afs_journal_selftest(void) {
         if (!f->used) continue;
         if (seq(f->name, "afs_jrn_replay") || seq(f->name, "afs_jrn_test")) {
             f->used = 0; f->name[0] = 0; f->size = 0; f->lba = 0;
+            s_hgen[i]++;
         }
     }
     H.count = saved_count;
