@@ -54,6 +54,7 @@ int         vmm_unmap(vmm_space_t sp, uint64_t va);
 void        vmm_switch(vmm_space_t sp);
 vmm_space_t vmm_current(void);
 uint64_t    vmm_translate(vmm_space_t sp, uint64_t va);
+int         vmm_probe_user(vmm_space_t sp, uint64_t va, int write);
 uint64_t    vmm_alloc_frame(void);
 void        vmm_free_frame(uint64_t phys);
 void        vmm_mem_info(vmm_meminfo_t *out);

@@ -214,6 +214,38 @@ uint64_t vmm_translate(vmm_space_t sp, uint64_t va) {
     return (e & VMM_ADDR_MASK) | (va & 0xFFFull);
 }
 
+/* Kullanici erisimi gercekten haritali mi: yuruyus yapar, her seviyede
+ * U (ve yazma isteniyorsa W) biti ister. Syscall denetimleri sanal
+ * adres araligiyla yetinmemeli; haritasiz adresi kernel modunda kendimiz
+ * yurutup cekirdegi cokertir, kernel eslemesi ise kullaniciya kernel
+ * bellegi okutur. */
+int vmm_probe_user(vmm_space_t sp, uint64_t va, int write) {
+    if (!sp) return 0;
+    uint64_t *pml4 = tbl(sp);
+    uint64_t e = pml4[(int)((va >> 39) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || !(e & VMM_PTE_U)) return 0;
+    if (write && !(e & VMM_PTE_W)) return 0;
+    if (e & VMM_PTE_HUGE) return 1;
+
+    uint64_t *pdpt = tbl(e & VMM_ADDR_MASK);
+    e = pdpt[(int)((va >> 30) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || !(e & VMM_PTE_U)) return 0;
+    if (write && !(e & VMM_PTE_W)) return 0;
+    if (e & VMM_PTE_HUGE) return 1;
+
+    uint64_t *pd = tbl(e & VMM_ADDR_MASK);
+    e = pd[(int)((va >> 21) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || !(e & VMM_PTE_U)) return 0;
+    if (write && !(e & VMM_PTE_W)) return 0;
+    if (e & VMM_PTE_HUGE) return 1;
+
+    uint64_t *pt = tbl(e & VMM_ADDR_MASK);
+    e = pt[(int)((va >> 12) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || !(e & VMM_PTE_U)) return 0;
+    if (write && !(e & VMM_PTE_W)) return 0;
+    return 1;
+}
+
 int vmm_map_kernel_range(uint64_t va, uint64_t size) {
     vmm_space_t sp = vmm_current();
     uint64_t start = va & ~0xFFFull;

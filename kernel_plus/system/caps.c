@@ -3,6 +3,7 @@
 #include "sched.h"
 #include "serial.h"
 #include "syscall.h"
+#include "clock.h"
 
 static uint32_t s_over[SCHED_MAX_TASKS];
 static uint8_t  s_has[SCHED_MAX_TASKS];
@@ -440,6 +441,10 @@ void caps_init(asi_t *asi) {
     if (asi) asi->sandbox = &s_sandbox;
     arctian_set_cap_check(caps_syscall_check);
     arctian_set_subject_fn(caps_syscall_subject);
+    /* SYS_GETPID/SYS_TICKS gercek surec kimligini ve saati gorsun;
+     * fd tablollari da pid'e gore ayristiriliyor. */
+    arctian_set_pid_fn(proc_getpid);
+    arctian_set_ticks_fn(clock_ms);
 }
 
 int caps_selftest(void) {
