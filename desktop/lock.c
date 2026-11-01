@@ -46,6 +46,51 @@ static int streq(const char *a, const char *b) {
     return a[i] == b[i];
 }
 
+/* ---- Madde 26: kilit sirasinda arka plan zamanlayicilari ----
+ * Kilit ekrani ayri bir dongu donduruyor ama lv_timer_handler() paylasilan
+ * liste uzerinden calisiyor: .wlf VM'lerinin timer'lari, editor otomatik
+ * kaydi, asistan/guncelleme donguleri kilidin ALTINDA da islemeye devam
+ * ediyordu. Kilit girisinde tum zamanlayicilar askiya alinir; yalnizca
+ * fare/klavye okuma timer'lari (kilit ekrani tiklamalar icin onlara
+ * muhtaç) aykali tutulur. Kilitten cikista yalnizca bizim dondurdüklerimiz
+ * cozulur; onceden duraklatilmis olanlar oldugu gibi kalir.
+ * lv_timer_get_next ile dolasilan liste canlidir; cozme sirasinda silinmis
+ * olabilir, silinmis kayit sorgulanip atlanir. */
+#define LOCK_FROZEN_MAX 256
+static lv_timer_t *s_frozen[LOCK_FROZEN_MAX];
+static int s_frozen_n;
+
+static void lock_freeze_timers(void) {
+    s_frozen_n = 0;
+    lv_timer_t *indev_t[4];
+    int ni = 0;
+    lv_indev_t *d = lv_indev_get_next(0);
+    while (d && ni < 4) {
+        lv_timer_t *rt = lv_indev_get_read_timer(d);
+        if (rt) indev_t[ni++] = rt;
+        d = lv_indev_get_next(d);
+    }
+    for (lv_timer_t *t = lv_timer_get_next(0); t; t = lv_timer_get_next(t)) {
+        if (s_frozen_n >= LOCK_FROZEN_MAX) break;
+        if (lv_timer_get_paused(t)) continue;      /* zaten askida birak */
+        int keep = 0;
+        for (int i = 0; i < ni; i++) if (indev_t[i] == t) { keep = 1; break; }
+        if (keep) continue;
+        lv_timer_pause(t);
+        s_frozen[s_frozen_n++] = t;
+    }
+}
+
+static void lock_thaw_timers(void) {
+    for (int i = 0; i < s_frozen_n; i++) {
+        int alive = 0;
+        for (lv_timer_t *t = lv_timer_get_next(0); t; t = lv_timer_get_next(t))
+            if (t == s_frozen[i]) { alive = 1; break; }
+        if (alive) lv_timer_resume(s_frozen[i]);
+    }
+    s_frozen_n = 0;
+}
+
 static void read_ta(lv_obj_t *ta, char *buf, int cap) {
     buf[0] = 0;
     if (!ta) return;
@@ -436,6 +481,7 @@ void lock_screen_run(asi_t *asi) {
     s_done = 0;
     s_error = 0;
     s_step = arctian_auth_has_user() ? ST_SELECT : ST_CREATE;
+    lock_freeze_timers();            /* arka plan VM/kayit/guncelleme durur */
 
     while (!s_done) {
         s_rebuild = 0;
@@ -458,6 +504,7 @@ void lock_screen_run(asi_t *asi) {
 
     if (kp) lv_indev_set_group(kp, 0);
     if (ptr) lv_indev_set_group(ptr, 0);
+    lock_thaw_timers();
     lv_group_remove_all_objs(s_group);
     lv_obj_delete(s_root);
     s_root = 0;
@@ -544,6 +591,7 @@ void disk_unlock_run(asi_t *asi) {
     s_disk_done = 0;
     s_ta_disk = 0;
     s_disk_errlbl = 0;
+    lock_freeze_timers();
     build_disk();
 
     while (!s_disk_done) {
@@ -558,6 +606,7 @@ void disk_unlock_run(asi_t *asi) {
 
     if (kp) lv_indev_set_group(kp, 0);
     if (ptr) lv_indev_set_group(ptr, 0);
+    lock_thaw_timers();
     lv_group_remove_all_objs(s_group);
     lv_obj_delete(s_root);
     s_root = 0;
