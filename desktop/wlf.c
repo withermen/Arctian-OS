@@ -415,6 +415,18 @@ static int wlf_write_app(const char *name, const void *buf, uint32_t len) {
     return g_asi->fs->write(h, buf, len);
 }
 
+/* Kurulan paketin sicildeki tam yolu: "C:/apps/<ad>.wlf". Madde 67:
+ * wlf_install_file'daki eski kod uzantiyi eklemeyi unutuyordu, tarama o
+ * yuzden hicbir sey bulamadan donuyordu; kurulu bir uygulamasi yeniden
+ * kuruldugunda surum/icon bilgisi bayat kaliyordu. */
+static void wlf_app_path(const char *name, char *out, int cap) {
+    int l = 0;
+    const char *pre = "C:/apps/";
+    for (int i = 0; pre[i] && l < cap - 5; i++) out[l++] = pre[i];
+    for (int i = 0; name[i] && l < cap - 5; i++) out[l++] = name[i];
+    out[l++] = '.'; out[l++] = 'w'; out[l++] = 'l'; out[l++] = 'f'; out[l] = 0;
+}
+
 int wlf_install_file(const char *path, char *err, int cap) {
     if (!g_asi || !g_asi->fs) { bin_copy(err, cap, "Dosya sistemi yok"); return -1; }
     uint32_t len = 0;
@@ -440,12 +452,8 @@ int wlf_install_file(const char *path, char *err, int cap) {
     if (idx >= 0) ex = &g_dyn[idx];
     if (!ex) wlf_scan_one(path);
     else {
-        char full[64];
-        int l = 0;
-        const char *pre = "C:/apps/";
-        for (int i = 0; pre[i] && l < (int)sizeof(full) - 8; i++) full[l++] = pre[i];
-        for (int i = 0; h->name[i] && l < (int)sizeof(full) - 6; i++) full[l++] = h->name[i];
-        full[l] = 0;
+        char full[96];
+        wlf_app_path(h->name, full, (int)sizeof(full));
         wlf_scan_one(full);
     }
     return 0;
@@ -480,13 +488,8 @@ int wlf_install_url(const char *url, char *err, int cap) {
         return -1;
     }
     WLF_DBG("url-kuruldu", h->name, 0);
-    char full[64];
-    int l = 0;
-    const char *pre = "C:/apps/";
-    for (int i = 0; pre[i] && l < (int)sizeof(full) - 8; i++) full[l++] = pre[i];
-    for (int i = 0; h->name[i] && l < (int)sizeof(full) - 6; i++) full[l++] = h->name[i];
-    full[l] = '.';
-    full[l + 1] = 'w'; full[l + 2] = 'l'; full[l + 3] = 'f'; full[l + 4] = 0;
+    char full[96];
+    wlf_app_path(h->name, full, (int)sizeof(full));
     wlf_scan_one(full);
     return 0;
 }
