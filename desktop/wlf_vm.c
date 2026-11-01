@@ -49,7 +49,13 @@ typedef struct {
 typedef struct {
     int used;
     lv_obj_t *body;
-    const uint8_t *base;       /* ham program (kaynak bellekte kalir) */
+    int sess;                    /* host oturum numarasi (madde 37):
+                                  * API'siz baglamda (timer) dogru pencereye
+                                  * donmek icin tutulur */
+    const uint8_t *base;       /* programin kendisi (kendi kopyamiz) */
+    uint8_t *owned;            /* base'in sahibi; oradaki s_wlf_buf paylasimli
+                                * oldugu icin kodu kendi bellekimize kopyalariz
+                                * (madde 36: ikinci tara/kur calisan VM'i bozardi) */
     const uint32_t *code;
     uint32_t words;
     const char *strs;
@@ -123,6 +129,8 @@ static int vm_exec(vm_inst_t *v, uint32_t entry);
 
 /* Kuytudaki olaylari calistir. */
 static void vm_drain(vm_inst_t *v) {
+    wlf_host_set_sess(v->sess);   /* host API'siz baglama girmeden oturumu
+                                   * geri yukle (madde 37) */
     int guard = 0;
     while (v->evq_n > 0 && guard++ < VM_EVQ) {
         int wid = v->evq[0].wid;
@@ -151,7 +159,11 @@ static void vm_timer_cb(lv_timer_t *t) {
 /* Host koprusu                                                        */
 /* ------------------------------------------------------------------ */
 
-static wolf_api_t *vm_api(vm_inst_t *v) { return wlf_api_get(v->body); }
+static wolf_api_t *vm_api(vm_inst_t *v) {
+    wolf_api_t *a = wlf_api_get(v->body);
+    v->sess = wlf_host_cur_sess();     /* bu VM hangi oturumda yasiyor */
+    return a;
+}
 
 static int vm_builtin(vm_inst_t *v, int id, const int32_t *a, int argc) {
     wolf_api_t *A = vm_api(v);
@@ -346,6 +358,9 @@ static void vm_body_del_cb(lv_event_t *e) {
     lv_obj_t *body = (lv_obj_t *)lv_event_get_user_data(e);
     for (int i = 0; i < VM_MAX_INST; i++) {
         if (s_inst[i].used && s_inst[i].body == body) {
+            if (s_inst[i].owned && g_asi && g_asi->mem && g_asi->mem->free)
+                g_asi->mem->free(s_inst[i].owned);
+            s_inst[i].owned = 0;
             s_inst[i].used = 0;
             s_inst[i].body = 0;
         }
@@ -372,10 +387,22 @@ int wlf_vm_run(const uint8_t *code, uint32_t len, lv_obj_t *body, asi_t *asi) {
     for (unsigned i = 0; i < sizeof(vm_inst_t); i++) ((char *)v)[i] = 0;
     v->used = 1;
     v->body = body;
-    v->base = code;
-    v->code = (const uint32_t *)(code + hdr);
+    v->sess = wlf_host_cur_sess();   /* cagiri yapan oturum (wlf_host_reset
+                                      * az once calisti) */
+
+    /* Kodu kendi bellek kopyamiza alin: cagri noktasi paketi ortak
+     * s_wlf_buf'e okuyor; baska bir tara/kur/calistir o tamponu ezerse
+     * calisan VM'in kodu bozulurdu (madde 36). */
+    uint8_t *own = 0;
+    if (g_asi && g_asi->mem && g_asi->mem->alloc)
+        own = (uint8_t *)g_asi->mem->alloc(len);
+    if (!own) { v->used = 0; v->body = 0; return -6; }
+    for (uint32_t i = 0; i < len; i++) own[i] = code[i];
+    v->owned = own;
+    v->base = own;
+    v->code = (const uint32_t *)(own + hdr);
     v->words = words;
-    v->strs = (const char *)(code + 16);
+    v->strs = (const char *)(own + 16);
     v->strs_len = slen;
 
     lv_obj_add_event_cb(body, vm_body_del_cb, LV_EVENT_DELETE, body);

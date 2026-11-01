@@ -315,22 +315,37 @@ static int wlf_run_native(dyn_app_t *d, const uint8_t *payload, uint32_t plen,
 void wlf_run_entry(dyn_app_t *d, lv_obj_t *body, asi_t *asi) {
     if (!d) return;
     wlf_host_reset(body);
+    /* Madde 36: paket ortak s_wlf_buf'e degil kendi tamponuna okunur;
+     * boylece calisma sirasinda baska bir tara/kur o tamponu ezemez.
+     * VM kodu kendi kopyasini ayrica alir (wlf_vm.c); native icin
+     * payload load_addr'e kopyalanir, tampon hemen birakilir. */
     uint32_t len = 0;
-    if (afs_read_at(d->fname, s_wlf_buf, sizeof(s_wlf_buf), &len) != 0) {
+    uint8_t *buf = 0;
+    int own = 0;
+    if (g_asi && g_asi->mem && g_asi->mem->alloc) {
+        buf = (uint8_t *)g_asi->mem->alloc(WLF_MAX_PACKAGE);
+        own = buf != 0;
+    }
+    if (!buf) buf = s_wlf_buf;
+    if (afs_read_at(d->fname, buf, WLF_MAX_PACKAGE, &len) != 0) {
+        if (own) g_asi->mem->free(buf);
         wlf_host_error("Paket diskten okunamadi");
         return;
     }
     const wlf_header_t *h = 0;
-    if (wlf_validate(s_wlf_buf, len, &h) != 0) {
+    if (wlf_validate(buf, len, &h) != 0) {
+        if (own) g_asi->mem->free(buf);
         wlf_host_error("Paket bozuk (dogrulama hatasi)");
         return;
     }
-    const uint8_t *payload = s_wlf_buf + h->payload_off;
+    const uint8_t *payload = buf + h->payload_off;
     if (h->kind == WLF_KIND_NATIVE) {
         int rc = wlf_run_native(d, payload, h->payload_len, body, asi);
+        if (own) g_asi->mem->free(buf);
         if (rc != 0) wlf_host_error("Uygulama hata kodu dondurdu");
     } else {
         int rc = wlf_vm_run(payload, h->payload_len, body, asi);
+        if (own) g_asi->mem->free(buf);
         if (rc != 0) wlf_host_error("Wolf program hatasi");
     }
 }
@@ -341,26 +356,37 @@ void wlf_run_entry(dyn_app_t *d, lv_obj_t *body, asi_t *asi) {
 
 int wlf_run_cli(dyn_app_t *d, const char *arg, void (*puts)(const char *s)) {
     if (!d) return -1;
+    /* Madde 36: paylasilan s_wlf_buf yerine kendi tamponu (bkz.
+     * wlf_run_entry aciklamasi). */
     uint32_t len = 0;
-    if (afs_read_at(d->fname, s_wlf_buf, sizeof(s_wlf_buf), &len) != 0) {
+    uint8_t *buf = 0;
+    int own = 0;
+    if (g_asi && g_asi->mem && g_asi->mem->alloc) {
+        buf = (uint8_t *)g_asi->mem->alloc(WLF_MAX_PACKAGE);
+        own = buf != 0;
+    }
+    if (!buf) buf = s_wlf_buf;
+    if (afs_read_at(d->fname, buf, WLF_MAX_PACKAGE, &len) != 0) {
         if (puts) puts("Paket diskten okunamadi\n");
+        if (own) g_asi->mem->free(buf);
         return -1;
     }
     const wlf_header_t *h = 0;
-    if (wlf_validate(s_wlf_buf, len, &h) != 0) {
+    if (wlf_validate(buf, len, &h) != 0) {
         if (puts) puts("Paket bozuk (dogrulama hatasi)\n");
+        if (own) g_asi->mem->free(buf);
         return -1;
     }
     /* Pencere yok: .wlf kendi kabi gorunmez bir kapsayiciya cizilir; metin
      * ciktisi terminale gider. Boylece UI cizmeyen backend uygulamalari da
      * ayni ikili bicimle calisir. */
     lv_obj_t *body = lv_obj_create(lv_screen_active());
-    if (!body) return -1;
+    if (!body) { if (own) g_asi->mem->free(buf); return -1; }
     lv_obj_add_flag(body, LV_OBJ_FLAG_HIDDEN);
     wlf_host_set_sink(puts);
     wlf_host_set_arg(arg);
     wlf_host_reset(body);
-    const uint8_t *payload = s_wlf_buf + h->payload_off;
+    const uint8_t *payload = buf + h->payload_off;
     int rc;
     if (h->kind == WLF_KIND_NATIVE)
         rc = wlf_run_native(d, payload, h->payload_len, body, g_asi);
@@ -368,7 +394,8 @@ int wlf_run_cli(dyn_app_t *d, const char *arg, void (*puts)(const char *s)) {
         rc = wlf_vm_run(payload, h->payload_len, body, g_asi);
     wlf_host_set_sink(0);
     wlf_host_set_arg(0);
-    lv_obj_delete(body);
+    lv_obj_delete(body);        /* VM govde silinince kendi kopyasini birakir */
+    if (own) g_asi->mem->free(buf);
     return rc;
 }
 
