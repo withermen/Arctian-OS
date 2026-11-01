@@ -172,6 +172,31 @@ const uint8_t *net_get_mac(void) {
     return 0;
 }
 
+/* RDRAND varsa ondan, yoksa zaman damgasi karisimindan 32-bit rastgele.
+ * DHCP xid'i ve DNS xid/kaynak port'u MAC'ten turetiliyordu ya da sirali
+ * idi; yerel agda taklit eden biri dogru degeri tahmin edebiliyordu. */
+uint32_t net_rand32(void) {
+    static int has_rdrand = -1;
+    if (has_rdrand < 0) {
+        uint32_t a, b, c, d;
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1));
+        has_rdrand = (c & (1u << 30)) ? 1 : 0;
+    }
+    if (has_rdrand) {
+        for (int t = 0; t < 32; t++) {
+            uint32_t v; uint8_t ok;
+            __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+            if (ok) return v;
+        }
+    }
+    uint64_t tsc;
+    __asm__ volatile("rdtsc" : "=A"(tsc));
+    static uint64_t mix = 0x9E3779B97F4A7C15ull;
+    mix ^= tsc + 0xA5A5A5A5A5A5A5A5ull;
+    mix *= 0x100000001B3ull;
+    return (uint32_t)(mix >> 32) ^ (uint32_t)mix;
+}
+
 extern bool e1000_link_up(void);
 
 int net_driver_type(void) { return net_drv.type; }

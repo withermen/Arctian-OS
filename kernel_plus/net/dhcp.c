@@ -25,10 +25,15 @@ static uint8_t  dhcp_offer_mask[4];
 static uint8_t  dhcp_offer_gw[4];
 static uint8_t  dhcp_offer_dns[4];
 static uint8_t  dhcp_server_id[4];
+static uint8_t  dhcp_req_server[4];  /* REQUEST'ta sundugumuz sunucu kimligi */
+static bool     dhcp_have_server;
 static bool     dhcp_have_mask;
 static bool     dhcp_have_gw;
 static bool     dhcp_have_dns;
 
+/* RDRAND varsa ondan, yoksa zaman damgası karışımından 32-bit rastgele.
+ * DHCP xid'i ve DNS xid/port'u MAC'ten turetiliyordu: yerel agda
+ * taklit eden biri dogru xid'i tahmin edebiliyordu. */
 static void cpy4(uint8_t dst[4], const uint8_t src[4]) {
     for (int i = 0; i < 4; i++) dst[i] = src[i];
 }
@@ -65,20 +70,63 @@ static uint8_t dhcp_parse_options(const uint8_t *opt, uint16_t len) {
 static void dhcp_udp_handler(const uint8_t src_ip[4], uint16_t src_port,
                              uint16_t dst_port, const uint8_t *data,
                              uint16_t len) {
-    (void)src_ip; (void)src_port; (void)dst_port;
+    (void)src_ip;
+    /* Madde 28: ACK dogrulanmiyordu. Yerel agda sahte sunucu, dogru xid'i
+     * tahmin edip (xid MAC'ten turetiliyordu) kendisini ağ geçidi/DNS
+     * olarak tanimlayabiliyordu. Artik: xid rastgele, mesaj yalnizca
+     * kendi MAC'imize yonelikse, sunucudan geliyorsa ve ACK bizim
+     * istedigimiz sekliyle (offer'lanan adres + sunucu kimligi) geliyor. */
+    if (src_port != DHCP_SERVER_PORT || dst_port != DHCP_CLIENT_PORT) return;
     if (len < 240) return;
     if (data[0] != 2) return;                       /* BOOTREPLY */
     if (rd32be(data + 4) != dhcp_xid) return;
+    if (data[1] != 1 || data[2] != 6) return;       /* htype=1 Ethernet, hlen=6 */
+    const uint8_t *mac = net_get_mac();
+    if (!mac) return;
+    for (int i = 0; i < 6; i++)
+        if (data[28 + i] != mac[i]) return;         /* chaddr bizdegilse atla */
     if (data[236] != DHCP_MAGIC0 || data[237] != DHCP_MAGIC1 ||
         data[238] != DHCP_MAGIC2 || data[239] != DHCP_MAGIC3) return;
 
-    uint8_t type = dhcp_parse_options(data + 240, (uint16_t)(len - 240));
-    cpy4(dhcp_offer_ip, data + 16);                 /* yiaddr */
+    uint8_t srv[4] = {0, 0, 0, 0};
+    int have_srv = 0;
+    /* Sunucu kimligini ayrica cevir: ACK'in iade ettigi degeri biz
+     * REQUEST'ta gonderdigiyle karsilastiracagiz; offer degerinin
+     * uzerine yazmasina izin verme. */
+    uint16_t i = 240;
+    while (i < len) {
+        uint8_t code = data[i++];
+        if (code == 0) continue;
+        if (code == 255) break;
+        if (i >= len) break;
+        uint8_t olen = data[i++];
+        if (i + olen > len) break;
+        if (code == 54 && olen >= 4) { cpy4(srv, data + i); have_srv = 1; }
+        i += olen;
+    }
 
-    if (type == DHCPOFFER && dhcp_state == 0)
+    uint8_t type = dhcp_parse_options(data + 240, (uint16_t)(len - 240));
+
+    if (type == DHCPOFFER && dhcp_state == 0) {
+        cpy4(dhcp_offer_ip, data + 16);             /* yiaddr */
+        if (have_srv) cpy4(dhcp_req_server, srv);   /* REQUEST'ta gonderilecek */
+        dhcp_have_server = have_srv;
         dhcp_state = 1;
-    else if (type == DHCPACK)
+    } else if (type == DHCPACK && dhcp_state == 1) {
+        /* ACK, REQUEST'ta sundugumuz adresi ve sunucu kimligini
+         * oldugu gibi iade etmeli; baska bir sekli kabul etme. */
+        int ok = 1;
+        for (int i = 0; i < 4; i++)
+            if (data[16 + i] != dhcp_offer_ip[i]) ok = 0;
+        if (dhcp_have_server) {
+            if (!have_srv) ok = 0;
+            else for (int k = 0; k < 4; k++)
+                if (srv[k] != dhcp_req_server[k]) ok = 0;
+        }
+        if (!ok) return;
+        cpy4(dhcp_server_id, have_srv ? srv : dhcp_req_server);
         dhcp_state = 2;
+    }
 }
 
 /* Ham Ethernet yayin karesi ile DHCP mesaji gonderir. */
@@ -163,17 +211,16 @@ bool dhcp_configure(void) {
     ipv4_config.configured = false;
 
     const uint8_t *mac = net_get_mac();
-    dhcp_xid = 0x3903F326u;
-    if (mac)
-        dhcp_xid = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
-                   ((uint32_t)mac[4] << 8) | (uint32_t)mac[5];
-    dhcp_xid ^= 0xA5A50000u;
+    /* xid rastgele: MAC'ten turetilen sabit xid, saldirinin dogru
+     * degeri basitce hesaplamasina yol aciyordu (madde 28). */
+    dhcp_xid = net_rand32();
     if (dhcp_xid == 0) dhcp_xid = 0x12345678u;
 
     dhcp_have_mask = dhcp_have_gw = dhcp_have_dns = false;
+    dhcp_have_server = false;
     for (int i = 0; i < 4; i++)
         dhcp_offer_ip[i] = dhcp_offer_mask[i] = dhcp_offer_gw[i] =
-        dhcp_offer_dns[i] = dhcp_server_id[i] = 0;
+        dhcp_offer_dns[i] = dhcp_server_id[i] = dhcp_req_server[i] = 0;
 
     bool got = false;
     for (int disc = 0; disc < 3 && !got; disc++) {
@@ -185,7 +232,7 @@ bool dhcp_configure(void) {
         }
         if (dhcp_state != 1) continue;
 
-        dhcp_send(DHCPREQUEST, dhcp_offer_ip, dhcp_server_id);
+        dhcp_send(DHCPREQUEST, dhcp_offer_ip, dhcp_req_server);
         for (int i = 0; i < 1000 && dhcp_state != 2; i++) {
             for (int w = 0; w < 20000; w++) { __asm__ volatile("pause"); }
             ipv4_poll();

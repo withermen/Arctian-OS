@@ -8,9 +8,12 @@
 #include "serial.h"
 #endif
 
-#define DNS_SRC_PORT 40000
+/* Kaynak portu sabit 40000 idi; yanit takladi yapan biri hem portu hem
+ * sirali xid'i bildigi icin zehirli cevap sikistirabiliyordu. Port ve
+ * xid artik her sorguda rastgele (madde 28). */
+#define DNS_SRC_PORT_MIN 49152u
+static uint16_t dns_src_port = 0;
 
-static uint16_t dns_xid = 1;
 static uint16_t dns_query_xid = 0;
 static int dns_name_len = 0;
 static dns_result_t *dns_results_ptr = 0;
@@ -91,12 +94,18 @@ static int dns_decode_name(const uint8_t *buf, int offset, int max_len,
     return 0;
 }
 
-/* udp_bind(DNS_SRC_PORT) tarafindan cagrilir. */
+/* udp_bind(dns_src_port) tarafindan cagrilir. */
 static void dns_udp_handler(const uint8_t src_ip[4], uint16_t src_port,
                             uint16_t dst_port, const uint8_t *udp_data,
                             uint16_t udp_len) {
-    (void)src_ip; (void)src_port; (void)dst_port;
+    (void)src_ip; (void)dst_port;
     if (dns_done || !dns_results_ptr || !dns_count_ptr || udp_len < 12) return;
+    /* Yanit, sorgumuzu gonderdigin sunucudan (port 53) gelmeli ve bir
+     * soru kaydi tasimali; uydurma/ektra cevaplar elenir. */
+    if (src_port != DNS_PORT) return;
+    if ((udp_data[2] & 0x80) == 0) return;          /* QR: yanit olmali */
+    if (udp_data[3] & 0x0F) return;                 /* rcode != 0 */
+    if (udp_data[4] || udp_data[5] != 1) return;    /* QDCOUNT == 1 */
 #ifdef ARCTIAN_NET_SELFTEST
     serial_printf("[dns] rx len=%d xid=%d\n", (int)udp_len,
                   (int)(((uint16_t)udp_data[0] << 8) | udp_data[1]));
@@ -141,11 +150,19 @@ static void dns_udp_handler(const uint8_t src_ip[4], uint16_t src_port,
     dns_done = true;
 }
 
+/* Her sorguda yeni rastgele kaynak port: port + xid birlikte tahmin
+ * edilemesin diye ikisi de her seferinde yenilenir. */
+static void dns_rebind(void) {
+    uint16_t p = (uint16_t)(DNS_SRC_PORT_MIN + (net_rand32() % 16383u));
+    if (dns_bound && dns_src_port)
+        udp_unbind(dns_src_port, dns_udp_handler);
+    dns_src_port = p;
+    udp_bind(p, dns_udp_handler);
+    dns_bound = true;
+}
+
 void dns_init(void) {
-    if (!dns_bound) {
-        udp_bind(DNS_SRC_PORT, dns_udp_handler);
-        dns_bound = true;
-    }
+    dns_rebind();
 }
 
 void dns_set_server(const uint8_t server[4]) {
@@ -201,7 +218,8 @@ bool dns_resolve(const char *hostname, dns_result_t results[DNS_RESULT_MAX], int
     uint8_t query[512];
     for (int i = 0; i < 512; i++) query[i] = 0;
 
-    uint16_t xid = dns_xid++;
+    uint16_t xid = (uint16_t)net_rand32();
+    dns_rebind();                      /* yeni port, yeni sorgu */
     query[0] = (xid >> 8) & 0xFF;
     query[1] = xid & 0xFF;
     query[2] = 0x01; query[3] = 0x00;
@@ -222,7 +240,7 @@ bool dns_resolve(const char *hostname, dns_result_t results[DNS_RESULT_MAX], int
     dns_done = false;
     if (count) *count = 0;
 
-    if (!udp_send(ipv4_config.dns_server, DNS_SRC_PORT, DNS_PORT, query, qpos)) {
+    if (!udp_send(ipv4_config.dns_server, dns_src_port, DNS_PORT, query, qpos)) {
 #ifdef ARCTIAN_NET_SELFTEST
         serial_printf("[dns] udp_send FAILED\n");
 #endif
@@ -240,7 +258,7 @@ bool dns_resolve(const char *hostname, dns_result_t results[DNS_RESULT_MAX], int
             ipv4_poll();
         }
         if (!dns_done && attempt < 2) {
-            if (!udp_send(ipv4_config.dns_server, DNS_SRC_PORT, DNS_PORT, query, qpos))
+            if (!udp_send(ipv4_config.dns_server, dns_src_port, DNS_PORT, query, qpos))
                 break;
 #ifdef ARCTIAN_NET_SELFTEST
             serial_printf("[dns] retry xid=%d name=%s\n", (int)xid, hostname);

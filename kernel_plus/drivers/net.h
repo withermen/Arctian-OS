@@ -40,6 +40,7 @@ bool net_send_packet(const uint8_t *data, uint16_t length);
 bool net_receive_packet(uint8_t *buf, uint16_t *length);
 bool net_has_packet(void);
 const uint8_t *net_get_mac(void);
+uint32_t net_rand32(void);    /* RDRAND / zaman damgasi karisimi rastgele */
 int  net_driver_type(void);   /* NET_TYPE_* veya -1 */
 bool net_link_up(void);       /* ethernet bagli mi */
 
