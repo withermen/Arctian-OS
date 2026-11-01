@@ -145,8 +145,16 @@ static int tls_bio_send(void *ctx, const unsigned char *buf, size_t len) {
     int conn = *(int *)ctx;
     if (len == 0) return 0;
     if (len > 16384) len = 16384;
-    if (!tcp_send(conn, (const uint8_t *)buf, (uint16_t)len))
-        return MBEDTLS_ERR_SSL_WANT_WRITE;
+    /* Tek seferde gonderilemezse (pencere kapandi) parca parca ilerle:
+     * tcp_send ortada takilirsa hicbir sey gonderilmemis sayilip record
+     * bastan denenirdi; hic ilerleme olmayan durumda WANT_WRITE doner. */
+    size_t chunk = len;
+    while (chunk > 1400) chunk >>= 1;
+    while (chunk < len && !tcp_send(conn, (const uint8_t *)buf, (uint16_t)chunk))
+        chunk >>= 1;
+    if (chunk == 0) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    if (!tcp_send(conn, (const uint8_t *)buf + chunk, (uint16_t)(len - chunk)))
+        return (int)chunk;                /* kismi gonderim: mbedTLS devamini ister */
     return (int)len;
 }
 
@@ -332,10 +340,21 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         mbedtls_ssl_set_hostname(&ssl, host);
         mbedtls_ssl_set_bio(&ssl, &conn, tls_bio_send, tls_bio_recv, NULL);
 
+        /* Madde 35: WANT_WRITE'de sonsuzcontinue livelock yolu vardi.
+         * BIO artik takilirsan WANT_WRITE donduruyor; burada toplam
+         * bir el sikisma siniri tutulur, sinir asilarsa bağlantidan
+         * vazgecirilir. */
+        uint64_t hs_deadline = clock_ms() + 30000;
         for (;;) {
             ret = mbedtls_ssl_handshake(&ssl);
             if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-                ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+                ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if ((int64_t)(clock_ms() - hs_deadline) >= 0) {
+                    ret = MBEDTLS_ERR_SSL_TIMEOUT;
+                    break;
+                }
+                continue;
+            }
             break;
         }
     }
@@ -385,10 +404,14 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         while (*tail && r < 8180) req[r++] = *tail++;
 
         size_t off = 0;
+        uint64_t wr_deadline = clock_ms() + 20000;
         while (off < r) {
             ret = mbedtls_ssl_write(&ssl, (const unsigned char *)req + off, r - off);
             if (ret > 0) { off += (size_t)ret; continue; }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if ((int64_t)(clock_ms() - wr_deadline) >= 0) { ret = -100; break; }
+                continue;
+            }
             break;
         }
     }
@@ -397,11 +420,13 @@ const char *https_get(const char *host, uint16_t port, const char *path,
     int hdr_end = -1;
     int has_cl = 0;
     uint32_t content_len = 0;
+    uint64_t rd_deadline = clock_ms() + 12000;   /* son bayttan beri 12 sn */
     if (ret >= 0) {
         for (;;) {
             unsigned char tmp[2048];
             ret = mbedtls_ssl_read(&ssl, tmp, sizeof(tmp));
             if (ret > 0) {
+                rd_deadline = clock_ms() + 12000;
                 append(https_buf, HTTPS_BUF_MAX, &total, (const char *)tmp, (uint32_t)ret);
 
                 if (hdr_end < 0) {
@@ -445,7 +470,10 @@ const char *https_get(const char *host, uint16_t port, const char *path,
                 if (total >= HTTPS_BUF_MAX - 1) break;
                 continue;
             }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if ((int64_t)(clock_ms() - rd_deadline) >= 0) { ret = -101; break; }
+                continue;
+            }
             break; /* 0, close notify veya hata */
         }
     }
