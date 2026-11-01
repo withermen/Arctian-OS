@@ -25,11 +25,15 @@ typedef struct __attribute__((packed)) {
     uint32_t iterations;
     uint8_t  salt[16];
     uint8_t  verifier[32];
-    uint8_t  pad[444];
+    uint32_t state;        /* DISKCRYPT_ST_* */
+    uint32_t progress;     /* yarida kalan isin sektoru (mutlak lba) */
+    uint8_t  pad[436];
 } diskcrypt_hdr_t;
 
 static int      s_present = 0;
 static int      s_unlocked = 0;
+static uint32_t s_state = DISKCRYPT_ST_FINAL;
+static uint32_t s_progress = 0;
 static uint32_t s_region_base = 0;
 static uint32_t s_region_end = 0;
 static uint32_t s_iter = 0;
@@ -97,11 +101,39 @@ static int verifier_match(const uint8_t key[32]) {
     return diff == 0;
 }
 
-static void crypt_enable(const uint8_t key[32]) {
+/* Durum basligini diske yaz. Kurulum/kaldirma her adimdan ONCE bu baslik
+ * guncellenir; boylece herhangi bir anda olacak bir cokie disk ya tam
+ * sifreli ya tam duz halde bulunur, "sifresiz gorunup icinde sifreli
+ * veri tasima" durumu olusmaz. */
+static int write_hdr(uint32_t state, uint32_t progress) {
+    uint8_t sec[DISKCRYPT_SECTOR];
+    for (int i = 0; i < DISKCRYPT_SECTOR; i++) sec[i] = 0;
+    diskcrypt_hdr_t *h = (diskcrypt_hdr_t *)sec;
+    h->magic = DISKCRYPT_MAGIC;
+    h->version = DISKCRYPT_VERSION;
+    h->region_base = s_region_base;
+    h->region_end = s_region_end;
+    h->iterations = s_iter;
+    for (int i = 0; i < 16; i++) h->salt[i] = s_salt[i];
+    for (int i = 0; i < 32; i++) h->verifier[i] = s_verifier[i];
+    h->state = state;
+    h->progress = progress;
+    if (storage_raw_write(DISKCRYPT_HDR_LBA, 1, sec) != 0) return -1;
+    storage_flush();
+    s_state = state;
+    s_progress = progress;
+    return 0;
+}
+
+static void aes_prep(const uint8_t key[32]) {
     mbedtls_aes_xts_init(&s_enc);
     mbedtls_aes_xts_init(&s_dec);
     mbedtls_aes_xts_setkey_enc(&s_enc, key, 256);
     mbedtls_aes_xts_setkey_dec(&s_dec, key, 256);
+}
+
+static void crypt_enable(const uint8_t key[32]) {
+    aes_prep(key);
     storage_crypt_t c;
     c.read = dc_read;
     c.write = dc_write;
@@ -110,16 +142,41 @@ static void crypt_enable(const uint8_t key[32]) {
     storage_set_crypt(&c);
 }
 
+/* [from, region_end) araligini kilit katmani ACIKKEN duz okuyup yerinde
+ * sifreler; her parca oncesi ilerleme basliga yazilir. Cokme sonrasi
+ * ayni aralik tekrar sifrelense veri bozulmaz (sifreleme tersine
+ * alinarak devam edilir). */
+static int finish_encrypt(uint32_t from) {
+    uint8_t sec[DISKCRYPT_SECTOR];
+    uint32_t lba = from;
+    while (lba < s_region_end) {
+        uint32_t top = lba + DISKCRYPT_CHUNK;
+        if (top > s_region_end) top = s_region_end;
+        if (write_hdr(DISKCRYPT_ST_ENC, lba) != 0) return -8;
+        for (uint32_t s = lba; s < top; s++) {
+            if (storage_read(s, 1, sec) != 0) return -6;
+            xts_do(&s_enc, MBEDTLS_AES_ENCRYPT, sec, s);
+            if (storage_raw_write(s, 1, sec) != 0) return -7;
+        }
+        storage_flush();
+        lba = top;
+    }
+    return 0;
+}
+
 void diskcrypt_init(void) {
     uint8_t sec[DISKCRYPT_SECTOR];
     s_present = 0;
     s_unlocked = 0;
+    s_state = DISKCRYPT_ST_FINAL;
+    s_progress = 0;
     if (storage_raw_read(DISKCRYPT_HDR_LBA, 1, sec) != 0) {
         s_status = "Disk okunamadi";
         return;
     }
     diskcrypt_hdr_t *h = (diskcrypt_hdr_t *)sec;
-    if (h->magic != DISKCRYPT_MAGIC || h->version != DISKCRYPT_VERSION) {
+    if (h->magic != DISKCRYPT_MAGIC ||
+        (h->version != DISKCRYPT_VERSION && h->version != 1u)) {
         s_status = "Sifreleme yok";
         return;
     }
@@ -134,7 +191,31 @@ void diskcrypt_init(void) {
     s_iter = h->iterations;
     for (int i = 0; i < 16; i++) s_salt[i] = h->salt[i];
     for (int i = 0; i < 32; i++) s_verifier[i] = h->verifier[i];
+    s_state = (h->version == 1u) ? DISKCRYPT_ST_FINAL : h->state;
+    s_progress = (h->version == 1u) ? 0 : h->progress;
+    if (s_state > DISKCRYPT_ST_DEC) s_state = DISKCRYPT_ST_FINAL;
+
+    /* Kaldirma yarida kalmis: [base,progress) ham halde duz, gerisi hala
+     * sifreli. progress == base ise bolge tumuyle duzlasmistir; basligi
+     * silip duz dis olarak devam et. */
+    if (s_state == DISKCRYPT_ST_DEC && s_progress <= s_region_base) {
+        for (int i = 0; i < DISKCRYPT_SECTOR; i++) sec[i] = 0;
+        storage_raw_write(DISKCRYPT_HDR_LBA, 1, sec);
+        storage_flush();
+        s_state = DISKCRYPT_ST_FINAL;
+        s_status = "Sifreleme yok";
+        return;
+    }
     s_present = 1;
+    if (s_state == DISKCRYPT_ST_ENC) {
+        /* Kurulum yarida: bolge tutarsiz, AFS kilidi kaldirilmaz. Duz
+         * verinin ustune sifreli veri yazilmasi (veri kaybi yolu) boylece
+         * imkansizlasir; kullanici parola ile kurulumu surdurene kadar
+         * disk bekler. */
+        s_status = "Kurulum yariada - parola gerekli";
+        afs_set_locked(1);
+        return;
+    }
     s_status = "Kilitli";
     afs_set_locked(1);
 }
@@ -152,6 +233,37 @@ int diskcrypt_unlock(const char *pass) {
         s_status = "Parola hatali";
         return -4;
     }
+
+    /* Kurulum yarida kalmis: once sifrelenmis kismi kilit katmaninin
+     * altindan gecerek duz oku, sonra kaldigi yerden kurulumu surdur. */
+    if (s_state == DISKCRYPT_ST_ENC) {
+        aes_prep(key);
+        uint32_t p = s_progress;
+        if (p < s_region_base) p = s_region_base;
+        if (p > s_region_end) p = s_region_end;
+        uint8_t sec[DISKCRYPT_SECTOR];
+        for (uint32_t lba = s_region_base; lba < p; lba++) {
+            if (storage_raw_read(lba, 1, sec) != 0) return -6;
+            xts_do(&s_dec, MBEDTLS_AES_DECRYPT, sec, lba);
+            if (storage_raw_write(lba, 1, sec) != 0) return -7;
+        }
+        s_progress = s_region_base;
+    }
+
+    if (s_state == DISKCRYPT_ST_ENC) {
+        /* kurulumu tamamla: kilit katmani henuz ACIK, duz okuma yapilir */
+        s_status = "Kurulum surduruluyor";
+        aes_prep(key);
+        int rc = finish_encrypt(s_progress);
+        if (rc != 0) { s_status = "Kurulum tamamlanAMadi - tekrar deneyin"; return rc; }
+        crypt_enable(key);
+        if (write_hdr(DISKCRYPT_ST_FINAL, 0) != 0) return -8;
+        s_unlocked = 1;
+        s_status = "Acik";
+        afs_set_locked(0);
+        return 0;
+    }
+
     crypt_enable(key);
     s_unlocked = 1;
     s_status = "Acik";
@@ -181,31 +293,19 @@ int diskcrypt_setup(const char *pass) {
     if (derive(pass, s_iter, key) != 0) return -5;
     verifier_of(key, s_verifier);
 
-    uint32_t used = afs_data_next();
-    if (used < s_region_base + 1u) used = s_region_base + 1u;
-    if (used > s_region_end) used = s_region_end;
+    /* Niyet basligi once yazilir: bu andan itibaren disk "kurulum suruyor"
+     * durumunda gorunur. Cokie olursa AFS kilidi acilmaz; yarim sifreli
+     * bolgenin ustune duz veri yazilamaz, kurulum parola ile
+     * surdurulur. Eskiden baslik EN SON yazildigi icin ayni pencerede
+     * dis "sifresiz" gorunur ve afs_format() ile sifreli veri silinirdi. */
+    if (write_hdr(DISKCRYPT_ST_ENC, s_region_base) != 0) return -8;
+
+    aes_prep(key);
+    int rc = finish_encrypt(s_region_base);
+    if (rc != 0) { s_status = "Kurulum yariada - tekrar deneyin"; return rc; }
 
     crypt_enable(key);
-
-    uint8_t sec[DISKCRYPT_SECTOR];
-    for (uint32_t lba = s_region_base; lba < used; lba++) {
-        if (storage_raw_read(lba, 1, sec) != 0) { storage_set_crypt(0); return -6; }
-        xts_do(&s_enc, MBEDTLS_AES_ENCRYPT, sec, lba);
-        if (storage_raw_write(lba, 1, sec) != 0) { storage_set_crypt(0); return -7; }
-    }
-
-    for (int i = 0; i < DISKCRYPT_SECTOR; i++) sec[i] = 0;
-    diskcrypt_hdr_t *h = (diskcrypt_hdr_t *)sec;
-    h->magic = DISKCRYPT_MAGIC;
-    h->version = DISKCRYPT_VERSION;
-    h->region_base = s_region_base;
-    h->region_end = s_region_end;
-    h->iterations = s_iter;
-    for (int i = 0; i < 16; i++) h->salt[i] = s_salt[i];
-    for (int i = 0; i < 32; i++) h->verifier[i] = s_verifier[i];
-    if (storage_raw_write(DISKCRYPT_HDR_LBA, 1, sec) != 0) return -8;
-    storage_flush();
-
+    if (write_hdr(DISKCRYPT_ST_FINAL, 0) != 0) return -8;
     s_present = 1;
     s_unlocked = 1;
     s_status = "Acik";
@@ -224,16 +324,35 @@ int diskcrypt_disable(const char *pass) {
     mbedtls_aes_xts_init(&dec);
     mbedtls_aes_xts_setkey_dec(&dec, key, 256);
 
-    uint32_t used = afs_data_next();
-    if (used < s_region_base) used = s_region_base;
-    if (used > s_region_end) used = s_region_end;
-
+    /* Kaldirma da asamali: [base,progress) duz, gerisi sifreli. Cokie
+     * olursa ilerideki boot kalan kismi duz okumaya devam eder; baslik
+     * silinmeden ilerlendigi icin "sifreli sanilan duz veri" olusmaz. */
+    uint32_t p = s_state == DISKCRYPT_ST_DEC && s_progress >= s_region_base &&
+                 s_progress <= s_region_end ? s_progress : s_region_base;
+    if (write_hdr(DISKCRYPT_ST_DEC, p) != 0) { mbedtls_aes_xts_free(&dec); return -7; }
     storage_set_crypt(0);
+    s_unlocked = 0;
+
     uint8_t sec[DISKCRYPT_SECTOR];
-    for (uint32_t lba = s_region_base; lba < used; lba++) {
-        if (storage_raw_read(lba, 1, sec) != 0) { mbedtls_aes_xts_free(&dec); return -5; }
-        xts_do(&dec, MBEDTLS_AES_DECRYPT, sec, lba);
-        if (storage_raw_write(lba, 1, sec) != 0) { mbedtls_aes_xts_free(&dec); return -6; }
+    while (p < s_region_end) {
+        uint32_t top = p + DISKCRYPT_CHUNK;
+        if (top > s_region_end) top = s_region_end;
+        if (write_hdr(DISKCRYPT_ST_DEC, p) != 0) { mbedtls_aes_xts_free(&dec); return -5; }
+        for (uint32_t lba = p; lba < top; lba++) {
+            if (storage_raw_read(lba, 1, sec) != 0) {
+                s_status = "Kaldirma yariada - tekrar deneyin";
+                mbedtls_aes_xts_free(&dec);
+                return -5;
+            }
+            xts_do(&dec, MBEDTLS_AES_DECRYPT, sec, lba);
+            if (storage_raw_write(lba, 1, sec) != 0) {
+                s_status = "Kaldirma yariada - tekrar deneyin";
+                mbedtls_aes_xts_free(&dec);
+                return -6;
+            }
+        }
+        storage_flush();
+        p = top;
     }
     mbedtls_aes_xts_free(&dec);
 
@@ -243,6 +362,8 @@ int diskcrypt_disable(const char *pass) {
 
     s_present = 0;
     s_unlocked = 0;
+    s_state = DISKCRYPT_ST_FINAL;
+    s_progress = 0;
     s_status = "Sifreleme yok";
     afs_set_locked(0);
     return 0;

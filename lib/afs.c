@@ -67,7 +67,8 @@ int  afs_is_locked(void) { return s_locked; }
 int afs_disk_is_encrypted(void) {
     uint32_t hdr[128];
     if (storage_read(DISKCRYPT_HDR_LBA, 1, hdr) != 0) return 0;
-    return hdr[0] == DISKCRYPT_MAGIC && hdr[1] == DISKCRYPT_VERSION;
+    return hdr[0] == DISKCRYPT_MAGIC &&
+           (hdr[1] == DISKCRYPT_VERSION || hdr[1] == 1u);
 }
 
 static uint32_t s_uid = 0;
