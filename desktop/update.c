@@ -358,13 +358,32 @@ int update_apply(void) {
         u_set_state(UPDATE_ERROR, "Bellek yetersiz");
         return -1;
     }
-    if (s_man.count <= 0) {
+    /* Madde 68: kurmadan "guncellendi" demek yasak. Manifesto taze bir
+     * kontrolun, imza dogrulamasiyla birlikte gelmis olmasi ve surumun
+     * gercekten bizim kurulu surumumuzden yeni olmasi gerekir. Eskiden
+     * tek kosul s_man.count > 0 idi: hic kontrol calismadan (bayat manifest)
+     * ya da imzasi reddedilmis manifestla buraya gelip hicbir sey kurmadan
+     * C:/etc/update.cfg surumu yukseltiliyordu. */
+    if (!s_man_verified || !s_man.version[0]) {
         u_set_state(UPDATE_ERROR, "Once guncelleme kontrol edilmeli");
+        return -1;
+    }
+    if (u_ver_cmp(s_man.version, s_applied) <= 0) {
+        u_set_state(UPDATE_UPTODATE, "Sistem guncel");
+        return 0;
+    }
+    if (s_man.count <= 0) {
+        u_set_state(UPDATE_ERROR, "Manifestoda kurulacak modul yok");
+        return -1;
+    }
+    if (!s_install) {
+        u_set_state(UPDATE_ERROR, "Kurucu bagli degil");
         return -1;
     }
     u_set_state(UPDATE_DOWNLOADING, "Indiriliyor...");
     s_st.total = s_man.count;
 
+    int installed = 0;                           /* gercekten kurulan modul */
     for (int i = 0; i < s_man.count; i++) {
         update_file_t *f = &s_man.files[i];
         s_st.cur = i + 1;
@@ -375,7 +394,7 @@ int update_apply(void) {
         u_cat(m, sizeof(m), f->id[0] ? f->id : "?");
         u_cpy(s_st.message, sizeof(s_st.message), m);
 
-        if (!f->package[0]) continue;
+        if (!f->package[0]) continue;            /* paket yolu yok: atla */
 
         char url[200];
         u_cpy(url, sizeof(url), s_base);
@@ -389,14 +408,21 @@ int update_apply(void) {
             u_set_state(UPDATE_ERROR, "CRC dogrulama hatasi");
             return -4;
         }
-        if (s_install) {
-            char err[64];
-            err[0] = 0;
-            if (s_install(s_buf, len, err, sizeof(err)) != 0) {
-                u_set_state(UPDATE_ERROR, err[0] ? err : "Kurulum hatasi");
-                return -5;
-            }
+        char err[64];
+        err[0] = 0;
+        if (s_install(s_buf, len, err, sizeof(err)) != 0) {
+            u_set_state(UPDATE_ERROR, err[0] ? err : "Kurulum hatasi");
+            return -5;
         }
+        installed++;
+    }
+
+    /* Tek bir modul bile kurulmadiysa surum yukseltilmez: aksi halde
+     * bir sonraki kontrol "zaten guncel" der ve kayıp kurulum bir daha
+     * denemez (madde 68). */
+    if (installed <= 0) {
+        u_set_state(UPDATE_ERROR, "Kurulacak paket bulunamadi");
+        return -6;
     }
 
     s_st.progress = 100;
