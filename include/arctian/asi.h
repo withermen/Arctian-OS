@@ -258,6 +258,11 @@ typedef struct {
     int  (*sock_close)(int fd);
     int  (*sock_state)(int fd);
     int  (*sock_port)(int fd);
+
+    /* cookie_set'in secure bayrakli hali (ABI icin yapinin sonunda).
+     * secure=1 cerez yalnizca TLS baglantilarina gonderilir. */
+    void (*cookie_set2)(const char *host, const char *name, const char *value,
+                        int secure);
 } asi_net_t;
 
 typedef struct {

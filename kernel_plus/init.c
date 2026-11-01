@@ -309,6 +309,11 @@ static void net_cookie_set(const char *host, const char *name, const char *value
     if (net_perm()) return;
     https_cookie_set(host, name, value);
 }
+static void net_cookie_set2(const char *host, const char *name,
+                            const char *value, int secure) {
+    if (net_perm()) return;
+    https_cookie_set2(host, name, value, secure);
+}
 /* Akisli indirme: https icin mevcut tamponlu yol, http icin streaming. */
 static int net_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out) {
     if (net_perm()) return -1;
@@ -792,6 +797,7 @@ void kernel_plus_main(void *arg) {
     s_net.https_get = net_https_get;
     s_net.last_url = net_last_url;
     s_net.cookie_set = net_cookie_set;
+    s_net.cookie_set2 = net_cookie_set2;
     s_net.download = net_download;
     s_net.submit = net_submit;
     s_net.busy = net_busy;

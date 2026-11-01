@@ -664,12 +664,72 @@ static void set_func(JSValueConst obj, const char *name, JSCFunction *fn, int le
 
 static char g_ck_name[CK_MAXN][48];
 static char g_ck_val[CK_MAXN][4096];
+static char g_ck_secure[CK_MAXN];    /* 1: TLS sayfada kuruldu (madde 27) */
 static int  g_ck_n = 0;
 static char g_cookie[8192];
+static char g_ck_host[160];          /* kuyruk hangi host icin dolu */
+static int  g_ck_tls = -1;           /* o hostun su anki sayfasi TLS mi */
+
+/* Sayfanin tam URL'sinden host ve seveyi (https mi) cikar; engine'in
+ * gosterdigi cerez kuyrugu host'a baglidir, host degisince kuyruk
+ * bosaltilir - sayfalar arasi cerez tasmasi (madde 27) boyle biter. */
+static int cur_host(char *out, int cap, int *tls) {
+    char url[512];
+    url[0] = 0;
+    int n = 0;
+    if (g_have_host && g_host.current_url)
+        n = g_host.current_url(url, sizeof(url));
+    /* host current_url vermiyorsa (0) ya da bos donerse host bilinmiyor;
+     * kuyruga dokunmayiz (eski davranis). */
+    if (n <= 0 || !url[0]) return 0;
+    const char *p = url;
+    int t = 0;
+    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
+        p += 4;
+        if (*p == 's') { t = 1; p++; }
+        if (p[0] == ':' && p[1] == '/' && p[2] == '/') p += 3;
+    } else {
+        /* tam URL degil (salt yol olabilir): seyi bilemeyiz, guvenli ol
+         * diye host'u yolun kendisi sanmayi birak, sikayet etme. */
+        return 0;
+    }
+    int i = 0;
+    while (p[i] && p[i] != '/' && p[i] != ':' && p[i] != '?' && i < cap - 1) {
+        out[i] = p[i];
+        i++;
+    }
+    out[i] = 0;
+    if (tls) *tls = t;
+    return i > 0;
+}
+
+static void ck_sync_host(void) {
+    char h[160];
+    int tls = 0;
+    if (!cur_host(h, sizeof(h), &tls)) return;   /* host bilinmiyorsa dokunma */
+    int same = 1;
+    for (int i = 0; h[i] || g_ck_host[i]; i++) {
+        char a = h[i], b = g_ck_host[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if (a != b) { same = 0; break; }
+    }
+    if (!same) {
+        g_ck_n = 0;                              /* yeni host: temiz basla */
+        g_ck_host[0] = 0;
+        g_ck_tls = -1;
+    }
+    strncpy(g_ck_host, h, sizeof(g_ck_host) - 1);
+    g_ck_host[sizeof(g_ck_host) - 1] = 0;
+    g_ck_tls = tls;
+    (void)tls;
+}
 
 static void ck_rebuild(void) {
     int o = 0;
     for (int i = 0; i < g_ck_n; i++) {
+        /* duz http sayfasi Secure cerezi goremez (madde 27) */
+        if (g_ck_secure[i] && g_ck_tls == 0) continue;
         if (o && o < (int)sizeof(g_cookie) - 2) { g_cookie[o++] = ';'; g_cookie[o++] = ' '; }
         for (const char *n = g_ck_name[i]; *n && o < (int)sizeof(g_cookie) - 1; n++) g_cookie[o++] = *n;
         if (o < (int)sizeof(g_cookie) - 1) g_cookie[o++] = '=';
@@ -677,13 +737,14 @@ static void ck_rebuild(void) {
     }
     g_cookie[o] = 0;
 }
-static void ck_store(const char *n, int nl, const char *v, int vl) {
+static void ck_store(const char *n, int nl, const char *v, int vl, int secure) {
     if (nl <= 0) return;
     if (nl > (int)sizeof(g_ck_name[0]) - 1) nl = (int)sizeof(g_ck_name[0]) - 1;
     if (vl > (int)sizeof(g_ck_val[0]) - 1) vl = (int)sizeof(g_ck_val[0]) - 1;
     for (int i = 0; i < g_ck_n; i++) {
         if ((int)strlen(g_ck_name[i]) == nl && strncmp(g_ck_name[i], n, nl) == 0) {
             memcpy(g_ck_val[i], v, vl); g_ck_val[i][vl] = 0;
+            g_ck_secure[i] = (char)(secure ? 1 : 0);
             ck_rebuild();
             return;
         }
@@ -692,12 +753,15 @@ static void ck_store(const char *n, int nl, const char *v, int vl) {
         int i = g_ck_n++;
         memcpy(g_ck_name[i], n, nl); g_ck_name[i][nl] = 0;
         memcpy(g_ck_val[i], v, vl); g_ck_val[i][vl] = 0;
+        g_ck_secure[i] = (char)(secure ? 1 : 0);
         ck_rebuild();
     }
 }
 
 static JSValue doc_get_cookie(JSContext *ctx, JSValueConst this_val, int magic) {
     (void)ctx; (void)this_val; (void)magic;
+    ck_sync_host();                    /* host degistiyse kuyrugu sifirla */
+    ck_rebuild();                      /* guncel seye gore yeniden kur */
     if (g_cookie[0] && g_print_cb) {
         g_print_cb("[cget] ", 7);
         g_print_cb(g_cookie, (unsigned)strlen(g_cookie));
@@ -726,9 +790,23 @@ static JSValue doc_set_cookie(JSContext *ctx, JSValueConst this_val, JSValueCons
             while (ve > vs && ve[-1] == ' ') ve--;
             int nl = (int)(ne - ns), vl = (int)(ve - vs);
             if (nl > 0 && vl >= 0) {
+                /* JS "Secure" niteligi yazabilir; TLS'de kurulan cerez
+                 * zaten Secure sayilir (madde 27). */
+                ck_sync_host();
+                int secure = (g_ck_tls == 1);
+                for (const char *q = ve; q && *q; q++) {
+                    if ((*q == 'S' || *q == 's') &&
+                        (q == ve || q[-1] == ';' || q[-1] == ' ') &&
+                        !(q[1] != 'e' && q[1] != 'E') && !(q[2] != 'c' && q[2] != 'C') &&
+                        !(q[3] != 'u' && q[3] != 'U') && !(q[4] != 'r' && q[4] != 'R') &&
+                        !(q[5] != 'e' && q[5] != 'e')) {
+                        char e = q[6];
+                        if (e == 0 || e == ';' || e == ' ' || e == '\t') secure = 1;
+                    }
+                }
                 if (g_have_host && g_host.set_cookie)
                     g_host.set_cookie(ns, (unsigned)nl, vs, (unsigned)vl);
-                ck_store(ns, nl, vs, vl);
+                ck_store(ns, nl, vs, vl, secure);
             }
         }
         JS_FreeCString(g_ctx, s);

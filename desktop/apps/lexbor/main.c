@@ -533,14 +533,20 @@ static long long wh_child_at(long long h, int index) {
 }
 
 static int wh_set_cookie(const char *name, unsigned nlen, const char *val, unsigned vlen) {
-    if (!s_asi || !s_asi->net || !s_asi->net->cookie_set || !g_cur_host[0]) return -1;
+    if (!s_asi || !s_asi->net) return -1;
+    if (!s_asi->net->cookie_set && !s_asi->net->cookie_set2) return -1;
+    if (!g_cur_host[0]) return -1;
     char n[64], v[1024];
     unsigned i;
     for (i = 0; i < nlen && i < sizeof(n) - 1; i++) n[i] = name[i];
     n[i] = 0;
     for (i = 0; i < vlen && i < sizeof(v) - 1; i++) v[i] = val[i];
     v[i] = 0;
-    s_asi->net->cookie_set(g_cur_host, n, v);
+    /* Madde 27: TLS sayfasinda kurulan cerez Secure sayilir. */
+    if (s_asi->net->cookie_set2)
+        s_asi->net->cookie_set2(g_cur_host, n, v, g_is_https ? 1 : 0);
+    else
+        s_asi->net->cookie_set(g_cur_host, n, v);
     return 0;
 }
 

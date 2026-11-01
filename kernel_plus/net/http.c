@@ -3,6 +3,7 @@
 #include "tcp.h"
 #include "kernel.h"
 #include "clock.h"
+#include "https.h"      /* cerez deposu (madde 27) */
 #ifdef ARCTIAN_NET_SELFTEST
 #include "serial.h"
 #endif
@@ -89,6 +90,21 @@ bool http_get(const char *url, http_response_t *response) {
     const char *ua_line = "User-Agent: Arctian/" ARCTIAN_VERSION "\r\n";
     const char *accept_line = "Accept: text/html,text/plain\r\n\r\n";
     while (*crlf) request[ri++] = *crlf++;
+    /* Madde 27: duz http istekleri de cerez deposunu kullansin; Secure
+     * cerezler burada gonderilmez (ck_build tls=0 ile eler). Sigmiyorsa
+     * basligi hic ekleme (parca cerez basligi gonderme). */
+    {
+        static char ck[768];
+        int cn = https_ck_build(host, 0, ck, sizeof(ck));
+        int room = (int)sizeof(request) - ri - 12;
+        if (cn > 0 && cn <= room) {
+            const char *ch = "Cookie: ";
+            while (*ch) request[ri++] = *ch++;
+            for (int i = 0; ck[i]; i++) request[ri++] = ck[i];
+            request[ri++] = '\r';
+            request[ri++] = '\n';
+        }
+    }
     while (*conn_line) request[ri++] = *conn_line++;
     while (*ua_line) request[ri++] = *ua_line++;
     while (*accept_line) request[ri++] = *accept_line++;
@@ -149,6 +165,19 @@ bool http_get(const char *url, http_response_t *response) {
 
     if (total == 0) return false;
     http_response_buf[total] = '\0';
+    /* Yanit basliklarindaki Set-Cookie satirlarini depoya isle; http
+     * uzerinde kurulan cerezler Secure degilse yine http'ye gider. */
+    {
+        int he = 0;
+        for (int i = 0; i + 3 < total; i++) {
+            if (http_response_buf[i] == '\r' && http_response_buf[i + 1] == '\n' &&
+                http_response_buf[i + 2] == '\r' && http_response_buf[i + 3] == '\n') {
+                he = i;
+                break;
+            }
+        }
+        if (he > 0) https_ck_absorb(http_response_buf, (uint32_t)he, host, 0);
+    }
 
 #ifdef ARCTIAN_NET_SELFTEST
     {

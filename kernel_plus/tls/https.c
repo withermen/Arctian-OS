@@ -192,6 +192,8 @@ typedef struct {
     char host[CK_HOSTMAX];
     char name[CK_NAMEMAX];
     char val[CK_VALMAX];
+    char secure;      /* 1: cerez TLS uzerinde kuruldu ya da Secure
+                       * bayrakli geldi; duz http'ye hic gitmez (madde 27) */
 } ck_ent_t;
 
 static ck_ent_t s_ck[CK_MAX];
@@ -230,7 +232,7 @@ static int ck_host_match(const char *req, const char *dom) {
 }
 
 static void ck_set(const char *host, const char *name, int nlen,
-                   const char *val, int vlen) {
+                   const char *val, int vlen, int secure) {
     if (!host || !name || nlen <= 0) return;
     int idx = -1;
     int hl = ck_len(host);
@@ -249,12 +251,14 @@ static void ck_set(const char *host, const char *name, int nlen,
     ck_copy(s_ck[idx].host, CK_HOSTMAX, host, hl);
     ck_copy(s_ck[idx].name, CK_NAMEMAX, name, nlen);
     ck_copy(s_ck[idx].val, CK_VALMAX, val, vlen);
+    s_ck[idx].secure = (char)(secure ? 1 : 0);
 }
 
-static int ck_build(const char *host, char *out, int cap) {
+static int ck_build(const char *host, int tls, char *out, int cap) {
     int o = 0;
     for (int i = 0; i < s_ck_count; i++) {
         if (!ck_host_match(host, s_ck[i].host)) continue;
+        if (s_ck[i].secure && !tls) continue;   /* guvenli cerez http'ye gitmez */
         int need = ck_len(s_ck[i].name) + 1 + ck_len(s_ck[i].val) + (o ? 2 : 0);
         if (o + need >= cap - 1) break;
         if (o) { out[o++] = ';'; out[o++] = ' '; }
@@ -266,7 +270,7 @@ static int ck_build(const char *host, char *out, int cap) {
     return o;
 }
 
-static void ck_absorb(const char *hdr, uint32_t hlen, const char *host) {
+static void ck_absorb(const char *hdr, uint32_t hlen, const char *host, int tls) {
     uint32_t i = 0;
     while (i < hlen) {
         uint32_t ls = i;
@@ -291,28 +295,52 @@ static void ck_absorb(const char *hdr, uint32_t hlen, const char *host) {
 
         char dom[CK_HOSTMAX];
         ck_copy(dom, CK_HOSTMAX, host, ck_len(host));
+        int secure = tls;              /* TLS uzerinde kuruldu: Secure gibi */
+        int dom_done = 0;
         uint32_t q = ve;
-        while (q + 7 <= le) {
-            if (ck_eqn(hdr + q, "domain=", 7)) {
+        while (q + 6 <= le) {
+            if (!dom_done && q + 7 <= le && ck_eqn(hdr + q, "domain=", 7)) {
                 uint32_t ds = q + 7;
                 uint32_t de = ds;
                 while (de < le && hdr[de] != ';' && hdr[de] != ' ' && hdr[de] != '\t') de++;
                 if (ds < de && hdr[ds] == '.') ds++;
                 if (de > ds) ck_copy(dom, CK_HOSTMAX, hdr + ds, (int)(de - ds));
-                break;
+                dom_done = 1;
+            }
+            if ((q == ve || hdr[q - 1] == ';') && le - q >= 6 &&
+                ck_eqn(hdr + q, "secure", 6)) {
+                uint32_t e2 = q + 6;
+                if (e2 == le || hdr[e2] == ';' || hdr[e2] == ' ' || hdr[e2] == '\t')
+                    secure = 1;
             }
             q++;
         }
-        ck_set(dom, hdr + ns, (int)(ne - ns), hdr + vs, (int)(ve - vs));
+        ck_set(dom, hdr + ns, (int)(ne - ns), hdr + vs, (int)(ve - vs), secure);
         cdbg("[ck] absorb ", hdr + ns, (int)(ne - ns));
     }
 }
 
 void https_cookie_set(const char *host, const char *name, const char *value) {
+    https_cookie_set2(host, name, value, 0);
+}
+
+/* secure=1: cerez yalnizca TLS baglantilarina gonderilir (madde 27). */
+void https_cookie_set2(const char *host, const char *name, const char *value,
+                       int secure) {
     if (!host || !name || !name[0]) return;
     cdbg("[ck] jsset name=", name, ck_len(name));
     cdbg("[ck] jsval=", value ? value : "", ck_len(value ? value : ""));
-    ck_set(host, name, ck_len(name), value ? value : "", ck_len(value ? value : ""));
+    ck_set(host, name, ck_len(name), value ? value : "", ck_len(value ? value : ""),
+           secure);
+}
+
+/* http yigininin (http.c) cerez deposuna erisimi (madde 27). */
+int https_ck_build(const char *host, int tls, char *out, int cap) {
+    return ck_build(host, tls, out, cap);
+}
+
+void https_ck_absorb(const char *hdr, uint32_t hlen, const char *host, int tls) {
+    ck_absorb(hdr, hlen, host, tls);
 }
 
 const char *https_get(const char *host, uint16_t port, const char *path,
@@ -370,7 +398,7 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         while (*v) req[r++] = *v++;
         for (int i = 0; host[i] && r < 3100; i++) req[r++] = host[i];
         char ck[6144];
-        if (ck_build(host, ck, sizeof(ck)) > 0) {
+        if (ck_build(host, 1, ck, sizeof(ck)) > 0) {
             cdbg("[ck] cookie=", ck, (int)ck_len(ck));
             int has = 0;
             for (int i = 0; ck[i]; i++) {
@@ -487,7 +515,7 @@ const char *https_get(const char *host, uint16_t port, const char *path,
                 break;
             }
         }
-        if (hle > 0) ck_absorb(https_buf, hle, host);
+        if (hle > 0) ck_absorb(https_buf, hle, host, 1);
     }
 
     s_last_err = ret;

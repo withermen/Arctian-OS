@@ -5209,7 +5209,10 @@ static void blog_s(const char *s);
 static void blog_i(int v);
 static void blog(const char *s, unsigned len);
 static int wh_set_cookie(const char *name, unsigned nlen, const char *val, unsigned vlen) {
-    if (!g_basi || !g_basi->net || !g_basi->net->cookie_set || !g_cur_host[0]) return -1;
+    if (!g_basi || !g_basi->net) return -1;
+    /* cookie_set2 yoksa eski yonteme dus (ABI geriyee uyumlu kalsin). */
+    if (!g_basi->net->cookie_set && !g_basi->net->cookie_set2) return -1;
+    if (!g_cur_host[0]) return -1;
     char n[64], v[4096];
     unsigned i;
     for (i = 0; i < nlen && i < sizeof(n) - 1; i++) n[i] = name[i];
@@ -5218,7 +5221,13 @@ static int wh_set_cookie(const char *name, unsigned nlen, const char *val, unsig
     for (i = 0; i < vlen && i < sizeof(v) - 1; i++) v[i] = val[i];
     v[i] = 0;
     unsigned vl = i;
-    g_basi->net->cookie_set(g_cur_host, n, v);
+    /* Madde 27: JS'in kurduugu cerez su anhangi sayfada TLS uzerinde
+     * kuruluyorsa Secure sayilir; duz http sayfasi secure kuramaz. */
+    int secure = (g_cur_scheme[0] == 'h' && g_cur_scheme[5] == 's') ? 1 : 0;
+    if (g_basi->net->cookie_set2)
+        g_basi->net->cookie_set2(g_cur_host, n, v, secure);
+    else
+        g_basi->net->cookie_set(g_cur_host, n, v);
     blog_s("[ck] js set "); blog(n, nl);
     blog_s(" len="); blog_i((int)vl);
     blog_s(" host="); blog_s(g_cur_host); blog_s("\n");

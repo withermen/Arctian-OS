@@ -30,4 +30,15 @@ void https_last_error(char *buf, int cap);
 /* JS document.cookie tarafindan yazilan cerezi depoya ekler. */
 void https_cookie_set(const char *host, const char *name, const char *value);
 
+/* cookie_set'in secure bayrakli hali; secure=1 cerez yalnizca TLS
+ * baglantilarina gonderilir (madde 27). */
+void https_cookie_set2(const char *host, const char *name, const char *value,
+                       int secure);
+
+/* Cerez deposunun http tarafi (madde 27): duz http isteklerine
+ * "Cookie: ..." basligi kurar (tls=0; Secure cerezler elenir) ve http
+ * yanitindaki Set-Cookie satirlarini depoya isler. */
+int  https_ck_build(const char *host, int tls, char *out, int cap);
+void https_ck_absorb(const char *hdr, uint32_t hlen, const char *host, int tls);
+
 #endif /* ARCTIAN_HTTPS_H */
