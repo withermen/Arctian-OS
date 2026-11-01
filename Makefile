@@ -71,7 +71,7 @@ COMMON = -std=gnu11 -m64 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
 
 INCLUDES = -Iinclude/arctian -Imain_kernel -Ikernel_plus/drivers -Ikernel_plus/net \
            -Ikernel_plus/tls \
-           -Ikernel_plus/system -Idesktop -Idesktop/shell -Idesktop/ui-kit \
+           -Ikernel_plus/system -Idesktop \
            -Idesktop/port -Idesktop/theme \
            -Iinstall -Ilib -Ithird_party -Ithird_party/lvgl \
            -Ithird_party/quickjs \
