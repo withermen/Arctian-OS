@@ -209,6 +209,36 @@ static uint32_t hdr_bytes(void) {
     return AFS_HEADER_BASE + H.max_files * AFS_ENTRY_SIZE;
 }
 
+/* Header yapisi 47140 bayt; sektor katrovasi 93 sektor = 47616 bayt.
+ * Eskiden 93 sektor dogrudan &H'ye okunup &H'den yaziliyordu; fazlalik
+ * ~476 bayt ya diskteki artiktan BSS'in yanina tasiyor (mounted/s_uid/
+ * crc tabli bozuluyordu) ya da BSS icerigi diske siziyordu. Okuma ve
+ * yazma artik tam boy tampon uzerinden gecer; slack daima sifirlanir. */
+static uint8_t s_hbuf[AFS_HDR_MAX_SEC * 512u];
+
+static int hdr_load_at(uint32_t lba, uint32_t hs) {
+    if (hs == 0 || hs > AFS_HDR_MAX_SEC) return -1;
+    if (storage_read(lba, hs, s_hbuf) != 0) return -1;
+    uint8_t *d = (uint8_t *)&H;
+    uint32_t n = hs * 512u;
+    if (n > (uint32_t)sizeof(H)) n = (uint32_t)sizeof(H);
+    uint32_t i;
+    for (i = 0; i < n; i++) d[i] = s_hbuf[i];
+    for (; i < (uint32_t)sizeof(H); i++) d[i] = 0;
+    return 0;
+}
+
+static int hdr_save_at(uint32_t lba, uint32_t hs) {
+    if (hs == 0 || hs > AFS_HDR_MAX_SEC) return -1;
+    uint8_t *s = (uint8_t *)&H;
+    uint32_t n = (uint32_t)sizeof(H);
+    if (n > hs * 512u) n = hs * 512u;
+    uint32_t i;
+    for (i = 0; i < n; i++) s_hbuf[i] = s[i];
+    for (; i < hs * 512u; i++) s_hbuf[i] = 0;
+    return storage_write(lba, hs, s_hbuf);
+}
+
 /* Header'in kendi CRC'si (flags alani sifirlanarak hesaplanir). */
 static uint32_t hdr_crc(void) {
     uint32_t saved = H.flags;
@@ -249,7 +279,7 @@ static int hdr_commit(void) {
     uint32_t jl = journal_lba();
     if (jl == 0 || H.data_next > jl || H.hdr_sectors + 1u > AFS_JOURNAL_SEC) {
         /* Gunluk yok ya da veriyle cakisir: dogrudan yaz (geriye uyumlu). */
-        return storage_write(AFS_BASE_LBA, H.hdr_sectors, &H);
+        return hdr_save_at(AFS_BASE_LBA, H.hdr_sectors);
     }
 
     /* H.flags az once eski header'in CRC'sini tasiryordu; eski deger kayit
@@ -258,7 +288,7 @@ static int hdr_commit(void) {
     uint32_t prev_crc = H.flags;
 
     /* 1) Yeni header'i gunluk yukune yaz. */
-    if (storage_write(jl + 1u, H.hdr_sectors, &H) != 0) return -1;
+    if (hdr_save_at(jl + 1u, H.hdr_sectors) != 0) return -1;
     storage_flush();
     /* 2) Gunluk kaydini commit et (state=1). Kayit tek sektore sigar; tampon
      *    512 bayt olmali cunku storage katmani daima 1 tam sektor yazar. */
@@ -274,7 +304,7 @@ static int hdr_commit(void) {
     if (storage_write(jl, 1, sec) != 0) return -1;
     storage_flush();
     /* 3) Header'a uygula. */
-    if (storage_write(AFS_BASE_LBA, H.hdr_sectors, &H) != 0) return -1;
+    if (hdr_save_at(AFS_BASE_LBA, H.hdr_sectors) != 0) return -1;
     storage_flush();
     /* 4) Gunlugu temizle (state=0). */
     rec->state = 0;
@@ -305,11 +335,11 @@ static void journal_replay(void) {
         return;
     }
 
-    if (storage_read(jl + 1u, rec->hdr_sectors, &H) != 0) return;
+    if (hdr_load_at(jl + 1u, rec->hdr_sectors) != 0) return;
     if (H.magic != AFS_MAGIC || H.version != AFS_VERSION ||
         H.max_files < 32u || H.max_files > AFS_MAX_FILES_HARD) { journal_clear(jl); return; }
     if (crc32_buf(&H, hdr_bytes()) != rec->crc) { journal_clear(jl); return; }
-    storage_write(AFS_BASE_LBA, rec->hdr_sectors, &H);
+    hdr_save_at(AFS_BASE_LBA, rec->hdr_sectors);
     storage_flush();
     journal_clear(jl);
 }
@@ -373,7 +403,7 @@ void afs_mount(void) {
         afs_format();
         return;
     }
-    if (storage_read(AFS_BASE_LBA, H.hdr_sectors, &H) != 0) {
+    if (hdr_load_at(AFS_BASE_LBA, H.hdr_sectors) != 0) {
         if (afs_disk_is_encrypted()) return;
         afs_format();
         return;
@@ -832,13 +862,13 @@ int afs_journal_selftest(void) {
     rec->crc = crc32_buf(&H, hdr_bytes());
     rec->state = 1;
     rec->prev_crc = saved_hdr_crc;   /* diskte bu CRC'ye sahip header duruyor */
-    if (storage_write(jl + 1u, H.hdr_sectors, &H) == 0) {
+    if (hdr_save_at(jl + 1u, H.hdr_sectors) == 0) {
         storage_flush();
         if (storage_write(jl, 1, sec) == 0) {
             storage_flush();
             /* Header'i diskten geri yukle: commit ile header yazimi arasinda
              * reset olmus gibi (header eski, gunluk yeni). */
-            storage_read(AFS_BASE_LBA, H.hdr_sectors, &H);
+            hdr_load_at(AFS_BASE_LBA, H.hdr_sectors);
             journal_replay();   /* yarim kalan commit'i tamamla */
             ok = (find_idx("afs_jrn_replay") >= 0);
         }
