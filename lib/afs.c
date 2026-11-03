@@ -456,14 +456,18 @@ static int parent_idx(const char *path) {
 static uint32_t s_hgen[AFS_MAX_FILES_HARD];
 
 static void *hnd_enc(int slot) {
-    /* duzen: slot << 13 | (nesil & 0x1FFF) << 1 | 1 */
-    return (void *)(uintptr_t)(((uint32_t)slot << 13) | ((s_hgen[slot] & 0x1FFFu) << 1) | 1u);
+    /* duzen: slot << 14 | (nesil & 0x1FFF) << 1 | 1
+     * Eskiden slot 13. biteden basliyordu; nesil alani 13 bit oldugu icin
+     * (gen << 1) bit 13'e kadar tasiyor, slot ile kavisiyordu. Tek
+     * numarali slotlarda slot'un bit 0'i neslin 12. bitine sizar, tutamak
+     * daha kendi nesnesiyle bile eslesmezdi (tumuyle calismazdi). */
+    return (void *)(uintptr_t)(((uint32_t)slot << 14) | ((s_hgen[slot] & 0x1FFFu) << 1) | 1u);
 }
 
 static int hnd_dec(void *h) {
     uint32_t v = (uint32_t)(uintptr_t)h;
     if ((v & 1u) == 0) return -1;
-    int slot = (int)(v >> 13);
+    int slot = (int)(v >> 14);
     if (slot < 0 || slot >= (int)H.max_files || !H.files[slot].used) return -1;
     if (((v >> 1) & 0x1FFFu) != (s_hgen[slot] & 0x1FFFu)) return -1;  /* bayat tutamak */
     return slot;
