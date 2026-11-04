@@ -35,30 +35,33 @@ void adl_set_accent(uint32_t accent, uint32_t accent2) {
     s_accent2 = accent2;
 }
 
-/* ---- Renk token'lari (kontrast / acik tema moduna gore) ---- */
+/* ---- Renk token'lari (kontrast / acik tema moduna gore) ----
+ * Koyu degerler arayuz spesifikasyonunun paletidir: govde #0b0c0f,
+ * pencere #14161b, panel #181b22, kenarlik #2c313b, metin #e8eaee,
+ * ikincil metin #8b919c. */
 uint32_t adl_bg(void) {
     if (s_contrast) return 0x000000;
-    return s_light ? 0xEEF1F6 : 0x0E0E12;
+    return s_light ? 0xEEF1F6 : 0x0B0C0F;
 }
 uint32_t adl_surface(void) {
     if (s_contrast) return 0x0B0B0D;
-    return s_light ? 0xFFFFFF : 0x16171C;
+    return s_light ? 0xFFFFFF : 0x14161B;
 }
 uint32_t adl_surface_2(void) {
     if (s_contrast) return 0x17171A;
-    return s_light ? 0xF3F5F9 : 0x1E2027;
+    return s_light ? 0xF3F5F9 : 0x181B22;
 }
 uint32_t adl_border(void) {
     if (s_contrast) return 0xA8A8AE;
-    return s_light ? 0xD3D8E0 : 0x2C2F38;
+    return s_light ? 0xD3D8E0 : 0x2C313B;
 }
 uint32_t adl_text(void) {
     if (s_contrast) return 0xFFFFFF;
-    return s_light ? 0x15181D : 0xF5F5F7;
+    return s_light ? 0x15181D : 0xE8EAEE;
 }
 uint32_t adl_text_dim(void) {
     if (s_contrast) return 0xDCDCE2;
-    return s_light ? 0x5C6470 : 0x9AA0A6;
+    return s_light ? 0x5C6470 : 0x8B919C;
 }
 uint32_t adl_danger(void)    { return s_contrast ? 0xFF8A82 : 0xFF5F57; }
 uint32_t adl_warn(void)      { return s_contrast ? 0xFFD65E : 0xFEBC2E; }

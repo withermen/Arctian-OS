@@ -1,17 +1,20 @@
 #include "app.h"
 #include "adl_wolf.h"
 #include "lv_port.h"
+#include "svg.h"
 #include <stdint.h>
 
-#define S_NAV_W   190
+#define S_NAV_W   200
 #define S_POOL    64
+#define S_NPAGES  6
 
 static asi_t    *s_asi;
 static lv_obj_t *g_win;
 static lv_obj_t *g_nav;
 static lv_obj_t *g_content;
-static lv_obj_t *g_nav_btns[9];
-static lv_obj_t *g_logo;
+static lv_obj_t *g_nav_btns[S_NPAGES];
+static lv_obj_t *g_nav_lbl[S_NPAGES];
+static lv_obj_t *g_nav_rod[S_NPAGES];
 static int       g_page = 0;
 static lv_obj_t *g_crypt_ta;
 static lv_group_t *g_crypt_group;
@@ -32,10 +35,56 @@ static lv_obj_t *g_upd_msg;
 static lv_obj_t *g_upd_bar;
 static lv_timer_t *g_upd_timer;
 
-static const char *const g_nav_labels[9] = {
-    "Kisisellestirme", "Masaustu", "Ekran", "Ag", "Uygulamalar", "Sistem",
-    "Erisilebilirlik", "Guncelleme", "Hakkinda"
+/* Spec (tasarim.md bolum 2) sayfalari: solda 200 px yan cubuk,
+ * ustte avatar + arama, altida SVG ikonlu menu satirlari. */
+static const char *const g_nav_labels[S_NPAGES] = {
+    "Görünüm", "Ağ ve internet", "Bildirimler", "Gizlilik ve güvenlik",
+    "Güncelleme", "Hakkında"
 };
+
+/* Yan cubuk ikonlari (spec svg'leri; renk sonraki adimda #C9CED8) */
+static const char *const g_nav_icons[S_NPAGES] = {
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><circle cx=\"12\" cy=\"12\" r=\"4\"/><path d=\"M12 2v2M12 20v2M2 12h2M20 12h2\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><path d=\"M2 9a15 15 0 0 1 20 0M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><path d=\"M6 8a6 6 0 0 1 12 0c0 7 3 8 3 8H3s3-1 3-8M10 20a2 2 0 0 0 4 0\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V7a4 4 0 0 1 8 0v4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><path d=\"M4 12a8 8 0 0 1 14-5M20 12a8 8 0 0 1-14 5M18 3v4h-4M6 21v-4h4\"/></svg>",
+    "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#B4BAC5\" stroke-width=\"1.8\"><circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v5M12 8h.01\"/></svg>",
+};
+
+/* spec paleti (sabit; tema tokenlarindan bagimsiz) */
+#define SC_CARD    0x181B22   /* grup karti zemini */
+#define SC_CARDBRD 0x262B35   /* kart kenarligi      */
+#define SC_HAIR    0x222731   /* satir ayirici       */
+#define SC_NAVON   0x1E2330   /* aktif menu satiri   */
+#define SC_NAVBAR  0x60A5FA   /* aktif sol cubuk     */
+#define SC_NAVFG   0xB4BAC5   /* pasif menu yazisi   */
+#define SC_INP     0x0F1115   /* arama/dropdown zemini */
+#define SC_BTNBRD  0x333A47   /* olcekli dugme kenarligi */
+#define SC_ACC     0x3B82F6
+
+/* yerel fontlar: 22 sayfa basligi, 13 govde, 12 ikincil (tema 15 px) */
+extern const unsigned char font_ttf[];
+extern const unsigned int  font_ttf_len;
+static lv_font_t *f22, *f13, *f12;
+
+/* SVG ikon tamponlari (pencere kapaninca birakilir) */
+#define S_ICON_MAX 24
+static uint32_t *s_icon_buf[S_ICON_MAX];
+static int s_icon_n;
+
+static lv_obj_t *s_svg_icon(lv_obj_t *parent, const char *svg, int size) {
+    if (!svg[0] || !s_asi || !s_asi->mem) return 0;
+    if (s_icon_n >= S_ICON_MAX) return 0;
+    uint32_t *buf = (uint32_t *)s_asi->mem->alloc((size_t)size * size * 4u);
+    if (!buf) return 0;
+    if (svg_render(svg, size, size, buf) != 0) { s_asi->mem->free(buf); return 0; }
+    s_icon_buf[s_icon_n++] = buf;
+    lv_obj_t *c = lv_canvas_create(parent);
+    lv_obj_remove_style_all(c);
+    lv_canvas_set_buffer(c, buf, size, size, LV_COLOR_FORMAT_ARGB8888);
+    return c;
+}
 
 static int slen(const char *s) { int n = 0; if (s) while (s[n]) n++; return n; }
 
@@ -90,12 +139,12 @@ static lv_obj_t *scard(lv_obj_t *parent) {
     lv_obj_remove_style_all(c);
     lv_obj_set_width(c, LV_PCT(100));
     lv_obj_set_height(c, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(c, lv_color_hex(ADL_SURFACE), 0);
+    lv_obj_set_style_bg_color(c, lv_color_hex(SC_CARD), 0);
     lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(c, 12, 0);
+    lv_obj_set_style_radius(c, 8, 0);
     lv_obj_set_style_border_width(c, 1, 0);
-    lv_obj_set_style_border_color(c, lv_color_hex(ADL_BORDER), 0);
-    lv_obj_set_style_pad_all(c, 14, 0);
+    lv_obj_set_style_border_color(c, lv_color_hex(SC_CARDBRD), 0);
+    lv_obj_set_style_pad_all(c, 16, 0);
     lv_obj_set_style_pad_row(c, 8, 0);
     lv_obj_set_style_pad_column(c, 8, 0);
     lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
@@ -107,13 +156,14 @@ static void stitle(lv_obj_t *parent, const char *txt) {
     lv_obj_t *l = lv_label_create(parent);
     lv_label_set_text(l, txt);
     lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_set_style_text_font(l, adl_font(), 0);
+    if (f13) lv_obj_set_style_text_font(l, f13, 0);
 }
 
 static void sdesc(lv_obj_t *parent, const char *txt) {
     lv_obj_t *l = lv_label_create(parent);
     lv_label_set_text(l, txt);
     lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT_DIM), 0);
+    if (f12) lv_obj_set_style_text_font(l, f12, 0);
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(l, LV_PCT(100));
 }
@@ -170,10 +220,17 @@ static void s_content_clear(void) {
 }
 
 static void s_nav_active(void) {
-    for (int i = 0; i < 9; i++) {   /* 9 sekme var; eskiden i<7 son ikisi vurgulamiyordu */
+    /* spec: aktif satir #1e2330 zemin + beyaz yazi + solunda 3px cubuk */
+    for (int i = 0; i < S_NPAGES; i++) {
         if (!g_nav_btns[i]) continue;
-        uint32_t bg = (i == g_page) ? ADL_ACCENT : ADL_SURFACE_2;
-        lv_obj_set_style_bg_color(g_nav_btns[i], lv_color_hex(bg), 0);
+        int on = (i == g_page);
+        lv_obj_set_style_bg_color(g_nav_btns[i], lv_color_hex(on ? SC_NAVON : 0x000000), 0);
+        lv_obj_set_style_bg_opa(g_nav_btns[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+        if (g_nav_lbl[i])
+            lv_obj_set_style_text_color(g_nav_lbl[i],
+                lv_color_hex(on ? 0xFFFFFF : SC_NAVFG), 0);
+        if (g_nav_rod[i])
+            lv_obj_set_style_bg_opa(g_nav_rod[i], on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     }
 }
 
@@ -182,6 +239,160 @@ static void s_page(int p);
 static void s_nav_cb(lv_event_t *e) {
     int p = (int)(intptr_t)lv_event_get_user_data(e);
     s_page(p);
+}
+
+/* ---- spec arayuz parcalari (Gorunum sayfasi) ---- */
+static void s_toggle_cb(lv_event_t *e);
+
+/* "Sistem > Sayfa" kirinti satiri + 22 px sayfa basligi */
+static void s_phead(const char *crumb, const char *title) {
+    lv_obj_t *c = lv_label_create(g_content);
+    lv_label_set_text(c, crumb);
+    lv_obj_set_style_text_color(c, lv_color_hex(ADL_TEXT_DIM), 0);
+    if (f12) lv_obj_set_style_text_font(c, f12, 0);
+    lv_obj_t *t = lv_label_create(g_content);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, lv_color_hex(ADL_TEXT), 0);
+    if (f22) lv_obj_set_style_text_font(t, f22, 0);
+}
+
+static void s_sect(const char *txt) {
+    lv_obj_t *l = lv_label_create(g_content);
+    lv_label_set_text(l, txt);
+    lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
+    if (f13) lv_obj_set_style_text_font(l, f13, 0);
+}
+
+/* satirlari kendi ic bosluklu grup karti (spec .card: satirlar
+ * 14 px dikey / 16 px yatay ic bosluklu, aralarinda 1 px ayirici) */
+static lv_obj_t *s_gcard(void) {
+    lv_obj_t *c = lv_obj_create(g_content);
+    lv_obj_remove_style_all(c);
+    lv_obj_set_width(c, LV_PCT(100));
+    lv_obj_set_height(c, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(c, lv_color_hex(SC_CARD), 0);
+    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(c, 8, 0);
+    lv_obj_set_style_border_width(c, 1, 0);
+    lv_obj_set_style_border_color(c, lv_color_hex(SC_CARDBRD), 0);
+    lv_obj_set_style_pad_all(c, 0, 0);
+    lv_obj_set_style_pad_row(c, 0, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+    return c;
+}
+
+static lv_obj_t *s_grow(lv_obj_t *card, int last) {
+    lv_obj_t *r = lv_obj_create(card);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_width(r, LV_PCT(100));
+    lv_obj_set_height(r, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_ver(r, 14, 0);
+    lv_obj_set_style_pad_hor(r, 16, 0);
+    lv_obj_set_style_pad_column(r, 12, 0);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (!last) {
+        lv_obj_set_style_border_width(r, 1, 0);
+        lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_color(r, lv_color_hex(SC_HAIR), 0);
+    }
+    return r;
+}
+
+/* satirin sol etiket bloku: ad (13) + alt bilgi (12 soluk) */
+static void s_gtexts(lv_obj_t *row, const char *label, const char *sub) {
+    lv_obj_t *col = lv_obj_create(row);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_style_pad_row(col, 2, 0);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *l = lv_label_create(col);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
+    if (f13) lv_obj_set_style_text_font(l, f13, 0);
+    if (sub && sub[0]) {
+        lv_obj_t *d = lv_label_create(col);
+        lv_label_set_text(d, sub);
+        lv_obj_set_style_text_color(d, lv_color_hex(ADL_TEXT_DIM), 0);
+        if (f12) lv_obj_set_style_text_font(d, f12, 0);
+    }
+}
+
+/* spec anahtari: 38x20, beyaz 12 px tasma */
+static lv_obj_t *s_gswitch(lv_obj_t *row, const char *key, int def,
+                           lv_event_cb_t cb) {
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_size(sw, 38, 20);
+    lv_obj_set_style_radius(sw, 10, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x3A4150), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(SC_ACC), LV_PART_MAIN | LV_STATE_CHECKED);
+    lv_obj_set_style_pad_all(sw, 0, LV_PART_KNOB);
+    lv_obj_set_size(sw, 38, 20);   /* knob tanimi asagida */
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_KNOB);
+    lv_obj_set_style_radius(sw, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+    lv_obj_set_style_width(sw, 12, LV_PART_KNOB);
+    lv_obj_set_style_height(sw, 12, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(sw, 0, LV_PART_INDICATOR);
+    if (arctian_settings && arctian_settings->get_int &&
+        arctian_settings->get_int(key, def)) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    if (cb) lv_obj_add_event_cb(sw, cb, LV_EVENT_VALUE_CHANGED, (void *)key);
+    return sw;
+}
+
+static void s_gtoggle_row(lv_obj_t *card, const char *label, const char *sub,
+                          const char *key, int def, int last) {
+    lv_obj_t *r = s_grow(card, last);
+    s_gtexts(r, label, sub);
+    s_gswitch(r, key, def, s_toggle_cb);
+}
+
+/* ---- Gorunum sayfasi callbacklari ---- */
+
+/* tema kartlari: "light" ayari acik/kapali. Sistem karti islevsel olarak
+ * Koyu'ya baglidir (otomatik gun/gece tespiti surucude yok). */
+static void s_theme_cb(lv_event_t *e) {
+    int light = (int)(intptr_t)lv_event_get_user_data(e);
+    if (arctian_settings && arctian_settings->set_int)
+        arctian_settings->set_int("light", light);
+    s_page(g_page);
+}
+
+static void s_roundwin_cb(lv_event_t *e) {
+    s_toggle_cb(e);          /* "roundwin": windows.c yeni pencerede okur */
+}
+
+/* 150 px slider 3 konum: %100 / %125 / %150 ("fontscale") */
+static int s_fontscale(void) {
+    int v = (arctian_settings && arctian_settings->get_int)
+            ? arctian_settings->get_int("fontscale", 100) : 100;
+    return v;
+}
+
+static void s_scale_slider_cb(lv_event_t *e) {
+    static const int opts[3] = { 100, 125, 150 };
+    int i = lv_slider_get_value(lv_event_get_target(e));
+    if (i < 0) i = 0;
+    if (i > 2) i = 2;
+    if (opts[i] == s_fontscale()) return;
+    if (arctian_settings && arctian_settings->set_int)
+        arctian_settings->set_int("fontscale", opts[i]);   /* kabuk yeniden kurulur */
+}
+
+/* Yogunluk acilir listesi: ayni "fontscale" ayarini dolasir
+ * (Rahat=%100, Orta=%125, Siki=%150) - ayri bir uydurma ayar yoktur */
+static void s_density_cb(lv_event_t *e) {
+    static const int opts[3] = { 100, 125, 150 };
+    int cur = s_fontscale();
+    int idx = (cur == 150) ? 2 : (cur == 125 ? 1 : 0);
+    idx = (idx + 1) % 3;
+    if (arctian_settings && arctian_settings->set_int)
+        arctian_settings->set_int("fontscale", opts[idx]);
 }
 
 static void s_toggle_cb(lv_event_t *e) {
@@ -618,139 +829,280 @@ static void s_reboot_cb(lv_event_t *e) { (void)e; if (s_asi && s_asi->system && 
 static void s_shutdown_cb(lv_event_t *e) { (void)e; if (s_asi && s_asi->system && s_asi->system->shutdown) s_asi->system->shutdown(); }
 static void s_power_cb(lv_event_t *e) { (void)e; arctian_shell_power_dialog(); }
 
-static void s_page_personalize(void) {
-    lv_obj_t *c1 = scard(g_content);
-    stitle(c1, "Vurgu Rengi");
-    sdesc(c1, "Pencereler, dugmeler ve baslat menusu icin ana renk. Yeni acilan pencerelere uygulanir.");
-    lv_obj_t *wrap = lv_obj_create(c1);
-    lv_obj_remove_style_all(wrap);
-    lv_obj_set_width(wrap, LV_PCT(100));
-    lv_obj_set_height(wrap, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(wrap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_row(wrap, 8, 0);
-    lv_obj_set_style_pad_column(wrap, 8, 0);
-    lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_ROW_WRAP);
+/* Spec Gorunum sayfasi (tasarim.md bolum 2): tema kartlari + grup karti
+ * (vurgu rengi, yuvarlak pencere koseleli, yazi boyutu, yogunluk).
+ * Erisilebilirlik, arka plan ve cozunurluk bolumleri de buraya katlandi. */
+static void s_page_view(void) {
+    s_phead("Sistem \xe2\x80\xba Görünüm", "Görünüm");
 
-    int n = (arctian_settings && arctian_settings->accent_count) ? arctian_settings->accent_count() : 0;
-    int cur = (arctian_settings && arctian_settings->accent_current) ? arctian_settings->accent_current() : 0;
-    for (int i = 0; i < n; i++) {
-        lv_obj_t *b = lv_button_create(wrap);
-        lv_obj_set_size(b, 108, 50);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_radius(b, 10, 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(arctian_settings->accent_color(i)), 0);
-        lv_obj_set_style_border_width(b, (i == cur) ? 3 : 0, 0);
-        lv_obj_set_style_border_color(b, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_t *l = lv_label_create(b);
-        lv_label_set_text(l, arctian_settings->accent_name(i));
-        lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_center(l);
-        lv_obj_add_event_cb(b, s_accent_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    int light = (arctian_settings && arctian_settings->get_int)
+                ? arctian_settings->get_int("light", 0) : 0;
+
+    s_sect("Uygulama teması");
+
+    /* uc tema karti: Acik / Koyu / Sistem (76 px onizleme + etiket) */
+    lv_obj_t *tr = lv_obj_create(g_content);
+    lv_obj_remove_style_all(tr);
+    lv_obj_set_width(tr, LV_PCT(100));
+    lv_obj_set_height(tr, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(tr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_column(tr, 12, 0);
+    lv_obj_set_flex_flow(tr, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    /* Sistem karti islevsel olarak Koyu'ya baglidir: otomatik gun/gece
+     * tespiti surucude olmadigi icin Koyu ile ayni davranir. */
+    static const uint32_t cardbg[3] = { 0xEEF1F5, 0x0F1115, 0xEEF1F5 };
+    static const char *const cardnm[3] = { "Açık", "Koyu", "Sistem" };
+    int sel = light ? 0 : 1;
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *col = lv_obj_create(tr);
+        lv_obj_remove_style_all(col);
+        lv_obj_set_height(col, LV_SIZE_CONTENT);
+        lv_obj_set_flex_grow(col, 1);
+        lv_obj_set_style_pad_row(col, 6, 0);
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(col, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(col, s_theme_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)(i == 0 ? 1 : 0));
+
+        lv_obj_t *pv = lv_obj_create(col);
+        lv_obj_remove_style_all(pv);
+        lv_obj_set_size(pv, LV_PCT(100), 76);
+        lv_obj_set_style_radius(pv, 8, 0);
+        lv_obj_set_style_bg_color(pv, lv_color_hex(cardbg[i]), 0);
+        lv_obj_set_style_bg_opa(pv, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(pv, (i == sel) ? 2 : 1, 0);
+        lv_obj_set_style_border_color(pv,
+            lv_color_hex((i == sel) ? SC_ACC : 0x2C313B), 0);
+        lv_obj_set_style_pad_all(pv, 8, 0);
+        lv_obj_remove_flag(pv, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(pv, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(pv, s_theme_cb, LV_EVENT_CLICKED,
+                            (void *)(intptr_t)(i == 0 ? 1 : 0));
+        if (i == 2) {
+            /* "Sistem" karti: yari acik yari koyu onizleme */
+            lv_obj_t *half = lv_obj_create(pv);
+            lv_obj_remove_style_all(half);
+            lv_obj_set_size(half, LV_PCT(50), LV_PCT(100));
+            lv_obj_align(half, LV_ALIGN_RIGHT_MID, 0, 0);
+            lv_obj_set_style_bg_color(half, lv_color_hex(0x0F1115), 0);
+            lv_obj_set_style_bg_opa(half, LV_OPA_COVER, 0);
+        } else {
+            lv_obj_t *bar = lv_obj_create(pv);
+            lv_obj_remove_style_all(bar);
+            lv_obj_set_size(bar, LV_PCT(40), 8);
+            lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_set_style_radius(bar, 3, 0);
+            lv_obj_set_style_bg_color(bar, lv_color_hex(i == 0 ? 0xCFD6E2 : 0x2A2E37), 0);
+            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        }
+
+        lv_obj_t *l = lv_label_create(col);
+        char lt[32];
+        scpy(lt, sizeof(lt), cardnm[i]);
+        if (i == sel) scat(lt, sizeof(lt), " \xc2\xb7 Seçili");
+        lv_label_set_text(l, lt);
+        lv_obj_set_style_text_color(l, lv_color_hex(i == sel ? ADL_TEXT : ADL_TEXT_DIM), 0);
+        if (f13) lv_obj_set_style_text_font(l, f13, 0);
     }
 
-    lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Arka Plan");
-    sdesc(c2, "AFS'te kurulu .wp gorselleri. Yeni arka planlari DuckStore > Arka Planlar'dan indirebilirsiniz.");
-    const char *active = (arctian_store && arctian_store->wallpaper_active && arctian_store->wallpaper_active())
-                         ? arctian_store->wallpaper_name() : "";
-    int found = 0;
-    if (s_asi && s_asi->fs && s_asi->fs->count) {
-        int fc = s_asi->fs->count();
-        for (int i = 0; i < fc; i++) {
-            const char *nm = s_asi->fs->name(i);
-            int L = slen(nm);
-            if (L <= 3 || nm[L - 3] != '.' || nm[L - 2] != 'w' || nm[L - 1] != 'p') continue;
-            found = 1;
-            lv_obj_t *r = srow_start(c2, 36);
-            lv_obj_t *l = lv_label_create(r);
-            char txt[48];
-            scpy(txt, sizeof(txt), nm);
-            if (active[0] && seq(active, nm)) scat(txt, sizeof(txt), "  (aktif)");
-            lv_label_set_text(l, txt);
-            lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
-            lv_obj_t *b = sbutton(r, "Uygula", ADL_ACCENT, 0xFFFFFF, 90, 32);
-            lv_obj_add_event_cb(b, s_wall_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+    /* --- grup karti: spec satirlari --- */
+    lv_obj_t *gc = s_gcard();
+
+    /* satir 1: vurgu rengi (18 px daireler, secili beyaz halkali) */
+    {
+        lv_obj_t *r = s_grow(gc, 0);
+        s_gtexts(r, "Vurgu rengi", "Seçimler ve düğmeler için");
+        lv_obj_t *wrap = lv_obj_create(r);
+        lv_obj_remove_style_all(wrap);
+        lv_obj_set_height(wrap, 22);
+        lv_obj_set_width(wrap, LV_SIZE_CONTENT);
+        lv_obj_remove_flag(wrap, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_column(wrap, 8, 0);
+        lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(wrap, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        int n = (arctian_settings && arctian_settings->accent_count)
+                ? arctian_settings->accent_count() : 0;
+        int cur = (arctian_settings && arctian_settings->accent_current)
+                  ? arctian_settings->accent_current() : 0;
+        for (int i = 0; i < n; i++) {
+            lv_obj_t *b = lv_button_create(wrap);
+            lv_obj_set_size(b, 22, 22);
+            lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(b, (i == cur) ? 2 : 0, 0);
+            lv_obj_set_style_border_color(b, lv_color_hex(0xE8EAEE), 0);
+            lv_obj_set_style_shadow_width(b, 0, 0);
+            lv_obj_set_style_pad_all(b, 0, 0);
+            lv_obj_add_event_cb(b, s_accent_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+            lv_obj_t *dot = lv_obj_create(b);
+            lv_obj_remove_style_all(dot);
+            lv_obj_set_size(dot, 18, 18);
+            lv_obj_center(dot);
+            lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_color(dot, lv_color_hex(arctian_settings->accent_color(i)), 0);
+            lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
         }
     }
-    if (!found) sdesc(c2, "Henuz .wp gorseli yok.");
-    lv_obj_t *rb = sbutton(c2, "Varsayilan Arka Plan", ADL_SURFACE_2, ADL_TEXT, 190, 36);
-    lv_obj_add_event_cb(rb, s_wall_reset_cb, LV_EVENT_CLICKED, 0);
+
+    /* satir 2: yuvarlak pencere koseleri ("roundwin" - windows.c okur) */
+    {
+        lv_obj_t *r = s_grow(gc, 0);
+        s_gtexts(r, "Yuvarlak pencere köşeleri", "Pencere kenarlarında yumuşak köşeler");
+        s_gswitch(r, "roundwin", 1, s_roundwin_cb);
+    }
+
+    /* satir 3: yazi boyutu (150 px slider, %100/%125/%150) */
+    {
+        lv_obj_t *r = s_grow(gc, 0);
+        s_gtexts(r, "Yazı boyutu", "Sistem genelindeki metinler");
+        lv_obj_t *sl = lv_slider_create(r);
+        lv_obj_set_size(sl, 150, 6);
+        lv_slider_set_range(sl, 0, 2);
+        int fs = s_fontscale();
+        lv_slider_set_value(sl, fs >= 150 ? 2 : (fs >= 125 ? 1 : 0), LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(sl, lv_color_hex(0x2C313B), LV_PART_MAIN);
+        lv_obj_set_style_radius(sl, 3, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(sl, lv_color_hex(SC_ACC), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(sl, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+        lv_obj_set_style_pad_all(sl, 4, LV_PART_KNOB);   /* 14 px beyaz tasma */
+        lv_obj_set_style_shadow_width(sl, 0, LV_PART_KNOB);
+        lv_obj_add_event_cb(sl, s_scale_slider_cb, LV_EVENT_VALUE_CHANGED, 0);
+    }
+
+    /* satir 4: yogunluk (ayni fontscale ayarinin isimli hali) */
+    {
+        lv_obj_t *r = s_grow(gc, 1);
+        s_gtexts(r, "Yoğunluk", "Liste satırlarının yüksekliği");
+        int fs = s_fontscale();
+        const char *dn = fs >= 150 ? "Sıkı" : (fs >= 125 ? "Orta" : "Rahat");
+        lv_obj_t *b = lv_button_create(r);
+        lv_obj_set_size(b, LV_SIZE_CONTENT, 30);
+        lv_obj_set_style_radius(b, 6, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(SC_INP), 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(SC_BTNBRD), 0);
+        lv_obj_set_style_shadow_width(b, 0, 0);
+        lv_obj_set_style_pad_hor(b, 12, 0);
+        lv_obj_set_style_pad_column(b, 20, 0);
+        lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_t *dl = lv_label_create(b);
+        lv_label_set_text(dl, dn);
+        lv_obj_set_style_text_color(dl, lv_color_hex(ADL_TEXT), 0);
+        if (f13) lv_obj_set_style_text_font(dl, f13, 0);
+        lv_obj_t *ch = s_svg_icon(b,
+            "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#7D8491\" stroke-width=\"2\"><path d=\"M6 9l6 6 6-6\"/></svg>", 14);
+        (void)ch;
+        lv_obj_add_event_cb(b, s_density_cb, LV_EVENT_CLICKED, 0);
+    }
+
+    /* --- erisilebilirlik (eski sayfadan katlandi) --- */
+    lv_obj_t *c2 = scard(g_content);
+    stitle(c2, "Erişilebilirlik");
+    sdesc(c2, "Yazi olcegi yukaridaki kaydir cubuguyla ayarlanir.");
+    s_add_toggle(c2, "Yüksek kontrast", "contrast", 0);
+    s_add_toggle(c2, "Klavye odak halkası", "focusring", 1);
+    s_add_toggle(c2, "Büyük simgeler", "bigicons", 0);
+
+    /* --- arka plan (eski Kisisellestirme sayfasindan katlandi) --- */
+    lv_obj_t *c3 = scard(g_content);
+    stitle(c3, "Arka plan");
+    sdesc(c3, "AFS'te kurulu .wp gorselleri. Yenilerini DuckStore > Arka Planlar'dan indirebilirsiniz.");
+    {
+        const char *active = (arctian_store && arctian_store->wallpaper_active && arctian_store->wallpaper_active())
+                             ? arctian_store->wallpaper_name() : "";
+        int found = 0;
+        if (s_asi && s_asi->fs && s_asi->fs->count) {
+            int fc = s_asi->fs->count();
+            for (int i = 0; i < fc; i++) {
+                const char *nm = s_asi->fs->name(i);
+                int L = slen(nm);
+                if (L <= 3 || nm[L - 3] != '.' || nm[L - 2] != 'w' || nm[L - 1] != 'p') continue;
+                found = 1;
+                lv_obj_t *r = srow_start(c3, 36);
+                lv_obj_t *l = lv_label_create(r);
+                char txt[48];
+                scpy(txt, sizeof(txt), nm);
+                if (active[0] && seq(active, nm)) scat(txt, sizeof(txt), "  (aktif)");
+                lv_label_set_text(l, txt);
+                lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
+                lv_obj_t *b = sbutton(r, "Uygula", SC_ACC, 0xFFFFFF, 90, 32);
+                lv_obj_add_event_cb(b, s_wall_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+            }
+        }
+        if (!found) sdesc(c3, "Henüz .wp görseli yok.");
+        lv_obj_t *rb = sbutton(c3, "Varsayılan Arka Plan", 0x1E2129, ADL_TEXT, 190, 36);
+        lv_obj_add_event_cb(rb, s_wall_reset_cb, LV_EVENT_CLICKED, 0);
+    }
+
+    /* --- cozunurluk (eski Ekran sayfasindan katlandi) --- */
+    lv_obj_t *c4 = scard(g_content);
+    stitle(c4, "Çözünürlük");
+    sdesc(c4, "Degisiklik aninda uygulanir; acik pencereler kapanir.");
+    {
+        int n   = (arctian_settings && arctian_settings->resolution_count)
+                  ? arctian_settings->resolution_count() : 0;
+        int cur = (arctian_settings && arctian_settings->resolution_current)
+                  ? arctian_settings->resolution_current() : -1;
+        if (n <= 0) sdesc(c4, "Cozunurluk servisi bulunamadi.");
+        for (int i = 0; i < n; i++) {
+            lv_obj_t *r = srow(c4, 42);
+            lv_obj_t *l = lv_label_create(r);
+            lv_label_set_text(l, arctian_settings->resolution_name(i));
+            lv_obj_set_style_text_color(l, lv_color_hex(i == cur ? SC_ACC : ADL_TEXT), 0);
+            if (i == cur) {
+                lv_obj_t *b = sbutton(r, "Aktif", 0x1E2129, SC_ACC, 96, 34);
+                lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
+            } else {
+                lv_obj_t *b = sbutton(r, "Uygula", SC_ACC, 0xFFFFFF, 96, 34);
+                lv_obj_add_event_cb(b, s_res_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+            }
+        }
+    }
 }
 
-static void s_page_desktop(void) {
+/* Bildirimler ve masaustu davranisi (eski Masaustu + saat ayarlari) */
+static void s_page_notify(void) {
+    s_phead("Sistem \xe2\x80\xba Bildirimler", "Bildirimler");
     lv_obj_t *c = scard(g_content);
-    stitle(c, "Masaustu");
-    sdesc(c, "Masaustu ogeleri ve gorev cubugu davranisi.");
-    s_add_toggle(c, "Masaustu kisayollarini goster", "dicons", 1);
-    s_add_toggle(c, "Gorev cubugunda saati goster", "clockshow", 1);
-    s_add_toggle(c, "24 saat formati", "clock24", 1);
-    s_add_toggle(c, "Bostayken kilitle (5 dk)", "idle_lock", 0);
-    s_add_toggle(c, "Acik tema", "light", 0);
+    stitle(c, "Görev Cubuğu ve Saat");
+    s_add_toggle(c, "Masaüstü kısayollarını göster", "dicons", 1);
+    s_add_toggle(c, "Görev çubuğunda saati göster", "clockshow", 1);
+    s_add_toggle(c, "24 saat biçimi", "clock24", 1);
+    s_add_toggle(c, "Bostayken kilitle", "idle_lock", 0);
 
-    /* 0.6: secenekler */
     {
         int mi = (arctian_settings && arctian_settings->get_int)
                  ? arctian_settings->get_int("idle_lock_min", 0) : 0;
         char t[24];
         s_choice_text(t, sizeof(t), "dk", mi);
-        s_add_choice(c, "Bosta kilit suresi", t, s_idle_cycle_cb);
+        s_add_choice(c, "Bosta kilit süresi", t, s_idle_cycle_cb);
 
         int ws = (arctian_settings && arctian_settings->get_int)
                  ? arctian_settings->get_int("ws_count", 3) : 3;
         s_choice_text(t, sizeof(t), "alan", ws);
-        s_add_choice(c, "Calisma alani sayisi", t, s_ws_cycle_cb);
+        s_add_choice(c, "Çalışma alanı sayısı", t, s_ws_cycle_cb);
 
-        const char *kname = "Turkce Q";
+        const char *kname = "Türkçe Q";
         if (arctian_settings && arctian_settings->get_int) {
             int ki = arctian_settings->get_int("kbdlayout", 0);
-            kname = (ki == 2) ? "Ingilizce Q" : (ki == 1 ? "Turkce F" : "Turkce Q");
+            kname = (ki == 2) ? "İngilizce Q" : (ki == 1 ? "Türkçe F" : "Türkçe Q");
         }
-        s_add_choice(c, "Klavye duzeni", kname, s_kbd_cycle_cb);
+        s_add_choice(c, "Klavye düzeni", kname, s_kbd_cycle_cb);
     }
-}
-
-static void s_page_screen(void) {
-    lv_obj_t *c = scard(g_content);
-    stitle(c, "Ekran");
-    sdesc(c, "Goruntunun cozunurlugu. Degisiklik aninda uygulanir: acik "
-             "pencereler kapanir ve masaustu yeni boyuta gore yeniden kurulur.");
-
-    int n   = (arctian_settings && arctian_settings->resolution_count)
-              ? arctian_settings->resolution_count() : 0;
-    int cur = (arctian_settings && arctian_settings->resolution_current)
-              ? arctian_settings->resolution_current() : -1;
-    if (n <= 0) { sdesc(c, "Cozunurluk servisi bulunamadi."); return; }
-
-    for (int i = 0; i < n; i++) {
-        lv_obj_t *r = srow(c, 46);
-        lv_obj_t *l = lv_label_create(r);
-        lv_label_set_text(l, arctian_settings->resolution_name(i));
-        lv_obj_set_style_text_color(l, lv_color_hex(i == cur ? ADL_ACCENT : ADL_TEXT), 0);
-        if (i == cur) {
-            lv_obj_t *b = sbutton(r, "Aktif", ADL_SURFACE_2, ADL_ACCENT, 96, 34);
-            lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
-        } else {
-            lv_obj_t *b = sbutton(r, "Uygula", ADL_ACCENT, 0xFFFFFF, 96, 34);
-            lv_obj_add_event_cb(b, s_res_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        }
-    }
-
-    lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Bilgi");
-    sdesc(c2, "Ayni 16:9 orani korunur. Varsayilan 1920 x 1080 (Full HD), "
-              "daha yuksek cozunurluk icin 2560 x 1440 (2K) secilebilir.");
-    sdesc(c2, "Bazi sistemlerde (ozellikle gercek donanimda) tum modlar "
-              "desteklenmeyebilir; uygulanamayan secim yok sayilir ve mevcut "
-              "cozunurluk korunur.");
-    if (cur < 0)
-        sdesc(c2, "Aktif cozunurluk desteklenen liste ile eslesmiyor.");
 }
 
 static void s_page_network(void) {
     char v[48];
 
+    s_phead("Sistem \xe2\x80\xba Ağ ve internet", "Ağ ve internet");
     lv_obj_t *c = scard(g_content);
-    stitle(c, "Baglanti Durumu");
+    stitle(c, "Bağlantı Durumu");
     asi_net_t *n = (s_asi ? s_asi->net : 0);
     int lt = (n && n->link_type) ? n->link_type() : 0;
     skv(c, "Baglanti", lt == ASI_LINK_ETHERNET ? "Ethernet" : lt == ASI_LINK_WIFI ? "Wi-Fi" : "yok");
@@ -768,21 +1120,17 @@ static void s_page_network(void) {
     }
 
     lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Islemler");
-    sdesc(c2, "IP adresini DHCP ile yenile veya kablosuz aglari yonet.");
+    stitle(c2, "İşlemler");
+    sdesc(c2, "IP adresini DHCP ile yenile veya kablosuz ağları yönet.");
     lv_obj_t *r = srow_start(c2, 44);
-    lv_obj_t *b1 = sbutton(r, "IP Yenile (DHCP)", ADL_ACCENT, 0xFFFFFF, 180, 38);
+    lv_obj_t *b1 = sbutton(r, "IP Yenile (DHCP)", SC_ACC, 0xFFFFFF, 180, 38);
     lv_obj_add_event_cb(b1, s_dhcp_cb, LV_EVENT_CLICKED, 0);
-    lv_obj_t *b2 = sbutton(r, "Ag Ayarlari", ADL_SURFACE_2, ADL_TEXT, 150, 38);
+    lv_obj_t *b2 = sbutton(r, "Ayarlar Paneli", 0x1E2129, ADL_TEXT, 150, 38);
     lv_obj_add_event_cb(b2, s_netpanel_cb, LV_EVENT_CLICKED, 0);
-
-    lv_obj_t *c3 = scard(g_content);
-    stitle(c3, "Guvenlik Duvari");
-    sdesc(c3, "Istenmeyen portlari kapatmak icin kural tanimlayin. Eslesmeyen trafik izinlidir.");
-    s_page_firewall(c3);
 }
 
-static void s_page_apps(void) {
+/* Uygulama listesi Hakkinda sayfasi icinde kullanilir. */
+static void s_apps_card(void) {
     lv_obj_t *c = scard(g_content);
     stitle(c, "Uygulamalar");
     sdesc(c, "Sistemle gelen uygulamalar. Acmak icin dokun.");
@@ -829,11 +1177,61 @@ static void s_page_apps(void) {
     }
 }
 
-static void s_page_system(void) {
+/* Gizlilik ve guvenlik: guvenlik duvari + disk sifreleme (eski Sistem
+ * sayfasindaki kriptolama blogu buraya tasindi). */
+static void s_page_privacy(void) {
+    s_phead("Sistem \xe2\x80\xba Gizlilik ve güvenlik", "Gizlilik ve güvenlik");
+
+    lv_obj_t *c3 = scard(g_content);
+    stitle(c3, "Güvenlik Duvarı");
+    sdesc(c3, "Istenmeyen portlari kapatmak icin kural tanimlayin. Eslesmeyen trafik izinlidir.");
+    s_page_firewall(c3);
+
+    lv_obj_t *c4 = scard(g_content);
+    stitle(c4, "Disk Şifreleme");
+    asi_crypt_t *cr = s_asi ? s_asi->crypt : 0;
+    int present = (cr && cr->present) ? cr->present() : 0;
+    if (present) {
+        sdesc(c4, "Disk AES-XTS ile sifreli. Acilista parola sorulur. Kaldirmak icin parolayi girin.");
+        skv(c4, "Durum", (cr && cr->status) ? cr->status() : "Açık");
+        lv_obj_t *row = srow_start(c4, 52);
+        g_crypt_ta = lv_textarea_create(row);
+        lv_obj_set_size(g_crypt_ta, 240, 40);
+        lv_textarea_set_one_line(g_crypt_ta, true);
+        lv_textarea_set_password_mode(g_crypt_ta, true);
+        lv_textarea_set_max_length(g_crypt_ta, 31);
+        lv_textarea_set_placeholder_text(g_crypt_ta, "Parola");
+        lv_obj_t *b = sbutton(row, "Kaldır", ADL_DANGER, 0xFFFFFF, 110, 40);
+        lv_obj_add_event_cb(b, s_crypt_disable_cb, LV_EVENT_CLICKED, 0);
+    } else {
+        sdesc(c4, "Diski AES-XTS ile sifreleyin. Bir parola belirleyin; sonraki acilislarda parola sorulur.");
+        lv_obj_t *row = srow_start(c4, 52);
+        g_crypt_ta = lv_textarea_create(row);
+        lv_obj_set_size(g_crypt_ta, 240, 40);
+        lv_textarea_set_one_line(g_crypt_ta, true);
+        lv_textarea_set_password_mode(g_crypt_ta, true);
+        lv_textarea_set_max_length(g_crypt_ta, 31);
+        lv_textarea_set_placeholder_text(g_crypt_ta, "Yeni parola (min 4)");
+        lv_obj_t *b = sbutton(row, "Şifrele", SC_ACC, 0xFFFFFF, 110, 40);
+        lv_obj_add_event_cb(b, s_crypt_setup_cb, LV_EVENT_CLICKED, 0);
+    }
+    if (s_crypt_msg[0]) sdesc(c4, s_crypt_msg);
+    s_crypt_focus();
+}
+
+/* Hakkinda: sistem bilgisi + guc + uygulamalar (eski Sistem/Uygulamalar
+ * sayfalarinin bilgi bolumleri buraya katlandi). */
+static void s_page_about(void) {
     char v[48];
 
+    s_phead("Sistem \xe2\x80\xba Hakkında", "Hakkında");
+
     lv_obj_t *c = scard(g_content);
-    stitle(c, "Sistem Bilgisi");
+    stitle(c, "Arctian OS");
+    sdesc(c, "Beyaz Kurt temali, terminal ile yonetilebilen masaustu isletim sistemi.");
+    skv(c, "Sürüm", update_current_version());
+    skv(c, "Arayüz", "LVGL + ADL-Wolf tema");
+    skv(c, "Kabuk", "arctian> (terminal)");
     if (s_asi && s_asi->gfx) {
         char res[24];
         snum(res, sizeof(res), (unsigned int)s_asi->gfx->width());
@@ -844,9 +1242,9 @@ static void s_page_system(void) {
         skv(c, "Ekran", res);
     }
     snum(v, sizeof(v), (unsigned int)arctian_shell_app_count());
-    skv(c, "Uygulama Sayisi", v);
+    skv(c, "Uygulama Sayısı", v);
     snum(v, sizeof(v), (unsigned int)arctian_shell_window_count());
-    skv(c, "Acik Pencere", v);
+    skv(c, "Açık Pencere", v);
     snum(v, sizeof(v), (unsigned int)((arctian_store && arctian_store->count_installed) ? arctian_store->count_installed() : 0));
     skv(c, "Kurulu Paket", v);
     if (s_asi && s_asi->time && s_asi->time->now) {
@@ -866,8 +1264,7 @@ static void s_page_system(void) {
     }
 
     lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Guc");
-    sdesc(c2, "Sistemi yeniden baslat veya kapat. Uyku icin Guc Menusu.");
+    stitle(c2, "Güç");
     if (s_asi && s_asi->power) {
         asi_power_t *pw = s_asi->power;
         int present = pw->present ? pw->present() : 0;
@@ -877,167 +1274,33 @@ static void s_page_system(void) {
         char pb[16];
         if (pct >= 0) { snum(pb, sizeof(pb), (unsigned int)pct); scat(pb, sizeof(pb), "%"); }
         else scpy(pb, sizeof(pb), "--");
-        skv(c2, "Guc Kaynagi", src == ASI_POWER_BATTERY ? "Pil" : "AC");
+        skv(c2, "Güç Kaynağı", src == ASI_POWER_BATTERY ? "Pil" : "AC");
         skv(c2, "Pil", present ? pb : "Yok (AC)");
-        if (present) skv(c2, "Sarj", chg ? "Sarj oluyor" : "Desarj");
+        if (present) skv(c2, "Şarj", chg ? "Şarj oluyor" : "Deşarj");
         skv(c2, "ACPI", (pw->acpi && pw->acpi()) ? "Var" : "Yok");
     }
     lv_obj_t *r = srow_start(c2, 46);
-    lv_obj_t *b1 = sbutton(r, "Yeniden Baslat", ADL_ACCENT, 0xFFFFFF, 170, 40);
+    lv_obj_t *b1 = sbutton(r, "Yeniden Başlat", SC_ACC, 0xFFFFFF, 170, 40);
     lv_obj_add_event_cb(b1, s_reboot_cb, LV_EVENT_CLICKED, 0);
     lv_obj_t *b2 = sbutton(r, "Kapat", ADL_DANGER, 0xFFFFFF, 120, 40);
     lv_obj_add_event_cb(b2, s_shutdown_cb, LV_EVENT_CLICKED, 0);
-    lv_obj_t *b3 = sbutton(r, "Guc Menusu", ADL_SURFACE_2, ADL_TEXT, 140, 40);
+    lv_obj_t *b3 = sbutton(r, "Güç Menüsü", 0x1E2129, ADL_TEXT, 140, 40);
     lv_obj_add_event_cb(b3, s_power_cb, LV_EVENT_CLICKED, 0);
 
-    lv_obj_t *cupd = scard(g_content);
-    stitle(cupd, "Guncelleme");
-    sdesc(cupd, "Sistem ve modulleri DuckStore sunucusundan guncelleyin. Indirilen paketler CRC32 ile dogrulanir.");
-    skv(cupd, "Mevcut Surum", update_applied_version());
-    skv(cupd, "Derleme", update_current_version());
-    skv(cupd, "Sunucu", update_base_url());
-    g_upd_msg = lv_label_create(cupd);
-    lv_label_set_text(g_upd_msg, update_status()->message);
-    lv_obj_set_style_text_color(g_upd_msg, lv_color_hex(ADL_TEXT_DIM), 0);
-    g_upd_bar = lv_bar_create(cupd);
-    lv_obj_set_size(g_upd_bar, LV_PCT(100), 10);
-    lv_bar_set_range(g_upd_bar, 0, 100);
-    lv_bar_set_value(g_upd_bar, 0, LV_ANIM_OFF);
-    lv_obj_add_flag(g_upd_bar, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_t *urow = srow_start(cupd, 46);
-    lv_obj_t *ub1 = sbutton(urow, "Kontrol Et", ADL_ACCENT, 0xFFFFFF, 150, 40);
-    lv_obj_add_event_cb(ub1, s_upd_check_cb, LV_EVENT_CLICKED, 0);
-    lv_obj_t *ub2 = sbutton(urow, "Guncelle", ADL_SURFACE_2, ADL_TEXT, 130, 40);
-    lv_obj_add_event_cb(ub2, s_upd_apply_cb, LV_EVENT_CLICKED, 0);
-    s_upd_refresh();
+    /* uygulamalar + kurulu paketler (eski Uygulamalar sayfasi) */
+    s_apps_card();
 
     lv_obj_t *c3 = scard(g_content);
-    stitle(c3, "Disk Şifreleme");
-    asi_crypt_t *cr = s_asi ? s_asi->crypt : 0;
-    int present = (cr && cr->present) ? cr->present() : 0;
-    if (present) {
-        sdesc(c3, "Disk AES-XTS ile sifreli. Acilista parola sorulur. Kaldirmak icin parolayi girin.");
-        skv(c3, "Durum", (cr && cr->status) ? cr->status() : "Acik");
-        lv_obj_t *row = srow_start(c3, 52);
-        g_crypt_ta = lv_textarea_create(row);
-        lv_obj_set_size(g_crypt_ta, 240, 40);
-        lv_textarea_set_one_line(g_crypt_ta, true);
-        lv_textarea_set_password_mode(g_crypt_ta, true);
-        lv_textarea_set_max_length(g_crypt_ta, 31);
-        lv_textarea_set_placeholder_text(g_crypt_ta, "Parola");
-        lv_obj_t *b = sbutton(row, "Kaldır", ADL_DANGER, 0xFFFFFF, 110, 40);
-        lv_obj_add_event_cb(b, s_crypt_disable_cb, LV_EVENT_CLICKED, 0);
-    } else {
-        sdesc(c3, "Diski AES-XTS ile sifreleyin. Bir parola belirleyin; sonraki acilislarda parola sorulur.");
-        lv_obj_t *row = srow_start(c3, 52);
-        g_crypt_ta = lv_textarea_create(row);
-        lv_obj_set_size(g_crypt_ta, 240, 40);
-        lv_textarea_set_one_line(g_crypt_ta, true);
-        lv_textarea_set_password_mode(g_crypt_ta, true);
-        lv_textarea_set_max_length(g_crypt_ta, 31);
-        lv_textarea_set_placeholder_text(g_crypt_ta, "Yeni parola (min 4)");
-        lv_obj_t *b = sbutton(row, "Şifrele", ADL_ACCENT, 0xFFFFFF, 110, 40);
-        lv_obj_add_event_cb(b, s_crypt_setup_cb, LV_EVENT_CLICKED, 0);
-    }
-    if (s_crypt_msg[0]) sdesc(c3, s_crypt_msg);
-    s_crypt_focus();
-}
-
-static void s_page_about(void) {
-    lv_obj_t *c = scard(g_content);
-    stitle(c, "Arctian OS");
-    sdesc(c, "Beyaz Kurt temali, terminal ile yonetilebilen masaustu isletim sistemi.");
-    skv(c, "Surum", update_current_version());
-    skv(c, "Arayuz", "LVGL + ADL-Wolf tema");
-    skv(c, "Kabuk", "arctian> (terminal)");
-
-    lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Ozellestirme");
-    sdesc(c2, "Vurgu rengi, arka plan, masaustu ogeleri ve saat bicimi buradan degistirilebilir.");
-    sdesc(c2, "Ayni islemler terminalden de yapilabilir: apps, run, wallpaper, pkg, sysinfo.");
-
-    /* 0.6: klavye kisayollari ve yeni araclar tek yerde. */
-    lv_obj_t *c3 = scard(g_content);
-    stitle(c3, "Klavye Kisayollari");
-    skv(c3, "Alt+Tab", "Pencere degistir");
-    skv(c3, "Ctrl+Alt+T", "Terminal ac");
+    stitle(c3, "Klavye Kısayolları");
+    skv(c3, "Alt+Tab", "Pencere değiştir");
+    skv(c3, "Ctrl+Alt+T", "Terminal aç");
     skv(c3, "Ctrl+Alt+A", "Asistan paneli");
-    skv(c3, "Ctrl+Alt+F", "FPS gostergesi");
-    skv(c3, "Ctrl+Alt+H", "Ne yapabilirim?");
-    skv(c3, "Ctrl+Alt+, / .", "Onceki / sonraki calisma alani");
-    skv(c3, "Ctrl+C / X / V", "Kopyala / kes / yapistir");
-    skv(c3, "Ctrl+Z / Y", "Geri al / yinele");
-
-    lv_obj_t *c4 = scard(g_content);
-    stitle(c4, "Yeni Araclar (0.6)");
-    sdesc(c4, "Terminal: cp, find, du, tree, trash, stat. Dosya Yoneticisi: Ad (yeniden adlandir), i (ozellikler).");
-    sdesc(c4, "Tarayici: * yer imi, Y yer imleri, H indirmeler, G gecmis, > ileri.");
+    skv(c3, "Ctrl+Alt+F", "FPS göstergesi");
+    skv(c3, "Ctrl+Alt+, / .", "Önceki / sonraki çalışma alanı");
+    skv(c3, "Ctrl+C / X / V", "Kopyala / kes / yapıştır");
 }
 
-/* ---- Erisilebilirlik sayfasi --------- */
-
-static void s_scale_cb(lv_event_t *e) {
-    int v = (int)(intptr_t)lv_event_get_user_data(e);
-    if (arctian_settings && arctian_settings->set_int)
-        arctian_settings->set_int("fontscale", v);   /* settings.c kabugu yeniden kurar */
-}
-
-static void s_page_access(void) {
-    lv_obj_t *c1 = scard(g_content);
-    stitle(c1, "Yazi Olcegi");
-    sdesc(c1, "Tum arayuz yazilarinin olcegi. Degisiklik aninda tum masaustu yeniden kurulur.");
-    lv_obj_t *wrap = lv_obj_create(c1);
-    lv_obj_remove_style_all(wrap);
-    lv_obj_set_width(wrap, LV_PCT(100));
-    lv_obj_set_height(wrap, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(wrap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_pad_row(wrap, 8, 0);
-    lv_obj_set_style_pad_column(wrap, 8, 0);
-    lv_obj_set_flex_flow(wrap, LV_FLEX_FLOW_ROW_WRAP);
-
-    int cur = (arctian_settings && arctian_settings->get_int)
-              ? arctian_settings->get_int("fontscale", 100) : 100;
-    int opts[3] = { 100, 125, 150 };
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t *b = lv_button_create(wrap);
-        lv_obj_set_size(b, 104, 48);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_radius(b, 10, 0);
-        uint32_t bg = (cur == opts[i]) ? ADL_ACCENT : ADL_SURFACE_2;
-        lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(b, 0, 0);
-        lv_obj_set_style_shadow_width(b, 0, 0);
-        char t[8];
-        int k = 0;
-        t[k++] = '%';
-        int v = opts[i];
-        char tmp[4];
-        int m = 0;
-        if (v == 0) tmp[m++] = '0';
-        while (v > 0 && m < 3) { tmp[m++] = (char)('0' + (v % 10)); v /= 10; }
-        while (m > 0 && k < 7) t[k++] = tmp[--m];
-        t[k] = 0;
-        lv_obj_t *l = lv_label_create(b);
-        lv_label_set_text(l, t);
-        lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_center(l);
-        lv_obj_add_event_cb(b, s_scale_cb, LV_EVENT_CLICKED, (void *)(intptr_t)opts[i]);
-    }
-
-    lv_obj_t *c2 = scard(g_content);
-    stitle(c2, "Gorunurluk");
-    sdesc(c2, "Yuksek kontrast metin ile zemin ayrimini guclendirir. Odak halkasi klavye ile "
-               "gezinirken odaktaki ogeleri vurgular. Buyuk simgeler masaustu simgelerini irilestirir.");
-    s_add_toggle(c2, "Yuksek kontrast", "contrast", 0);
-    s_add_toggle(c2, "Klavye odak halkasi", "focusring", 1);
-    s_add_toggle(c2, "Buyuk simgeler", "bigicons", 0);
-
-    lv_obj_t *c3 = scard(g_content);
-    stitle(c3, "Ekran");
-    sdesc(c3, "Gece modu ve parlaklik Hizli Ayarlar panelinden yonetilir "
-               "(gorev cubugundaki ayarlar dugmesi).");
-}
+/* Erisilebilirlik ayarlari Gorunum sayfasina katlandi (s_page_view). */
 
 
 /* ---- 0.7: Guncelleme sekmesi --------- */
@@ -1121,8 +1384,9 @@ static void s_upd_apply_cb2(lv_event_t *e) {
 }
 
 static void s_page_update(void) {
+    s_phead("Sistem \xe2\x80\xba Güncelleme", "Güncelleme");
     lv_obj_t *c = scard(g_content);
-    stitle(c, "Otomatik Guncelleme");
+    stitle(c, "Otomatik Güncelleme");
     sdesc(c, "Acikken sistem yeni surumu kendisi indirir ve uygun anda kurar. "
              "Kurulum kapanis veya acilista yapilir; indirme masaustunu kilitlemez.");
     g_upd_auto_lbl = lv_label_create(c);
@@ -1165,7 +1429,7 @@ static void s_page_update(void) {
 }
 
 static void s_page(int p) {
-    if (p < 0 || p > 8) p = 0;
+    if (p < 0 || p >= S_NPAGES) p = 0;
     g_page = p;
     s_pool_n = 0;
     g_crypt_ta = 0;
@@ -1185,47 +1449,125 @@ static void s_page(int p) {
     s_content_clear();
     s_nav_active();
     switch (p) {
-        case 0: s_page_personalize(); break;
-        case 1: s_page_desktop(); break;
-        case 2: s_page_screen(); break;
-        case 3: s_page_network(); break;
-        case 4: s_page_apps(); break;
-        case 5: s_page_system(); break;
-        case 6: s_page_access(); break;
-        case 7: s_page_update(); break;
+        case 0: s_page_view(); break;
+        case 1: s_page_network(); break;
+        case 2: s_page_notify(); break;
+        case 3: s_page_privacy(); break;
+        case 4: s_page_update(); break;
         default: s_page_about(); break;
     }
 }
 
 static void s_build_nav(void) {
+    /* spec: 200 px yan cubuk - avatar, arama, SVG ikonlu menu satirlari */
     g_nav = lv_obj_create(g_win);
     lv_obj_remove_style_all(g_nav);
     lv_obj_set_size(g_nav, S_NAV_W, LV_PCT(100));
     lv_obj_set_style_bg_color(g_nav, lv_color_hex(ADL_SURFACE), 0);
     lv_obj_set_style_bg_opa(g_nav, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(g_nav, 12, 0);
-    lv_obj_set_style_pad_row(g_nav, 8, 0);
+    lv_obj_set_style_border_width(g_nav, 1, 0);
+    lv_obj_set_style_border_side(g_nav, LV_BORDER_SIDE_RIGHT, 0);
+    lv_obj_set_style_border_color(g_nav, lv_color_hex(0x262A33), 0);
+    lv_obj_set_style_pad_hor(g_nav, 8, 0);
+    lv_obj_set_style_pad_top(g_nav, 10, 0);
+    lv_obj_set_style_pad_row(g_nav, 0, 0);
     lv_obj_set_flex_flow(g_nav, LV_FLEX_FLOW_COLUMN);
     lv_obj_remove_flag(g_nav, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *logo = lv_label_create(g_nav);
-    lv_label_set_text(logo, "Ayarlar");
-    lv_obj_set_style_text_color(logo, lv_color_hex(ADL_ACCENT), 0);
-    lv_obj_set_style_pad_bottom(logo, 8, 0);
-    g_logo = logo;
+    /* avatar satiri: 36 px daire + ad + hesap tipi */
+    lv_obj_t *av = lv_obj_create(g_nav);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, LV_PCT(100), 56);
+    lv_obj_remove_flag(av, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_left(av, 10, 0);
+    lv_obj_set_style_pad_column(av, 10, 0);
+    lv_obj_set_flex_flow(av, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(av, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *avc = lv_obj_create(av);
+    lv_obj_remove_style_all(avc);
+    lv_obj_set_size(avc, 36, 36);
+    lv_obj_set_style_radius(avc, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(avc, lv_color_hex(0x2A3550), 0);
+    lv_obj_set_style_bg_opa(avc, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(avc, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *avl = lv_label_create(avc);
+    lv_label_set_text(avl, "K");
+    lv_obj_set_style_text_color(avl, lv_color_hex(0xDBE7FF), 0);
+    lv_obj_center(avl);
+    lv_obj_t *avcol = lv_obj_create(av);
+    lv_obj_remove_style_all(avcol);
+    lv_obj_set_height(avcol, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(avcol, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(avcol, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t *avn = lv_label_create(avcol);
+    lv_label_set_text(avn, "Kerem");
+    lv_obj_set_style_text_color(avn, lv_color_hex(ADL_TEXT), 0);
+    if (f13) lv_obj_set_style_text_font(avn, f13, 0);
+    lv_obj_t *avs = lv_label_create(avcol);
+    lv_label_set_text(avs, "Yerel hesap");
+    lv_obj_set_style_text_color(avs, lv_color_hex(ADL_TEXT_DIM), 0);
+    if (f12) lv_obj_set_style_text_font(avs, f12, 0);
 
-    for (int i = 0; i < 9; i++) {
+    /* arama kutusu (gorunen dekor: ayarlarda arama simdilik etiket) */
+    lv_obj_t *sb = lv_obj_create(g_nav);
+    lv_obj_remove_style_all(sb);
+    lv_obj_set_size(sb, LV_PCT(100), 32);
+    lv_obj_set_style_radius(sb, 6, 0);
+    lv_obj_set_style_bg_color(sb, lv_color_hex(SC_INP), 0);
+    lv_obj_set_style_bg_opa(sb, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(sb, 1, 0);
+    lv_obj_set_style_border_color(sb, lv_color_hex(0x2C313B), 0);
+    lv_obj_remove_flag(sb, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_left(sb, 10, 0);
+    lv_obj_set_style_pad_column(sb, 8, 0);
+    lv_obj_set_style_pad_bottom(sb, 8, 0);
+    lv_obj_set_flex_flow(sb, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(sb, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    {
+        lv_obj_t *mag = s_svg_icon(sb,
+            "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#7D8491\" stroke-width=\"2\"><circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"M20 20l-4-4\"/></svg>", 16);
+        (void)mag;
+    }
+    lv_obj_t *sbl = lv_label_create(sb);
+    lv_label_set_text(sbl, "Ayarlarda ara");
+    lv_obj_set_style_text_color(sbl, lv_color_hex(0x7D8491), 0);
+    if (f12) lv_obj_set_style_text_font(sbl, f12, 0);
+
+    /* menu satirlari */
+    for (int i = 0; i < S_NPAGES; i++) {
         lv_obj_t *b = lv_button_create(g_nav);
-        lv_obj_set_size(b, LV_PCT(100), 40);
-        lv_obj_set_style_radius(b, 8, 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(ADL_SURFACE_2), 0);
+        lv_obj_set_size(b, LV_PCT(100), 34);
+        lv_obj_set_style_radius(b, 6, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x181B22), LV_STATE_HOVERED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_HOVERED);
         lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_set_style_shadow_width(b, 0, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_left(b, 14, 0);
+        lv_obj_set_style_pad_column(b, 10, 0);
+
+        /* sol 3 px aktif cubuk (spec: ustten 9, alttan 9 bos) */
+        lv_obj_t *rod = lv_obj_create(b);
+        lv_obj_remove_style_all(rod);
+        lv_obj_set_size(rod, 3, 16);
+        lv_obj_set_style_radius(rod, 2, 0);
+        lv_obj_set_style_bg_color(rod, lv_color_hex(SC_NAVBAR), 0);
+        lv_obj_set_style_bg_opa(rod, LV_OPA_TRANSP, 0);
+        lv_obj_align(rod, LV_ALIGN_LEFT_MID, 0, 0);
+        g_nav_rod[i] = rod;
+
+        lv_obj_t *ic = s_svg_icon(b, g_nav_icons[i], 16);
+        (void)ic;
         lv_obj_t *l = lv_label_create(b);
         lv_label_set_text(l, g_nav_labels[i]);
-        lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
-        lv_obj_align(l, LV_ALIGN_LEFT_MID, 12, 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(SC_NAVFG), 0);
+        if (f13) lv_obj_set_style_text_font(l, f13, 0);
         lv_obj_add_event_cb(b, s_nav_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         g_nav_btns[i] = b;
+        g_nav_lbl[i] = l;
     }
 }
 
@@ -1236,7 +1578,8 @@ static void s_build_content(void) {
     lv_obj_set_flex_grow(g_content, 1);
     lv_obj_set_style_bg_color(g_content, lv_color_hex(ADL_BG), 0);
     lv_obj_set_style_bg_opa(g_content, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(g_content, 16, 0);
+    lv_obj_set_style_pad_ver(g_content, 18, 0);
+    lv_obj_set_style_pad_hor(g_content, 26, 0);
     lv_obj_set_style_pad_row(g_content, 12, 0);
     lv_obj_set_flex_flow(g_content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -1255,7 +1598,10 @@ static void s_win_del_cb(lv_event_t *e) {
     g_win = 0;
     g_nav = 0;
     g_content = 0;
-    for (int i = 0; i < 9; i++) g_nav_btns[i] = 0;
+    for (int i = 0; i < S_NPAGES; i++) { g_nav_btns[i] = 0; g_nav_lbl[i] = 0; g_nav_rod[i] = 0; }
+    for (int i = 0; i < s_icon_n; i++)
+        if (s_asi && s_asi->mem) s_asi->mem->free(s_icon_buf[i]);
+    s_icon_n = 0;
 }
 
 void app_entry(lv_obj_t *win, asi_t *asi) {
@@ -1265,7 +1611,11 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     g_content = 0;
     g_page = 0;
     s_pool_n = 0;
-    for (int i = 0; i < 9; i++) g_nav_btns[i] = 0;
+    for (int i = 0; i < S_NPAGES; i++) { g_nav_btns[i] = 0; g_nav_lbl[i] = 0; g_nav_rod[i] = 0; }
+
+    if (!f22) f22 = lv_tiny_ttf_create_data(font_ttf, font_ttf_len, 22);
+    if (!f13) f13 = lv_tiny_ttf_create_data(font_ttf, font_ttf_len, 13);
+    if (!f12) f12 = lv_tiny_ttf_create_data(font_ttf, font_ttf_len, 12);
 
     lv_obj_set_flex_flow(win, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(win, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -1278,6 +1628,6 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
 
     s_page(0);
 #ifdef ARCTIAN_UPDATE_SELFTEST
-    s_page(5);   /* test: Guncelleme kartini goster */
+    s_page(4);   /* test: Guncelleme kartini goster */
 #endif
 }
