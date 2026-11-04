@@ -554,7 +554,8 @@ static int perm_policy_inner(const char *path, int is_write) {
     if (!caps_dispatch_active()) return 0;                /* masaustu kodu */
 
     /* Onay dialogu pompalanirken gelen uygulama istekleri eskiden sessizce
-     * "ver"e donuyordu; artik kullaniciya sorulmadan gecemezler. */
+     * "ver"e donuyordu; artik kullaniciya sorulmadan gecemezler. s_policy_busy
+     * yalnizca dialog pompalanirken 1'dir; politigin kendi cagrisi etkilenmez. */
     if (s_policy_busy) return -1;
 
     if (!path) return -1;
@@ -572,8 +573,11 @@ static int perm_policy_inner(const char *path, int is_write) {
     if (v == PERM_DENY)   return -1;
     if (v == PERM_ONCE)   { perm_dec_consume(id, PERM_T_PATH, n); return 0; }
 
-    /* Kullanicinin kendisi karar verir.     */
+    /* Kullanicinin kendisi karar verir. Dialog pompalanirken uygulama kodu
+     * tekrar dosya isterse s_policy_busy sayesinde sorulmadan reddedilir. */
+    s_policy_busy = 1;
     v = consent_ask(PERM_T_PATH, n);
+    s_policy_busy = 0;
     if (v == PERM_ALWAYS) {
         char dd[192];
         dir_of(n, dd, sizeof(dd));
@@ -593,11 +597,7 @@ static int perm_policy_inner(const char *path, int is_write) {
 
 int perm_policy(const char *path, int is_write) {
     if (s_saving) return 0;        /* izin registeryi yazilirken kendi yazmasi */
-    int prev = s_policy_busy;
-    s_policy_busy = 1;
-    int r = perm_policy_inner(path, is_write);
-    s_policy_busy = prev;
-    return r;
+    return perm_policy_inner(path, is_write);
 }
 
 /* Dosya yoneticisi / "ac ile" kullanicinin sectigi yol:
@@ -625,7 +625,9 @@ int perm_exec(const char *cmd) {
     if (v == PERM_DENY)   return -1;
     if (v == PERM_ONCE)   { perm_dec_consume(id, PERM_T_EXEC, cmd); return 0; }
 
+    s_policy_busy = 1;
     v = consent_ask(PERM_T_EXEC, cmd);
+    s_policy_busy = 0;
     if (v == PERM_ALWAYS) { perm_dec_set(id, PERM_T_EXEC, cmd, PERM_ALWAYS); return 0; }
     if (v == PERM_ONCE)   return 0;
     perm_dec_set(id, PERM_T_EXEC, cmd, PERM_DENY);
@@ -644,7 +646,9 @@ int perm_net(void) {
     if (v == PERM_DENY)   return -1;
     if (v == PERM_ONCE)   { perm_dec_consume(id, PERM_T_NET, "*"); return 0; }
 
+    s_policy_busy = 1;
     v = consent_ask(PERM_T_NET, "*");
+    s_policy_busy = 0;
     if (v == PERM_ALWAYS) { perm_dec_set(id, PERM_T_NET, "*", PERM_ALWAYS); return 0; }
     if (v == PERM_ONCE)   return 0;
     perm_dec_set(id, PERM_T_NET, "*", PERM_DENY);
