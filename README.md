@@ -6,7 +6,7 @@ kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 
 ÖNEMLİ NOT: OS in en başındaki özelleştirme ekranını yaparken şahsen çok özenmedim ve muhtemelen kaldıracağım çünkü göze slayt gösterisi gibi geliyor, lütfen şimdilik oraya takılmayın.
 
-**Sürüm: 0.7** — tek kaynak [`version.json`](version.json).
+**Sürüm: 0.8** — tek kaynak [`version.json`](version.json).
 
 ![Arctian masaüstü](docs/img/masaustu.png)
 
@@ -118,6 +118,8 @@ docs/          mimari, derleme, uygulama geliştirme
 
 ## Lisans
 
-Apache License 2.0 — tam metin: [LICENSE](LICENSE).
-`third_party/` altındaki LVGL (MIT) ve mbedTLS (Apache-2.0) kendi lisanslarıyla gelir;
-bkz. [third_party/README.md](third_party/README.md).
+CC BY 4.0 (Atıf 4.0 Uluslararası) — tam metin: [LICENSE](LICENSE). Ticari kullanım dahil
+her türlü kullanımda (dağıtım, kopya, değiştirilmiş sürüm) eser sahibinin bildirilmesi
+zorunludur: "Arctian OS — Copyright 2026 Arctian Developers".
+`third_party/` altındaki kütüphaneler (LVGL ve QuickJS MIT; mbedTLS ve Lexbor Apache-2.0)
+kendi lisanslarıyla gelir; bkz. [third_party/README.md](third_party/README.md).

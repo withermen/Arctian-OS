@@ -3,6 +3,37 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
+## 0.8 — Yeni arayüz dili, yeni uygulamalar, CC BY lisansı
+
+**Arayüz: tasarım şartnamesi 8 ekrana uygulandı**
+
+- Tema jetonları ve pencere çerçevesi tasarım şartnamesine çekildi; Ayarlar, Medya,
+  Görev Yöneticisi, Dosya Yöneticisi ve DuckStore aynı dille yeniden yazıldı.
+- DuckStore: hero kutusu kısaltıldı, ikon kutusu ve düğmeler küçültüldü.
+- Görev Yöneticisi: sürücüsünde ölçüm bulunmayan değerlerde (bellek/disk/ağ) uydurma
+  sayı yerine dürüst "-" gösterilir; CPU kullanım yüzdesi gerçektir.
+
+**Yeni uygulamalar**
+
+- Metin: düz metin düzenleyici (birlikte açma ve dosya argümanını destekler).
+- Takvim: aylık ızgara, gün adları ve bugün vurgusu.
+- Foto: görüntü görüntüleyici, dosya listesi ve ayrıntı satırıyla.
+
+**Tarayıcı kaplaması**
+
+- 36 px sekme şeridi (tek gerçek sekme, canlı sayfa başlığı), 52 px hap biçimli adres
+  satırı, SVG simge düğmeleri ve 28 px alt durum çubuğu; pencere 880×560.
+
+**Düzeltmeler**
+
+- C'nin açgözlü onaltılık kaçışları (`\xHH` sonrasındaki onaltılık karakteri yutar)
+  kaynak genelinde tarandı ve temizlendi; Takvim'de "Çar" etiketini bozan hata buydu.
+
+**Lisans**
+
+- Apache-2.0 → **CC BY 4.0**: ticari kullanım dahil her türlü kullanımda atıf
+  zorunlu; `third_party/` altındaki kütüphaneler kendi lisanslarında kalmaya devam eder.
+
 ## 0.7 — Koruma sınırı, güncelleme ve `.wlf` uygulama modeli
 
 **Güvenlik / koruma sınırı**
