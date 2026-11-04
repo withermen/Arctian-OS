@@ -278,3 +278,12 @@ Hobi sistem, ağa çıkıyor; bunlar "ileride" denmeyecek cinsten.
     boru hattı verisi dosyaya yazarken 20 KB, boruda 8 KB'a sessizce
     kırpılıyor (`terminal/main.c:1762`, `:2889`).
 76. `sfw_num` port ayrıştırması 12 haneli girişte int taşamasına giriyor.
+
+## 0.8 testlerinde eklenenler (bunlar açık)
+
+77. Konukta HTTPS el sıkışması QEMU ağında zaman aşımına düşüyor (mbedTLS recv
+    timeout); DNS ve düz HTTP çalışıyor, aynı adres WSL tarafında açılıyor. GitHub
+    kataloğundan `wf install` gerçek ağda denenemedi, yerel HTTP sunucuyla doğrulandı
+    (`kernel_plus/tls/https.c` civarı).
+78. Terminal `ls C:/apps` kurulu dosyalar varken "(bos)" yazıyor; dosyalar diskte
+    sağlam ve tarama/çalıştırma zinciri görüyor — listeleme tarafının kozmetik derdi.
