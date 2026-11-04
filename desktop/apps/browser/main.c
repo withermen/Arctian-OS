@@ -90,6 +90,10 @@ static int  g_fwd_count;
 static lv_obj_t   *g_addr;
 static lv_obj_t   *g_status;
 static lv_obj_t   *g_content;
+/* Sekme seridi (spec bolum 8): tek gercek sekme, canli sayfa basligini
+ * gosterir; yesil nokta https gostergesidir (g_cur_scheme'den). */
+static lv_obj_t   *g_tab_label;
+static lv_obj_t   *g_secure_dot;
 static lv_group_t *g_group;
 static asi_t      *g_basi;
 static lv_timer_t *g_wheel_timer;
@@ -649,6 +653,12 @@ static void set_status(const char *text, uint32_t color) {
     lv_obj_set_style_text_color(g_status, lv_color_hex(color), 0);
 }
 
+/* Sekme seridi basligi: sayfanin gercek <title>'i, yoksa ana makine adi. */
+static void set_tab_title(const char *t) {
+    if (!g_tab_label) return;
+    lv_label_set_text(g_tab_label, (t && t[0]) ? t : "Yeni sekme");
+}
+
 /* ---------------- Gezinme (fetch + parse + render) ---------------- */
 
 /* Arka plan cekme: ag isi fiber'de; ayristirma + cizim (UI) done'da. */
@@ -769,6 +779,9 @@ static void browser_nav_done(int status, void *u) {
         }
         render_blocks();
         set_status("Hata", ADL_DANGER);
+        set_tab_title(0);
+        if (g_secure_dot)
+            lv_obj_set_style_text_color(g_secure_dot, lv_color_hex(0x6B717D), 0);
     } else {
         bcopy_str(g_cur_url, g_nav_final, URL_MAX);
         parse_url(g_nav_final, g_cur_scheme, sizeof(g_cur_scheme), g_cur_host, sizeof(g_cur_host));
@@ -778,6 +791,15 @@ static void browser_nav_done(int status, void *u) {
             trigger_search_fallback();
         }
         set_status(g_nav_final, ADL_TEXT_DIM);
+        /* Sekme basligi + https gostergesi (spec bolum 8: yesil nokta). */
+        {
+            char t[120];
+            if (extract_title(g_raw, t, sizeof(t))) set_tab_title(t);
+            else set_tab_title(g_cur_host);
+        }
+        if (g_secure_dot)
+            lv_obj_set_style_text_color(g_secure_dot,
+                lv_color_hex(str_eq(g_cur_scheme, "https") ? 0x4ADE80 : 0x6B717D), 0);
     }
 
     if (g_nav_have_pending) {
@@ -935,8 +957,10 @@ static void render_blocks(void) {
     lv_obj_clean(g_content);
     lv_obj_set_style_bg_color(g_content, lv_color_hex(ADL_BG), 0);
     lv_obj_set_style_bg_opa(g_content, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(g_content, 10, 0);
-    lv_obj_set_style_pad_row(g_content, 2, 0);
+    lv_obj_set_style_pad_top(g_content, 28, 0);   /* spec bolum 8: 28 ust, 40 yan */
+    lv_obj_set_style_pad_bottom(g_content, 16, 0);
+    lv_obj_set_style_pad_hor(g_content, 40, 0);
+    lv_obj_set_style_pad_row(g_content, 6, 0);
 
     for (int i = 0; i < g_block_count; i++) {
         block_t *b = &g_blocks[i];
@@ -3941,6 +3965,64 @@ static lv_font_t *bfont(int size) {
     return f;
 }
 
+/* ---------------- Tarayici kaplamasi (spec bolum 8) ----------------
+ * 36 px sekme seridi + 52 px adres satiri. Ikonlar svg_render ile ARGB
+ * tampona cizilir; tamponlar kapanista birakilir (browser_del_cb). */
+#define CHROME_IC_MAX 8
+static uint32_t *g_chrome_buf[CHROME_IC_MAX];
+static int       g_chrome_n;
+
+static lv_obj_t *chrome_icon(lv_obj_t *parent, const char *svg, int size) {
+    if (g_chrome_n >= CHROME_IC_MAX || !g_basi || !g_basi->mem) return 0;
+    uint32_t *buf = (uint32_t *)g_basi->mem->alloc((size_t)size * size * 4u);
+    if (!buf) return 0;
+    if (svg_render(svg, size, size, buf) != 0) {
+        g_basi->mem->free(buf);
+        return 0;
+    }
+    g_chrome_buf[g_chrome_n++] = buf;
+    lv_obj_t *c = lv_canvas_create(parent);
+    lv_obj_remove_style_all(c);
+    lv_canvas_set_buffer(c, buf, size, size, LV_COLOR_FORMAT_ARGB8888);
+    return c;
+}
+
+#define SVG_BACK "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M15 18l-6-6 6-6\"/></svg>"
+#define SVG_FWD  "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 18l6-6-6-6\"/></svg>"
+#define SVG_GO   "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#60A5FA\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 12h15M13 6l6 6-6 6\"/></svg>"
+#define SVG_DL   "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 4v11M7 10l5 5 5-5M5 20h14\"/></svg>"
+#define SVG_STAR "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#E8B95C\" stroke-width=\"1.6\" stroke-linejoin=\"round\"><path d=\"M12 3.6l2.5 5.1 5.6.8-4 4 .9 5.6-5-2.7-5 2.7.9-5.6-4-4 5.6-.8z\"/></svg>"
+#define SVG_BM   "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M6 5h12M6 12h12M6 19h8\"/></svg>"
+#define SVG_DLM  "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 13h4l2 3h4l2-3h4M4 13V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v6M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5\"/></svg>"
+#define SVG_HIST "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#A3A8B3\" stroke-width=\"1.8\" stroke-linecap=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8\"/><path d=\"M12 7v5l3 2\"/></svg>"
+
+static void back_cb(lv_event_t *e);
+static void forward_cb(lv_event_t *e);
+static void go_cb(lv_event_t *e);
+static void download_cb(lv_event_t *e);
+static void bm_star_cb(lv_event_t *e);
+static void bm_btn_cb(lv_event_t *e);
+static void hist_btn_cb(lv_event_t *e);
+static void newtab_cb(lv_event_t *e);
+
+/* 30 px kaplama dugmesi; bordered: gezinme oklari 1 px kenarlikli. */
+static void chrome_btn(lv_obj_t *parent, const char *svg, lv_event_cb_t cb,
+                       int bordered) {
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_set_size(b, 30, 30);
+    lv_obj_set_style_radius(b, 6, 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x1E2129), LV_STATE_HOVERED);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_HOVERED);
+    lv_obj_set_style_border_width(b, bordered ? 1 : 0, 0);
+    lv_obj_set_style_border_color(b, lv_color_hex(0x2C313B), 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_t *ic = chrome_icon(b, svg, 16);
+    if (ic) lv_obj_center(ic);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+}
+
 /* ---------------- Ag kaynaklari (harici CSS + resim baytlari) ---------------- */
 
 static void res_clear(void) {
@@ -5735,6 +5817,28 @@ static void forward_cb(lv_event_t *e) {
     navigate(url, 0);
 }
 
+/* Karsilama ekrani (bos sekme hali). */
+static void show_start_page(void) {
+    g_block_count = 0;
+    push_block(BLK_H1, "Arctian Tarayici", 0);
+    push_block(BLK_TEXT, "Adres yazip Enter'a basin (ornek: google.com, github.com)", 0);
+    push_block(BLK_TEXT, "Linklere tiklayarak gezinebilir, geri/ileri oklariyla sayfalar arasinda dolasabilirsiniz.", 0);
+    push_block(BLK_TEXT, "Arama/form kutularina yazip Enter'a basarak veya \"Gonder\" butonuna tiklayarak formlari gonderebilirsiniz.", 0);
+    render_blocks();
+}
+
+/* Sekme seridindeki "+": sekmeyi karsilama ekranina sifirlar. Coklu sekme
+ * altyapisi olmadigi icin yeni pencere degil, ayni sekmeyi temizler -
+ * gezinme gecmisi korunur. */
+static void newtab_cb(lv_event_t *e) {
+    (void)e;
+    g_cur_url[0] = 0;
+    if (g_addr) lv_textarea_set_text(g_addr, "");
+    set_tab_title(0);
+    set_status("Hazir", ADL_TEXT_DIM);
+    show_start_page();
+}
+
 static void browser_del_cb(lv_event_t *e) {
     (void)e;
     lv_indev_t *kp = lv_port_get_keypad();
@@ -5742,7 +5846,11 @@ static void browser_del_cb(lv_event_t *e) {
     if (g_wheel_timer) { lv_timer_delete(g_wheel_timer); g_wheel_timer = 0; }
     images_clear();
     res_clear();
+    for (int i = 0; i < g_chrome_n; i++)
+        if (g_chrome_buf[i] && g_basi && g_basi->mem) g_basi->mem->free(g_chrome_buf[i]);
+    g_chrome_n = 0;
     g_addr = 0; g_status = 0; g_content = 0;
+    g_tab_label = 0; g_secure_dot = 0;
     s_panel = 0; s_panel_list = 0; s_panel_mode = 0;
     g_fwd_count = 0;
 }
@@ -5772,113 +5880,114 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     lv_obj_set_style_pad_all(win, 0, 0);
     lv_obj_set_style_pad_row(win, 0, 0);
 
-    /* Ust bar: geri / adres / git */
+    /* ---- Sekme seridi 36 px (spec bolum 8) ----
+     * Coklu sekme altyapisi yok; seritte TEK gercek sekme durur ve
+     * sayfanin canli <title>'ini gosterir (browser_nav_done gunceller).
+     * "+" yeni bos sekme acar (karsilama ekrani). */
+    lv_obj_t *tabs = lv_obj_create(win);
+    lv_obj_remove_style_all(tabs);
+    lv_obj_set_size(tabs, LV_PCT(100), 36);
+    lv_obj_set_style_border_width(tabs, 1, 0);
+    lv_obj_set_style_border_side(tabs, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(tabs, lv_color_hex(0x2C313B), 0);
+    lv_obj_remove_flag(tabs, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_left(tabs, 12, 0);
+    lv_obj_set_style_pad_column(tabs, 4, 0);
+    lv_obj_set_flex_flow(tabs, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tabs, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+
+    lv_obj_t *tab0 = lv_obj_create(tabs);
+    lv_obj_remove_style_all(tab0);
+    lv_obj_set_size(tab0, LV_SIZE_CONTENT, 31);
+    lv_obj_set_style_radius(tab0, 8, 0);   /* bu LVGL surumu tek radius destekler */
+    lv_obj_set_style_bg_color(tab0, lv_color_hex(0x1F232B), 0);
+    lv_obj_set_style_bg_opa(tab0, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(tab0, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_hor(tab0, 14, 0);
+    lv_obj_set_flex_flow(tab0, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tab0, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    g_tab_label = lv_label_create(tab0);
+    lv_label_set_text(g_tab_label, "Yeni sekme");
+    lv_label_set_long_mode(g_tab_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(g_tab_label, 300);
+    lv_obj_set_style_text_color(g_tab_label, lv_color_hex(0xE8EAEE), 0);
+    {
+        lv_font_t *tf = bfont(13);
+        if (tf) lv_obj_set_style_text_font(g_tab_label, tf, 0);
+    }
+
+    lv_obj_t *tplus = lv_label_create(tabs);
+    lv_label_set_text(tplus, "+");
+    lv_obj_set_style_text_color(tplus, lv_color_hex(0x8B919C), 0);
+    lv_obj_set_style_pad_hor(tplus, 10, 0);
+    lv_obj_set_style_pad_ver(tplus, 6, 0);
+    lv_obj_add_flag(tplus, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(tplus, newtab_cb, LV_EVENT_CLICKED, NULL);
+
+    /* ---- Adres satiri 52 px: iki 30 px ok + pill adres + dugmeler ---- */
     lv_obj_t *topbar = lv_obj_create(win);
     lv_obj_remove_style_all(topbar);
-    lv_obj_set_size(topbar, LV_PCT(100), 44);
-    lv_obj_set_style_pad_all(topbar, 4, 0);
+    lv_obj_set_size(topbar, LV_PCT(100), 52);
+    lv_obj_set_style_border_width(topbar, 1, 0);
+    lv_obj_set_style_border_side(topbar, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_color(topbar, lv_color_hex(0x2A2E37), 0);
+    lv_obj_remove_flag(topbar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_hor(topbar, 16, 0);
+    lv_obj_set_style_pad_column(topbar, 10, 0);
     lv_obj_set_flex_flow(topbar, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(topbar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(topbar, 6, 0);
 
-    lv_obj_t *back = lv_button_create(topbar);
-    lv_obj_set_size(back, 40, 36);
-    lv_obj_set_style_bg_color(back, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(back, 8, 0);
-    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bkl = lv_label_create(back);
-    lv_label_set_text(bkl, "<");
-    lv_obj_set_style_text_color(bkl, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(bkl);
+    chrome_btn(topbar, SVG_BACK, back_cb, 1);
+    chrome_btn(topbar, SVG_FWD, forward_cb, 1);
 
-    /* 0.6: ileri dugmesi (geri yigini ile simetrik) */
-    lv_obj_t *fwd = lv_button_create(topbar);
-    lv_obj_set_size(fwd, 40, 36);
-    lv_obj_set_style_bg_color(fwd, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(fwd, 8, 0);
-    lv_obj_add_event_cb(fwd, forward_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *fwl = lv_label_create(fwd);
-    lv_label_set_text(fwl, ">");
-    lv_obj_set_style_text_color(fwl, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(fwl);
+    /* Adres pill'i: 32 px yukseklik, 16 px yariicap, #0f1115 zemin.
+     * Yesil ● https gostergesidir; metnin kendisi duzenlenebilir. */
+    lv_obj_t *pill = lv_obj_create(topbar);
+    lv_obj_remove_style_all(pill);
+    lv_obj_set_size(pill, 100, 32);
+    lv_obj_set_flex_grow(pill, 1);
+    lv_obj_set_style_radius(pill, 16, 0);
+    lv_obj_set_style_bg_color(pill, lv_color_hex(0x0F1115), 0);
+    lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(pill, 1, 0);
+    lv_obj_set_style_border_color(pill, lv_color_hex(0x2C313B), 0);
+    lv_obj_remove_flag(pill, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_hor(pill, 14, 0);
+    lv_obj_set_style_pad_column(pill, 6, 0);
+    lv_obj_set_flex_flow(pill, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pill, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    g_addr = lv_textarea_create(topbar);
+    g_secure_dot = lv_label_create(pill);
+    lv_label_set_text(g_secure_dot, "\xe2\x97\x8f");
+    lv_obj_set_style_text_color(g_secure_dot, lv_color_hex(0x6B717D), 0);
+
+    g_addr = lv_textarea_create(pill);
     lv_textarea_set_one_line(g_addr, 1);
     lv_textarea_set_placeholder_text(g_addr, "ornek.com veya https://...");
-    lv_obj_set_size(g_addr, 100, 36);
+    lv_obj_set_size(g_addr, 100, 30);
     lv_obj_set_flex_grow(g_addr, 1);
+    lv_obj_set_style_bg_opa(g_addr, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g_addr, 0, 0);
+    lv_obj_set_style_shadow_width(g_addr, 0, 0);
+    lv_obj_set_style_pad_all(g_addr, 0, 0);
+    {
+        lv_font_t *af = bfont(13);
+        if (af) {
+            lv_obj_set_style_text_font(g_addr, af, 0);
+            lv_obj_set_style_text_font(g_addr, af, LV_PART_TEXTAREA_PLACEHOLDER);
+        }
+    }
+    lv_obj_set_style_text_color(g_addr, lv_color_hex(0xE8EAEE), 0);
+    lv_obj_set_style_text_color(g_addr, lv_color_hex(0x6B717D), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_obj_add_event_cb(g_addr, addr_ready_cb, LV_EVENT_READY, NULL);
 
-    lv_obj_t *go = lv_button_create(topbar);
-    lv_obj_set_size(go, 60, 36);
-    lv_obj_set_style_bg_color(go, lv_color_hex(ADL_ACCENT), 0);
-    lv_obj_set_style_radius(go, 8, 0);
-    lv_obj_add_event_cb(go, go_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *gl = lv_label_create(go);
-    lv_label_set_text(gl, "Git");
-    lv_obj_set_style_text_color(gl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(gl);
-
-    /* Indir: gecerli adresi C:/indirilenler'e kaydeder. Onceden
-     * tarayicida hic indirme akisi yoktu. */
-    lv_obj_t *dl = lv_button_create(topbar);
-    lv_obj_set_size(dl, 40, 36);
-    lv_obj_set_style_bg_color(dl, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(dl, 8, 0);
-    lv_obj_add_event_cb(dl, download_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *dll = lv_label_create(dl);
-    lv_label_set_text(dll, "v");
-    lv_obj_set_style_text_color(dll, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(dll);
-
-    /* 0.6: yer imi yildizi ve indirme yoneticisi */
-    lv_obj_t *star = lv_button_create(topbar);
-    lv_obj_set_size(star, 40, 36);
-    lv_obj_set_style_bg_color(star, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(star, 8, 0);
-    lv_obj_add_event_cb(star, bm_star_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *stl = lv_label_create(star);
-    lv_label_set_text(stl, "*");
-    lv_obj_set_style_text_color(stl, lv_color_hex(ADL_WARN), 0);
-    lv_obj_center(stl);
-
-    lv_obj_t *dls = lv_button_create(topbar);
-    lv_obj_set_size(dls, 40, 36);
-    lv_obj_set_style_bg_color(dls, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(dls, 8, 0);
-    lv_obj_add_event_cb(dls, dl_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *dlsl = lv_label_create(dls);
-    lv_label_set_text(dlsl, "H");
-    lv_obj_set_style_text_color(dlsl, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(dlsl);
-
-    lv_obj_t *bms = lv_button_create(topbar);
-    lv_obj_set_size(bms, 40, 36);
-    lv_obj_set_style_bg_color(bms, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(bms, 8, 0);
-    lv_obj_add_event_cb(bms, bm_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bmsl = lv_label_create(bms);
-    lv_label_set_text(bmsl, "Y");
-    lv_obj_set_style_text_color(bmsl, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(bmsl);
-
-    /* 0.6: gecmis paneli */
-    lv_obj_t *his = lv_button_create(topbar);
-    lv_obj_set_size(his, 40, 36);
-    lv_obj_set_style_bg_color(his, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_set_style_radius(his, 8, 0);
-    lv_obj_add_event_cb(his, hist_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *hisl = lv_label_create(his);
-    lv_label_set_text(hisl, "G");
-    lv_obj_set_style_text_color(hisl, lv_color_hex(ADL_TEXT), 0);
-    lv_obj_center(hisl);
-    /* Durum satiri */
-    g_status = lv_label_create(win);
-    lv_label_set_long_mode(g_status, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(g_status, LV_PCT(96));
-    lv_obj_set_style_pad_left(g_status, 6, 0);
-    lv_label_set_text(g_status, "Hazir");
-    lv_obj_set_style_text_color(g_status, lv_color_hex(ADL_TEXT_DIM), 0);
+    /* Ilevisel dugmeler: git / indir / yildiz / indirmeler / listeler / gecmis */
+    chrome_btn(topbar, SVG_GO, go_cb, 0);
+    chrome_btn(topbar, SVG_DL, download_cb, 0);
+    chrome_btn(topbar, SVG_STAR, bm_star_cb, 0);
+    chrome_btn(topbar, SVG_DLM, dl_btn_cb, 0);
+    chrome_btn(topbar, SVG_BM, bm_btn_cb, 0);
+    chrome_btn(topbar, SVG_HIST, hist_btn_cb, 0);
 
     /* Icerik alani (kaydirilabilir, dikey akan bloklar). Sabit piksel
      * yukseklik YOK - flex_grow(1) kalan tum alani otomatik doldurur ve
@@ -5889,18 +5998,40 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     lv_obj_set_style_bg_color(g_content, lv_color_hex(ADL_BG), 0);
     lv_obj_set_style_bg_opa(g_content, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(g_content, 0, 0);
-    lv_obj_set_style_pad_all(g_content, 10, 0);
-    lv_obj_set_style_pad_row(g_content, 2, 0);
+    lv_obj_set_style_pad_top(g_content, 28, 0);      /* spec: 28 px ust */
+    lv_obj_set_style_pad_bottom(g_content, 16, 0);
+    lv_obj_set_style_pad_hor(g_content, 40, 0);      /* spec: 40 px yan */
+    lv_obj_set_style_pad_row(g_content, 6, 0);
     lv_obj_set_flex_flow(g_content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(g_content, LV_DIR_VER);
+
+    /* Alt durum cubugu 28 px: yukleme durumu / hata iletileri. */
+    lv_obj_t *sbar = lv_obj_create(win);
+    lv_obj_remove_style_all(sbar);
+    lv_obj_set_size(sbar, LV_PCT(100), 28);
+    lv_obj_set_style_border_width(sbar, 1, 0);
+    lv_obj_set_style_border_side(sbar, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_color(sbar, lv_color_hex(0x2A2E37), 0);
+    lv_obj_remove_flag(sbar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_hor(sbar, 16, 0);
+    g_status = lv_label_create(sbar);
+    lv_label_set_long_mode(g_status, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(g_status, LV_PCT(100));
+    lv_label_set_text(g_status, "Hazir");
+    lv_obj_set_style_text_color(g_status, lv_color_hex(0x8B919C), 0);
+    {
+        lv_font_t *sf = bfont(12);
+        if (sf) lv_obj_set_style_text_font(g_status, sf, 0);
+    }
+    lv_obj_align(g_status, LV_ALIGN_LEFT_MID, 0, 0);
 
     /* 0.6: yer imi + indirme paneli (sag ustte acilir) */
     s_panel = lv_obj_create(win);
     lv_obj_remove_style_all(s_panel);
     lv_obj_remove_flag(s_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(s_panel, 360, 300);
-    lv_obj_align(s_panel, LV_ALIGN_TOP_RIGHT, -8, 48);
+    lv_obj_align(s_panel, LV_ALIGN_TOP_RIGHT, -8, 92);
     lv_obj_set_style_bg_color(s_panel, lv_color_hex(ADL_SURFACE), 0);
     lv_obj_set_style_bg_opa(s_panel, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(s_panel, 12, 0);
@@ -5928,9 +6059,5 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     g_wheel_timer = lv_timer_create(page_wheel_cb, 30, NULL);
 
     /* Karsilama ekrani */
-    push_block(BLK_H1, "Arctian Tarayici", 0);
-    push_block(BLK_TEXT, "Adres yazip Enter'a basin (ornek: google.com, github.com)", 0);
-    push_block(BLK_TEXT, "Linklere tiklayarak gezinebilir, \"<\" ile geri donebilirsiniz.", 0);
-    push_block(BLK_TEXT, "Arama/form kutularina yazip Enter'a basarak veya \"Gonder\" butonuna tiklayarak formlari gonderebilirsiniz.", 0);
-    render_blocks();
+    show_start_page();
 }
