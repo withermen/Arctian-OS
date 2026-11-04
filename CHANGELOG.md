@@ -15,6 +15,12 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
 **Yeni uygulamalar**
 
+- Ofis paketi (`.wlf`, GitHub sürümünden kurulur): **Şafak** (toplayıcı), **Mürekkep**
+  (belge), **Abaküs** (tablo), **Sahne** (sunum), **Mercek** (PDF). Hepsi tam ekran
+  kendi başlık çubuğuyla çalışır, 1280×720 referanslı ölçekleme her çözünürlükte net.
+- Tam ekran uygulama desteği: bayraklı `.wlf` penceresi çerçevesiz açılır, dock gizlenir.
+- `wf install <ad>` uygulamayı katalogdan indirir; katalog adresi `wf store` ile değişir.
+  Katalog GitHub sürümünde durur, yeni uygulama için sistemi yeniden derlemek gerekmez.
 - Metin: düz metin düzenleyici (birlikte açma ve dosya argümanını destekler).
 - Takvim: aylık ızgara, gün adları ve bugün vurgusu.
 - Foto: görüntü görüntüleyici, dosya listesi ve ayrıntı satırıyla.
@@ -26,6 +32,8 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
 **Düzeltmeler**
 
+- Onay penceresi açıkken uygulama isteklerinin otomatik reddedilmesine yol açan izin
+  bayrağı hatası düzeltildi; bayrak artık yalnız diyalog pompalanırken devrede.
 - C'nin açgözlü onaltılık kaçışları (`\xHH` sonrasındaki onaltılık karakteri yutar)
   kaynak genelinde tarandı ve temizlendi; Takvim'de "Çar" etiketini bozan hata buydu.
 

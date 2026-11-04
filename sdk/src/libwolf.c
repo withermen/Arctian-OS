@@ -261,6 +261,36 @@ void wolf_anim_pulse(wolf_id w, int period_ms, int low_opa) {
 }
 
 /* ==================================================================== */
+/* ABI v3                                                               */
+/* ==================================================================== */
+
+/* Son v3 alani (on_resize) tabloya sigiyor mu? */
+int wolf_api_v3(void) {
+    return g_api &&
+           g_api->size >= (uint32_t)(offsetof(wolf_api_t, on_resize) +
+                                     sizeof(void *));
+}
+
+int wolf_screen(int *w, int *h) { return HAS(screen) ? API->screen(w, h) : -1; }
+wolf_id wolf_icon(wolf_id p, int x, int y, int size, const char *svg) {
+    return HAS(icon) ? API->icon(p, x, y, size, svg) : 0;
+}
+void wolf_set_click(wolf_id w, int on) {
+    if (HAS(set_click)) API->set_click(w, on);
+}
+void wolf_scrollable(wolf_id w, int on) {
+    if (HAS(scrollable)) API->scrollable(w, on);
+}
+void wolf_scroll_to(wolf_id w, int x, int y) {
+    if (HAS(scroll_to)) API->scroll_to(w, x, y);
+}
+void wolf_win_close(void) { if (HAS(win_close)) API->win_close(); }
+void wolf_win_min(void)   { if (HAS(win_min)) API->win_min(); }
+void wolf_on_resize(wolf_event_fn cb, void *user) {
+    if (HAS(on_resize)) API->on_resize(cb, user);
+}
+
+/* ==================================================================== */
 /* Freestanding yardimcilar                                             */
 /* ==================================================================== */
 

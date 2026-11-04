@@ -50,6 +50,7 @@ HEADER_BASE = struct.calcsize("<IHHHHiiIIIIIIII")   # 52
 
 FLAG_FS, FLAG_NET, FLAG_EXEC = 0x0001, 0x0002, 0x0004
 FLAG_RESIZE = 0x0100
+FLAG_FULLSCREEN = 0x0200   # cercevesiz tam ekran basla (ofis uygulamalari)
 
 
 def checksum(data):
@@ -133,6 +134,8 @@ def build(meta, payload, kind, entry_off=0, load_addr=0, bss_size=0):
     flags = parse_perms(meta.get("permissions"))
     if meta.get("resizable"):
         flags |= FLAG_RESIZE
+    if meta.get("fullscreen"):
+        flags |= FLAG_FULLSCREEN
 
     role_name = str(meta.get("role", "ui")).strip().lower()
     try:
@@ -223,7 +226,7 @@ def inspect(path):
         print("Isler    : %s" % m["handles"])
     if m.get("entry"):
         print("Giris    : %s" % m["entry"])
-    print("Pencere  : %dx%d" % (w, h))
+    print("Pencere  : %dx%d%s" % (w, h, "  (tam ekran)" if flags & FLAG_FULLSCREEN else ""))
     print("Yukleme  : 0x%08X  image=%d bss=%d entry=0x%X" % (load, isz, bss, entry))
     print("Izinler  : " + ("tam" if flags == 0 else " ".join(
         n for n, b in (("fs", FLAG_FS), ("net", FLAG_NET), ("exec", FLAG_EXEC))

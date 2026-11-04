@@ -223,6 +223,33 @@ typedef struct wolf_api {
     /* --- softPulse: opa low_opa..100 sonsuz salinim (canli gosterge). */
     void      (*anim_pulse)(wolf_id w, int period_ms, int low_opa);
 
+    /* ============ ABI v3 eklemeleri (yalnizca sona eklenir) ============ */
+
+    /* --- tuval boyutu: kok kapsayicinin piksel olcusu (tam ekran olcek
+     * macunlari icin). *w ve *h dolmazsa 0 doner. */
+    int       (*screen)(int *w, int *h);
+
+    /* --- SVG ikon: 24 viewBox cizgi ikonlari size px alana render edilir ---
+     * (durum simgeleri, kapat/cizgiler; emoji yok). */
+    wolf_id   (*icon)(wolf_id parent, int x, int y, int size, const char *svg);
+
+    /* --- istenilen nesneyi tiklanabilir yap/kapat (panel = buton) --- */
+    void      (*set_click)(wolf_id w, int on);
+
+    /* --- tasma: nesne icerigini surukle/kaydirma ile tasinabilir kil ---
+     * (ofis listeleri, sayfa alanlari, tablo izgarasi). on: 1 dikey 2 cift. */
+    void      (*scrollable)(wolf_id w, int on);
+    void      (*scroll_to)(wolf_id w, int x, int y);
+
+    /* --- pencere komutlari: kabuk kapatisi ve simge durumuna kupculme ---
+     * tam ekran ofis uygulamalarinin kendi baslik cubugu bunlari cagrir. */
+    void      (*win_close)(void);
+    void      (*win_min)(void);
+
+    /* --- boyut degisince cb(0, user): cozunurluk degisti, yeniden olcek ---
+     * uygulama tuvali yeniden cizilir (her cozunurlukta kalite icin). */
+    void      (*on_resize)(wolf_event_fn cb, void *user);
+
     /* --- ileride: buraya yeni alanlar eklenir --- */
 } wolf_api_t;
 
@@ -301,9 +328,10 @@ enum wolf_style_prop {
     WOLF_SP_ARC_ROUNDED   = 48,  /* 1 = yuvarlak uc */
     WOLF_SP_TRANSLATE_X   = 49,  /* px: kaydirma (giris animasyonu / hover) */
     WOLF_SP_TRANSLATE_Y   = 50,  /* px */
-    WOLF_SP_FONT_PX       = 51   /* gomulu arayuz fontu, istenen piksel boyutu
-                                  * (orn. 24 = 24px). Sozluk boyutlari or:
-                                  * 11/13/16/20/24/32. */
+    WOLF_SP_FONT_PX       = 51,  /* gomulu arayuz fontu, istenen piksel boyutu
+                                  * (orn. 24 = 24px; 6..72 arasi serbest). */
+    WOLF_SP_TEXT_ALIGN    = 52,  /* 0 sol 1 orta 2 sag (etiket hizada) */
+    WOLF_SP_TEXT_LONG     = 53   /* 0 sar 1 kirp 2 nokta 3 kaydir 4 don */
 };
 
 /* ---- Gecis (CSS `transition` karsiligi) ----------------------------
@@ -469,6 +497,18 @@ void wolf_transition(wolf_id w, unsigned props_mask, int dur_ms,
 void wolf_state_set(wolf_id w, int state_flags, int on);
 void wolf_anim_in(wolf_id w, int dy, int dur_ms, int delay_ms);
 void wolf_anim_pulse(wolf_id w, int period_ms, int low_opa);
+
+/* ---- ABI v3: ekran olcusu, ikon, tasma, pencere komutlari ---- */
+int     wolf_screen(int *w, int *h);
+wolf_id wolf_icon(wolf_id parent, int x, int y, int size, const char *svg);
+void    wolf_set_click(wolf_id w, int on);
+void    wolf_scrollable(wolf_id w, int on);
+void    wolf_scroll_to(wolf_id w, int x, int y);
+void    wolf_win_close(void);
+void    wolf_win_min(void);
+void    wolf_on_resize(wolf_event_fn cb, void *user);
+/** Tablo v3 alanlarini iceriyor mu? */
+int     wolf_api_v3(void);
 
 /* ---- kucuk yardimcilar (libwolf icinde, freestanding uyumlu) ---- */
 int  wolf_strlen(const char *s);

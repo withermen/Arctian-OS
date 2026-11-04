@@ -513,6 +513,8 @@ void qc_apply_overlays(void);     /* parlaklik/gece perdesini uygular */
 void add_ctrl(lv_obj_t *tb, const char *svg, uint32_t bgcol,
               lv_event_cb_t cb, void *ud, int xoff);
 lv_obj_t *create_window(const char *title, int w, int h);
+lv_obj_t *create_window_fs(const char *title, int w, int h); /* cercevesiz tam ekran (0.8) */
+int win_fs_active(void);   /* gorunur tam ekran pencere var mi (dock gizle) */
 void build_welcome_window(void);
 int win_pid(lv_obj_t *win);
 winrec_t *winrec_top(void);
@@ -723,6 +725,7 @@ int  wlf_run_cli(dyn_app_t *d, const char *arg, void (*puts)(const char *s));
 int  wlf_install_file(const char *path, char *err, int cap);   /* .wlf dosyasini C:/apps'e kur */
 int  wlf_remove(const char *id);
 int  wlf_install_url(const char *url, char *err, int cap);
+int  wlf_install_name(const char *name, char *err, int cap); /* katalogdan indir (0.8) */
 void wlf_diag(const char *tag, const char *s);   /* seri teshis */
 
 const arctian_app_t *app_get(int i);

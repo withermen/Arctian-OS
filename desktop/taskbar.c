@@ -866,6 +866,14 @@ void build_taskbar(lv_obj_t *scr) {
 
 void tb_poll(void) {
     if (g_tb_dirty) { g_tb_dirty = 0; tb_rebuild_icons(); }
+    /* 0.8: tam ekran uygulama acikken dock gizlenir, kapaninca geri gelir. */
+    if (g_taskbar) {
+        int hide = win_fs_active();
+        if (hide && !lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN))
+            lv_obj_add_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+        else if (!hide && lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN))
+            lv_obj_remove_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+    }
     if (!g_taskbar || !g_asi->input || !g_asi->input->mouse_buttons) return;
     int b = g_asi->input->mouse_buttons();
     int right = (b >> 1) & 1;

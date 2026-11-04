@@ -1,0 +1,13 @@
+{
+  "name": "safak",
+  "title": "Şafak",
+  "version": "1.0",
+  "category": "Ofis",
+  "publisher": "Arctian",
+  "role": "ui",
+  "fullscreen": true,
+  "w": 1280,
+  "h": 720,
+  "icon": "icon.svg",
+  "permissions": ["fs", "exec"]
+}

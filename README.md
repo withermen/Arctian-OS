@@ -19,7 +19,7 @@ kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 | Önyükleme | MBR (USB/CD) + El Torito ISO, VESA/Bochs VBE ile çerçeve tamponu, 64-bit uzun mod |
 | Modüller | `boot` → `main_kernel` → `install` → `kernel_plus` → `desktop`; her biri sabit adresli bağımsız `.bin` |
 | Masaüstü | Dock, başlat menüsü, gerçek arama, pencereler (taşıma/yakınlaştırma/boyut hatırlama), sanal masaüstleri, hızlı ayarlar + OSD, bildirim merkezi, gece modu, kurulum sihirbazı, çoklu hesap, kilit ekranı |
-| Uygulamalar | Terminal, Dosya Yöneticisi, Tarayıcı (iki motor: Wolf Engine ve Lexbor), DuckStore, Ayarlar, Medya Oynatıcı, Görev Yöneticisi, Sistem Araçları, Çöp Kovası, Asistan (gömülü); `.wlf` olarak kurulan üçüncü parti uygulamalar |
+| Uygulamalar | Terminal, Dosya Yöneticisi, Tarayıcı (iki motor: Wolf Engine ve Lexbor), DuckStore, Ayarlar, Medya Oynatıcı, Görev Yöneticisi, Sistem Araçları, Çöp Kovası, Asistan (gömülü); Ofis paketi (Şafak, Mürekkep, Abaküs, Sahne, Mercek) ve `.wlf` olarak kurulan üçüncü parti uygulamalar |
 | Dosya sistemi | AFS v4 (`C:/`), FAT32, ISO9660, USB MSD; fsck benzeri bütünlük denetimi, AES-XTS disk şifreleme |
 | Ağ | ARP/IPv4/TCP/UDP + DHCP, DNS, HTTP/HTTPS (mbedTLS), NTP, uygulama seviyesi güvenlik duvarı |
 | Sürücüler | e1000, PCnet, RTL8139, RTL8169, Atheros ath9k, Intel AX201 (iskelet), USB UHCI/EHCI/XHCI + HID + MSD, AHCI/ATA/ATAPI/NVMe, AC'97 ses, PS/2 klavye-fare, CMOS RTC, ACPI (Güç Kapat / uyku durumları), VESA |
@@ -68,6 +68,10 @@ Kurulumdan başka bir şey yapmana gerek yok: ISO önyüklendiğinde önyükleme
 cd sdk/examples/merhaba
 ../../wf build merhaba
 ```
+
+Ofis uygulamaları (`sdk/office/`) bu yolla derlenip GitHub sürümüne konur; sistemde
+`wf install abakus` gibi adıyla kurulur. Katalog `wf store` ile başka bir adrese
+çevrilebilir; yeni uygulama eklemek için sistemi yeniden derlemeye gerek yok.
 
 SDK, örnekler ve çalışma zamanı arayüzü (`wolf_api_t`) için:
 [sdk/README.md](sdk/README.md) · C uygulaması API referansı:

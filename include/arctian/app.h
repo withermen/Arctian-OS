@@ -25,6 +25,7 @@ typedef struct {
 
 #define ARCTIAN_APP_NO_DESKTOP 0x1u  /* masaustunde simge gosterme */
 #define ARCTIAN_APP_ENGINE     0x2u  /* arka plan motoru: baslatinca terminal ac */
+#define ARCTIAN_APP_FULLSCREEN 0x4u  /* cercevesiz tam ekran basla (0.8 ofis) */
 
 /* apps_registry.c tarafindan uretilir */
 extern const arctian_app_t arctian_apps[];

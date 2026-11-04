@@ -214,14 +214,22 @@ void run_app_done(lv_timer_t *t) {
     int ww = a->win_w > 240 ? a->win_w : 560;
     int wh = a->win_h > 180 ? a->win_h : 380;
     g_pending_caps = dyn_perms_for(c->idx);
-    lv_obj_t *win = create_window(a->title, ww, wh);
+    /* 0.8: tam ekran uygulamalar (ofis) cercevesiz, ekranin tamaminda acilir;
+     * kendi baslik cubuklerini kendileri cizer. */
+    int is_fs = (a->flags & ARCTIAN_APP_FULLSCREEN) ? 1 : 0;
+    lv_obj_t *win = is_fs
+        ? create_window_fs(a->title, g_asi->gfx->width(), g_asi->gfx->height())
+        : create_window(a->title, ww, wh);
     g_launch_win = win;
     lv_obj_t *body = lv_obj_create(win);
     lv_obj_remove_style_all(body);
     /* Gercek pencere boyutunu kullan: create_window kv'den hatirlanan
      * boyutu uygulamis olabilir (ww/wh'dan farkli). */
-    lv_obj_set_size(body, lv_obj_get_width(win) - 4, lv_obj_get_height(win) - 42);
-    lv_obj_set_pos(body, 2, 38);
+    if (is_fs)
+        lv_obj_set_size(body, lv_obj_get_width(win), lv_obj_get_height(win));
+    else
+        lv_obj_set_size(body, lv_obj_get_width(win) - 4, lv_obj_get_height(win) - 42);
+    lv_obj_set_pos(body, is_fs ? 0 : 2, is_fs ? 0 : 38);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
     /* Govde isareti: pencere boyut degisiminde kabuk bu nesneyi birlikte
      * boyutlandirir ve uygulamaya relayout olarak body'yi geri verir. */

@@ -52,6 +52,8 @@ static int win_geom_parse(const char *s, int *w, int *h, int *x, int *y) {
 
 static void win_geom_save(winrec_t *r) {
     if (!r || !r->win) return;
+    /* tam ekran uygulama: geometri hatirlanmaz, her acilista tam ekran. */
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) return;
     /* ekran kapli (buyuk) modda kapatildiysa buyutulmeden onceki geometri
      * hatirlanir (yoksa varsayilan boyutla yeniden acilir). */
     if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_1)) {
@@ -131,6 +133,21 @@ static void win_size_cb(lv_event_t *e) {
     if (!r || !r->win) return;
     int W = lv_obj_get_width(r->win);
     int H = lv_obj_get_height(r->win);
+    /* tam ekran (USER_3): baslik cubugu yok; govde ekranin tamamini kaplar,
+     * relayout dogrudan govdeyle cagrilir. */
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) {
+        lv_obj_t *fsb = 0;
+        int fn = lv_obj_get_child_cnt(r->win);
+        for (int i = 0; i < fn; i++) {
+            lv_obj_t *c = lv_obj_get_child(r->win, i);
+            if (c && lv_obj_has_flag(c, LV_OBJ_FLAG_USER_2)) {
+                lv_obj_set_size(c, W, H);
+                fsb = c;
+            }
+        }
+        if (r->relayout) r->relayout(fsb ? fsb : r->win);
+        return;
+    }
     lv_obj_t *tb = lv_obj_get_child(r->win, 0);
     if (tb) lv_obj_set_size(tb, W - 2, 36);
     lv_obj_t *body = 0;
@@ -555,6 +572,62 @@ lv_obj_t *create_window(const char *title, int w, int h) {
     update_app_indicators();
     lv_obj_move_foreground(win);
     return win;
+}
+
+
+/* 0.8: cercevesiz tam ekran pencere (ofis uygulamalari). Baslik cubugu,
+ * dugme, yuvarlak köse YOK; uygulama kendi 36 px baslik cubugunu kendisi
+ * cizer. Geometri settings.cfg'ye yazilmaz — her acilista tam ekrandir. */
+lv_obj_t *create_window_fs(const char *title, int w, int h) {
+    lv_obj_t *win = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(win);
+    lv_obj_set_style_bg_color(win, lv_color_hex(ADL_SURFACE), 0);
+    lv_obj_set_style_bg_opa(win, LV_OPA_COVER, 0);
+    lv_obj_set_pos(win, 0, 0);
+    lv_obj_set_size(win, w, h);
+    lv_obj_remove_flag(win, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(win, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(win, LV_OBJ_FLAG_USER_3);   /* kabuk: bu tam ekrandir */
+
+    winrec_t *r = 0;
+    while (s_rec_free_n > 0 && !r) r = s_rec_free[--s_rec_free_n];
+    if (!r) r = (winrec_t *)g_asi->mem->alloc(sizeof(winrec_t));
+    if (r) {
+        r->win = win; r->btn = 0;
+        scopy(r->title, title, 39);
+        r->pid = 0;
+        r->relayout = 0;
+        r->hotkey = 0; r->drop = 0;
+        r->max_saved_w = r->max_saved_h = r->max_saved_x = r->max_saved_y = 0;
+        r->fgroup = 0;
+        r->ws = g_ws;
+        r->ws_hidden = 0;
+        if (g_asi->proc && g_asi->proc->app_open_caps)
+            r->pid = g_asi->proc->app_open_caps(title, g_pending_caps);
+        else if (g_asi->proc && g_asi->proc->app_open)
+            r->pid = g_asi->proc->app_open(title);
+        g_pending_caps = CAP_ALL;
+        int slot = -1;
+        for (int i = 0; i < MAX_WINS; i++) if (!g_recs[i]) { slot = i; break; }
+        if (slot >= 0) g_recs[slot] = r;
+        lv_obj_add_event_cb(win, win_size_cb, LV_EVENT_SIZE_CHANGED, r);
+    }
+    update_app_indicators();
+    lv_obj_move_foreground(win);
+    return win;
+}
+
+/* Ekranda gorunur tam ekran pencere var mi? Gorev cubugu buna gore
+ * gizlenir (ofis uygulamalari acikken dock kaybolur). */
+int win_fs_active(void) {
+    for (int i = 0; i < MAX_WINS; i++) {
+        winrec_t *r = g_recs[i];
+        if (!r || !r->win) continue;
+        if (!lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) continue;
+        if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_HIDDEN)) continue;
+        return 1;
+    }
+    return 0;
 }
 
 

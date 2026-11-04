@@ -342,6 +342,8 @@ const arctian_app_t *app_get(int i) {
     v.entry = dyn_app_entry;
     v.win_w = a->win_w;
     v.win_h = a->win_h;
+    /* 0.8: pencere davranisi bayraklari launch'a buradan gecer. */
+    if (a->flags & WLF_FLAG_FULLSCREEN) v.flags |= ARCTIAN_APP_FULLSCREEN;
     return &v;
 }
 

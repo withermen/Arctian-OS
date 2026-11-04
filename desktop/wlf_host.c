@@ -14,7 +14,10 @@
 #include "dsk.h"
 #include "png.h"
 
-#define WOLF_MAX_WIDGETS 192
+/* Oturum basina widget siniri. Ofis uygulamalari (Abakus izgarasi 70 hucre
+ * + baslik gozleri) 192'yi astigi icin 0.8'de 256'ya cikarildi; slot 264
+ * bayt, oturum basina ~16 KB ek yuk. ID sozlesmesi ayni (1-tabanli indeks). */
+#define WOLF_MAX_WIDGETS 256
 #define WOLF_MAX_TEXT    256
 
 typedef struct {
@@ -115,6 +118,9 @@ typedef struct wolf_sess {
     int       trans_n;
     lv_obj_t *anim_objs[WOLF_MAX_ANIMS];   /* anim_in/anim_pulse nesneleri */
     int       anim_n;
+    /* v3: boyut degisimi geri cagrisi (cozunurluk değişimine karsi) */
+    wolf_event_fn on_resize;
+    void         *on_resize_user;
 } wolf_sess_t;
 
 #define WOLF_MAX_SESS 4
@@ -269,6 +275,78 @@ static void h_win_title(const char *title) {
 static void h_win_size(int w, int h) {
     if (!s_root || w < 120 || h < 80) return;
     lv_obj_set_size(s_root, w, h);
+}
+
+/* ------------------------------------------------------------------ */
+/* ABI v3                                                              */
+/* ------------------------------------------------------------------ */
+
+static int h_screen(int *w, int *h) {
+    int W = 0, H = 0;
+    if (s_cur && s_cur->root && !s_cur->dead) {
+        W = lv_obj_get_width(s_cur->root);
+        H = lv_obj_get_height(s_cur->root);
+    }
+    /* ilk kare: yerlesim daha cosulmediyse ekran olcusu dogrudur
+     * (tam ekran pencerelerde govde = ekran). */
+    if (W <= 0 || H <= 0) {
+        W = s_asi->gfx->width();
+        H = s_asi->gfx->height();
+    }
+    if (w) *w = W;
+    if (h) *h = H;
+    return 0;
+}
+
+static wolf_id h_icon(wolf_id p, int x, int y, int size, const char *svg) {
+    if (!svg || !svg[0] || size < 4) return 0;
+    lv_obj_t *c = make_icon(parent_of(p), svg, size);
+    if (!c) return 0;
+    lv_obj_set_pos(c, x, y);
+    return slot_new(c, 16);
+}
+
+static void h_set_click(wolf_id id, int on) {
+    wolf_slot_t *s = slot_of(id);
+    if (!s) return;
+    if (on) lv_obj_add_flag(s->obj, LV_OBJ_FLAG_CLICKABLE);
+    else    lv_obj_remove_flag(s->obj, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static void h_scrollable(wolf_id id, int on) {
+    wolf_slot_t *s = slot_of(id);
+    if (!s) return;
+    if (on) {
+        lv_obj_add_flag(s->obj, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(s->obj, on >= 2 ? (lv_dir_t)(LV_DIR_HOR | LV_DIR_VER) : LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(s->obj, LV_SCROLLBAR_MODE_AUTO);
+    } else {
+        lv_obj_remove_flag(s->obj, LV_OBJ_FLAG_SCROLLABLE);
+    }
+}
+
+static void h_scroll_to(wolf_id id, int x, int y) {
+    wolf_slot_t *s = slot_of(id);
+    if (!s) return;
+    lv_obj_scroll_to(s->obj, x, y, LV_ANIM_OFF);
+}
+
+static void h_win_close(void) {
+    if (!s_body) return;
+    winrec_t *r = winrec_of(s_body);
+    if (r) win_close_rec(r);
+}
+
+static void h_win_min(void) {
+    if (!s_body) return;
+    winrec_t *r = winrec_of(s_body);
+    if (r && r->win) lv_obj_add_flag(r->win, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void h_on_resize(wolf_event_fn cb, void *user) {
+    if (!s_cur) return;
+    s_cur->on_resize = cb;
+    s_cur->on_resize_user = user;
 }
 
 /* ------------------------------------------------------------------ */
@@ -813,7 +891,7 @@ static int h_now(int *y, int *mo, int *d, int *hh, int *mi, int *ss) {
 }
 
 static int h_version(char *out, int cap) {
-    bin_copy(out, cap, "0.7");
+    bin_copy(out, cap, "0.8");
     return 0;
 }
 
@@ -879,9 +957,10 @@ static lv_opa_t opa_from(int percent) {
 }
 
 /* Gomulu arayuz fontu (Inter TTF) istenen piksel boyutunda. tiny_ttf ile
- * uretilir; oturumlar arasi onbellekte tutulur (16 boyut). Deterministik
+ * uretilir; oturumlar arasi onbellekte tutulur (32 boyut — ofis uygulamalari
+ * olcek kat sayisina gore cok nokta uretiyor). Deterministik
  * rasterlestirme: masaustu temasinda da ayni yol kullaniliyor. */
-#define WOLF_MAX_FONTS 16
+#define WOLF_MAX_FONTS 32
 static lv_font_t *s_wf_font[WOLF_MAX_FONTS];
 static int        s_wf_font_px[WOLF_MAX_FONTS];
 
@@ -1031,6 +1110,22 @@ static void h_style(wolf_id id, int prop, int value, int flags) {
         }
         break;
     }
+    case WOLF_SP_TEXT_ALIGN:
+        lv_obj_set_style_text_align(o,
+            value == 1 ? LV_TEXT_ALIGN_CENTER
+                       : value == 2 ? LV_TEXT_ALIGN_RIGHT
+                                    : LV_TEXT_ALIGN_LEFT, sel);
+        break;
+    case WOLF_SP_TEXT_LONG:
+        if (lv_obj_check_type(o, &lv_label_class)) {
+            lv_label_set_long_mode(o,
+                value == 1 ? LV_LABEL_LONG_CLIP
+                           : value == 2 ? LV_LABEL_LONG_DOT
+                           : value == 3 ? LV_LABEL_LONG_SCROLL
+                           : value == 4 ? LV_LABEL_LONG_SCROLL_CIRCULAR
+                                        : LV_LABEL_LONG_WRAP);
+        }
+        break;
     default: break;
     }
 }
@@ -1655,6 +1750,8 @@ static void sess_release(wolf_sess_t *s) {
     for (int i = 0; i < s->anim_n; i++)
         if (s->anim_objs[i]) anim_release_obj(s->anim_objs[i]);
     s->anim_n = 0;
+    s->on_resize = 0;
+    s->on_resize_user = 0;
     s->dead = 1;
     s->body = 0;
     s->root = 0;
@@ -1686,6 +1783,8 @@ static wolf_sess_t *sess_acquire(lv_obj_t *body) {
     s->ev_change_n = 0;
     s->trans_n = 0;
     s->anim_n = 0;
+    s->on_resize = 0;
+    s->on_resize_user = 0;
     for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
         s->slot[i].used = 0;
         s->slot[i].obj = 0;
@@ -1799,6 +1898,30 @@ static void api_fill(void) {
     s_api.state_set = h_state_set;
     s_api.anim_in = h_anim_in;
     s_api.anim_pulse = h_anim_pulse;
+
+    /* ABI v3 */
+    s_api.screen = h_screen;
+    s_api.icon = h_icon;
+    s_api.set_click = h_set_click;
+    s_api.scrollable = h_scrollable;
+    s_api.scroll_to = h_scroll_to;
+    s_api.win_close = h_win_close;
+    s_api.win_min = h_win_min;
+    s_api.on_resize = h_on_resize;
+}
+
+/* v3: pencere boyutu degisti (buyut / cozunurluk degisimi). Kabuk bizi
+ * winrec relayout ile haberdar eder; oturumu dogru baglamda calistirip
+ * uygulamaya bildiririz — uygulama yeniden olcekle yeniden cizer. */
+static void host_relayout(lv_obj_t *body) {
+    wolf_sess_t *s = 0;
+    for (int i = 0; i < WOLF_MAX_SESS; i++)
+        if (!s_sess[i].dead && s_sess[i].body == body) { s = &s_sess[i]; break; }
+    if (!s || !s->on_resize) return;
+    wolf_sess_t *keep = s_cur;
+    s_cur = s;
+    s->on_resize(0, s->on_resize_user);
+    s_cur = keep;
 }
 
 void wlf_host_reset(lv_obj_t *body) {
@@ -1809,6 +1932,8 @@ void wlf_host_reset(lv_obj_t *body) {
     s_asi = g_asi;
     if (!s_api_ready) { api_fill(); s_api_ready = 1; }
     lv_obj_add_event_cb(body, sess_body_del_cb, LV_EVENT_DELETE, s);
+    /* v3: kabuk boyut degisimini bize bildirsin (on_resize icin). */
+    win_set_relayout(body, host_relayout);
 
     /* 0.7: uygulamanin izinleri artik yetki maskesi degil, kapidir
      * (perm.c + caps_fs_guard); burada s_perms bakilmaz. */

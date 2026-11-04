@@ -31,6 +31,8 @@ shots/
 
 # Yerel tasarim referansi — hicbir zaman depoya girmez
 tasarim.md
+*.tasarim.md
+of.tasarim.md
 
 # Duzenleyici / isletim sistemi
 .vscode/
@@ -38,3 +40,6 @@ tasarim.md
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ofis paketleri derlemeyle uretilir (sdk/examples'taki ornekler trackli kaldi)
+sdk/office/*/*.wlf

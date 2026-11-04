@@ -105,7 +105,7 @@ PY
 )
 
 $PY "$SDK/wlfpack.py" --bin app.bin --json wolf.json \
-    --entry "$ENTRY_OFF" --bss "$BSS" -o "$NAME.wlf"
+    --entry "$ENTRY_OFF" --bss "$BSS" -o "$NAME.wlf" ${WLF_KEY:+--key "$WLF_KEY"}
 
 echo
 echo "Hazir: $PROJ/$NAME.wlf"
