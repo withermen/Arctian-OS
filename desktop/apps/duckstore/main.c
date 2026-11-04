@@ -910,26 +910,28 @@ static lv_obj_t *ds_hero(lv_obj_t *parent, int idx) {
     ds_app_t *a = &g_apps[idx];
     lv_obj_t *hero = lv_obj_create(parent);
     lv_obj_remove_style_all(hero);
-    lv_obj_set_size(hero, LV_PCT(100), 150);
+    /* Spec 150 px hero "Populer" satirini kirpiyordu (bilinen sorun);
+     * spec'in onerdigi gibi kisaltildi: 124 px. */
+    lv_obj_set_size(hero, LV_PCT(100), 124);
     lv_obj_set_style_radius(hero, 10, 0);
     lv_obj_set_style_bg_color(hero, lv_color_hex(0x1A2233), 0);
     lv_obj_set_style_bg_opa(hero, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(hero, 1, 0);
     lv_obj_set_style_border_color(hero, lv_color_hex(0x243047), 0);
-    lv_obj_set_style_pad_all(hero, 20, 0);
+    lv_obj_set_style_pad_all(hero, 14, 0);
     lv_obj_set_flex_flow(hero, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(hero, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(hero, 20, 0);
     lv_obj_remove_flag(hero, LV_OBJ_FLAG_SCROLLABLE);
 
-    /*88 px ikon kutusu (20 px yaricap, #2b3a5c) */
+    /*60 px ikon kutusu (14 px yaricap, #2b3a5c) */
     lv_obj_t *ibox = lv_obj_create(hero);
     lv_obj_remove_style_all(ibox);
-    lv_obj_set_size(ibox, 88, 88);
-    lv_obj_set_style_radius(ibox, 20, 0);
+    lv_obj_set_size(ibox, 60, 60);
+    lv_obj_set_style_radius(ibox, 14, 0);
     lv_obj_set_style_bg_color(ibox, lv_color_hex(0x2B3A5C), 0);
     lv_obj_set_style_bg_opa(ibox, LV_OPA_COVER, 0);
-    lv_obj_t *ic = ds_app_icon(ibox, a, 44);
+    lv_obj_t *ic = ds_app_icon(ibox, a, 32);
     if (ic) lv_obj_center(ic);
 
     lv_obj_t *col = lv_obj_create(hero);
@@ -967,14 +969,14 @@ static lv_obj_t *ds_hero(lv_obj_t *parent, int idx) {
     lv_obj_set_size(br, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(br, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(br, 8, 0);
-    lv_obj_set_style_pad_top(br, 6, 0);
+    lv_obj_set_style_pad_top(br, 4, 0);
     lv_obj_remove_flag(br, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *b1 = ds_button(br, inst ? "Ac" : "Al",
-                             inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 92, 32);
+                             inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 88, 28);
     if (inst) lv_obj_add_event_cb(b1, ds_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
     else      lv_obj_add_event_cb(b1, ds_install_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-    lv_obj_t *b2 = ds_button_ol(br, "Ayrintilar", 92, 32);
+    lv_obj_t *b2 = ds_button_ol(br, "Ayrintilar", 88, 28);
     lv_obj_add_event_cb(b2, ds_detail_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
     return hero;
 }
