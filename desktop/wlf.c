@@ -494,6 +494,79 @@ int wlf_install_url(const char *url, char *err, int cap) {
     return 0;
 }
 
+/* ---- 0.8: ad ile kurulum ("wf install safak") ----
+ * Katalog, GitHub release'inde duran satir bazli bir beslemedir (DSF rohani):
+ *   # aciklama
+ *   ad=url
+ * Yeni uygulama eklemek icin OS'te degisiklik gerekmez: kataloga satir ve
+ * release'e asset eklemek yeter. Farkli sunucu/ayna isteyen C:/etc/wfstore.txt
+ * dosyasinin ilk satirina URL'yi yazar. */
+#define WLF_CATALOG_URL \
+    "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/catalog.txt"
+
+int wlf_install_name(const char *name, char *err, int cap) {
+    if (!g_asi || !g_asi->net || !g_asi->net->download) {
+        bin_copy(err, cap, "Ag servisi yok"); return -1;
+    }
+    if (!name || !name[0]) { bin_copy(err, cap, "Ad bos"); return -1; }
+
+    char cat_url[288];
+    bin_copy(cat_url, sizeof(cat_url), WLF_CATALOG_URL);
+    {
+        static char ov[288];
+        uint32_t ol = 0;
+        if (afs_read_at("C:/etc/wfstore.txt", ov, (int)sizeof(ov) - 1, &ol) == 0
+            && ol > 0) {
+            ov[ol] = 0;
+            int e = 0;
+            while (e < (int)ol && ov[e] != '\n' && ov[e] != '\r') e++;
+            ov[e] = 0;
+            if (ov[0] && ov[0] != '#') bin_copy(cat_url, sizeof(cat_url), ov);
+        }
+    }
+
+    static char *cat;                    /* kucuk dosya; tampon bir kez alinir */
+    const uint32_t CCAP = 32u * 1024u;
+    if (!cat) cat = (char *)g_asi->mem->alloc(CCAP);
+    if (!cat) { bin_copy(err, cap, "Bellek yetersiz"); return -1; }
+
+    uint32_t len = 0;
+    if (g_asi->net->download(cat_url, cat, CCAP, &len) != 0 || len == 0) {
+        WLF_DBG("katalog-indir-fail", cat_url, 0);
+        bin_copy(err, cap, "Katalog indirilemedi"); return -1;
+    }
+
+    int nl = 0; while (name[nl]) nl++;
+    char url[288];
+    url[0] = 0;
+    uint32_t i = 0;
+    while (i < len && !url[0]) {
+        uint32_t s = i;
+        while (i < len && cat[i] != '\n' && cat[i] != '\r') i++;
+        uint32_t e = i;
+        while (i < len && (cat[i] == '\n' || cat[i] == '\r')) i++;
+        if (e <= s || cat[s] == '#') continue;
+        uint32_t q = s;
+        while (q < e && cat[q] != '=') q++;
+        if (q >= e) continue;
+        if ((int)(q - s) != nl) continue;
+        int same = 1;
+        for (int k = 0; k < nl; k++) if (cat[s + k] != name[k]) { same = 0; break; }
+        if (!same) continue;
+        uint32_t vl = e - (q + 1);
+        if (vl >= sizeof(url)) continue;
+        for (uint32_t k = 0; k < vl; k++) url[k] = cat[q + 1 + k];
+        url[vl] = 0;
+    }
+    if (!url[0]) {
+        WLF_DBG("katalogda-yok", name, 0);
+        bin_copy(err, cap, "Katalogda bulunamadi"); return -1;
+    }
+
+    WLF_DBG("katalog-bulundu", url, 0);
+    return wlf_install_url(url, err, cap);
+}
+
 int wlf_remove(const char *id) {
     int idx = dyn_find(id);
     if (idx < 0) return -1;

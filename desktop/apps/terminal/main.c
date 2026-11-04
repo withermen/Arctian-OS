@@ -1854,12 +1854,58 @@ static void wf_write_file(const char *dir, const char *name, const void *data, u
     if (h) g_asi->fs->write(h, data, len);
 }
 
+/* wf store <host> <port> <katalog dosyasi>
+ * wf install <ad> katalogunun adresini degistirir (C:/etc/wfstore.txt).
+ * Kurus: wf store 10.0.2.2 8099 catalog.txt  ->  http://10.0.2.2:8099/catalog.txt
+ * Geri almak icin: wf store (bos arguman = dosyayi siler, varsayilana doner) */
+static void wf_store(const char *args) {
+    char host[64], port[16], path[160];
+    int i = 0, n = 0;
+    while (args[i] == ' ') i++;
+    if (!args[i]) {
+        if (g_asi && g_asi->fs && g_asi->fs->remove) g_asi->fs->remove("C:/etc/wfstore.txt");
+        term_puts("Katalog varsayilana dondu (GitHub release)\n");
+        return;
+    }
+    while (args[i] && args[i] != ' ' && n < (int)sizeof(host) - 1) host[n++] = args[i++];
+    host[n] = 0;
+    while (args[i] == ' ') i++;
+    n = 0;
+    while (args[i] && args[i] != ' ' && n < (int)sizeof(port) - 1) port[n++] = args[i++];
+    port[n] = 0;
+    while (args[i] == ' ') i++;
+    n = 0;
+    while (args[i] && args[i] != ' ' && n < (int)sizeof(path) - 1) path[n++] = args[i++];
+    path[n] = 0;
+    if (!host[0] || !port[0] || !path[0]) {
+        term_puts("Kullanim: wf store <host> <port> <katalog>\n");
+        term_puts("  ornek: wf store 10.0.2.2 8099 catalog.txt\n");
+        term_puts("  bos birak: varsayilan kataloga (GitHub) don\n");
+        return;
+    }
+    char url[288];
+    int u = 0;
+    const char *pre = "http://";
+    for (int k = 0; pre[k] && u < (int)sizeof(url) - 1; k++) url[u++] = pre[k];
+    for (int k = 0; host[k] && u < (int)sizeof(url) - 1; k++) url[u++] = host[k];
+    if (u < (int)sizeof(url) - 1) url[u++] = ':';
+    for (int k = 0; port[k] && u < (int)sizeof(url) - 1; k++) url[u++] = port[k];
+    if (u < (int)sizeof(url) - 1) url[u++] = '/';
+    for (int k = 0; path[k] && u < (int)sizeof(url) - 1; k++) url[u++] = path[k];
+    url[u++] = '\n';
+    url[u] = 0;
+    wf_write_file("C:/etc", "wfstore.txt", url, (uint32_t)u);
+    term_puts("Katalog adresi ayarlandi: "); term_puts(url);
+    term_puts("Artik: wf install <ad> bu kataloqu okur\n");
+}
+
 static void wf_help(void) {
     term_puts("Wolf uygulama platformu (.wlf) - 0.7\n");
     term_puts("  wf list                kurulu .wlf uygulamalari (rol/handles)\n");
     term_puts("  wf run <ad|dosya> [dosya]  calistir (rol neyse o)\n");
-    term_puts("  wf install <yol|url>   .wlf kur (agdan indirilebilir)\n");
+    term_puts("  wf install <ad|yol|url>  .wlf kur (ad katalogdan indirilir)\n");
     term_puts("  wf pull <host> <port> <yol>  URL yazmadan indir\n");
+    term_puts("  wf store [host port katalog]  wf install katalog adresi\n");
     term_puts("  wf remove <ad>         kaldir\n");
     term_puts("  wf info <dosya>        paket bilgisi (rol, handles)\n");
     term_puts("  wf new <ad>            proje iskeleti: C:/projler/<ad>\n");
@@ -2234,7 +2280,7 @@ static void wf_sdk(void) {
 }
 
 static void wf_install(const char *what) {
-    if (!what[0]) { term_puts("Kullanim: wf install <yol|url>\n"); return; }
+    if (!what[0]) { term_puts("Kullanim: wf install <ad|yol|url>\n"); return; }
     char err[128];
     int r;
     if (starts_with(what, "http://") || starts_with(what, "https://")) {
@@ -2242,9 +2288,23 @@ static void wf_install(const char *what) {
         term_flush();
         r = wlf_install_url(what, err, sizeof(err));
     } else {
-        char p[176];
-        path_resolve(p, sizeof(p), what);
-        r = wlf_install_file(p, err, sizeof(err));
+        /* yerel yol mu? ( '/' icerir veya .wlf ile biter ) */
+        int local = 0;
+        for (const char *k = what; *k; k++) {
+            if (*k == '/') local = 1;
+            if (!k[1] && k >= what + 3 && k[-3] == '.' && k[-2] == 'w' &&
+                k[-1] == 'l' && k[0] == 'f') local = 1;
+        }
+        if (local) {
+            char p[176];
+            path_resolve(p, sizeof(p), what);
+            r = wlf_install_file(p, err, sizeof(err));
+        } else {
+            /* saf ad: katalogdan bul (GitHub release; wfstore.txt ile degisebilir) */
+            term_puts("Katalog aranuyor: "); term_puts(what); term_putc('\n');
+            term_flush();
+            r = wlf_install_name(what, err, sizeof(err));
+        }
     }
     if (r == 0) { term_puts("Kuruldu\n"); wf_list(); }
     else { term_puts("Kurulum hatasi: "); term_puts(err); term_putc('\n'); }
@@ -2325,6 +2385,7 @@ static void cmd_wf(const char *arg) {
     if (starts_with(arg, "build ")) { wf_build(arg + 6); return; }
     if (starts_with(arg, "install ")) { wf_install(arg + 8); return; }
     if (starts_with(arg, "pull ")) { wf_pull(arg + 5); return; }
+    if (starts_with(arg, "store")) { wf_store(arg + 5); return; }
     if (starts_with(arg, "remove ")) {
         const char *id = arg + 7;
         while (*id == ' ') id++;

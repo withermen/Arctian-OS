@@ -23,6 +23,9 @@ DEBUG ?= 0
 ifeq ($(DEBUG),1)
 override EXTRA_CFLAGS += -DARCTIAN_DEBUG_BOOT -DARCTIAN_AUTOUSER
 endif
+ifeq ($(NET_TEST),1)
+override EXTRA_CFLAGS += -DARCTIAN_NET_SELFTEST   # acilista DNS/TCP/TLS sinari
+endif
 
 SETUP_TEST ?= 0
 ifeq ($(SETUP_TEST),1)

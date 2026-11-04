@@ -75,10 +75,11 @@
 #define WLF_MAX_PACKAGE  (256u * 1024u)
 
 /* Bayraklar: izinler + pencere davranisi */
-#define WLF_FLAG_FS      0x0001u
-#define WLF_FLAG_NET     0x0002u
-#define WLF_FLAG_EXEC    0x0004u
-#define WLF_FLAG_RESIZE  0x0100u
+#define WLF_FLAG_FS         0x0001u
+#define WLF_FLAG_NET        0x0002u
+#define WLF_FLAG_EXEC       0x0004u
+#define WLF_FLAG_RESIZE     0x0100u
+#define WLF_FLAG_FULLSCREEN 0x0200u   /* cercevesiz tam ekran basla (ofis) */
 
 #define WLF_DEFAULT_LOAD 0x03000000u   /* varsayilan native yukleme adresi */
 
