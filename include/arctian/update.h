@@ -6,9 +6,15 @@
 
 /* Arctian guncelleme mekanizmasi.
  *
- * Sunucudan satir tabanli bir surum manifesti ceker (GET {base}/v1/update),
- * manifestte listelenen modul paketlerini indirir, boyut + CRC32 ile
- * dogrular ve DuckStore kurulum hattindan (store_install) gecirir.
+ * Satir tabanli bir surum manifesti ceker, manifestte listelenen modul
+ * paketlerini indirir, boyut + CRC32 ile dogrular ve DuckStore kurulum
+ * hattindan (store_install) gecirir. Iki kaynak sozlesmesi vardir:
+ *
+ *   1) GitHub varlik kipi (varsayilan): taban "/download" ile biter, orn.
+ *      https://github.com/<sahip>/<depo>/releases/latest/download
+ *      Manifest ayni surumde "update.txt" adli varliktir; moduller yine o
+ *      surumde varlik olarak durur ve manifestte paket adiyla anilir.
+ *   2) DuckStore beslemesi (eski): manifest GET {base}/v1/update.
  *
  * Manifest formati:
  *   #arctian-update 1
@@ -19,7 +25,10 @@
  *   version=<modul surumu>
  *   size=<bayt>
  *   crc=<8 haneli CRC32 (IEEE)>
- *   package=/packages/<id>.wlf
+ *   package=<ad.wlf>        (varlik kipinde varlik adi; DuckStore'da /packages/...)
+ *
+ * Manifest govdesi magaza anahtariyla imzali olmali (sig= satiri); imzasiz
+ * manifesto surum yukseltmez.
  */
 
 #define UPDATE_MAX_FILES 16
@@ -76,9 +85,12 @@ typedef struct {
 /* Baslatma: ASI tutulur, indirme tamponu ayrilir, kalici surum okunur. */
 void        update_init(asi_t *asi);
 
-/* Sunucu tabani (varsayilan ARCTIAN_UPDATE_URL; kalici "url" ile degisir). */
+/* Taban adresi (varsayilan ARCTIAN_UPDATE_URL). update_set_base_url hem
+ * calisma zamaninda degistirir hem C:/etc/update.cfg icinde kalici kilar;
+ * varsayilana esit adres secimi siler. */
 void        update_set_base_url(const char *url);
 const char *update_base_url(void);
+const char *update_default_url(void);   /* derlemeye gomulu varsayilan */
 
 const char *update_current_version(void);   /* derleme surumu (ARCTIAN_VERSION) */
 const char *update_applied_version(void);   /* kalici olarak kurulmus surum */

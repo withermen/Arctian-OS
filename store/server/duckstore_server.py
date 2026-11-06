@@ -60,21 +60,7 @@ def update_manifest(apps, version, notes, packages_dir):
         body.append("package=/packages/" + a["file"] + "\n")
     text = "".join(body)
     # imza: sig= satiri govdenin SONUNA eklenir; OS o satiri cikarip dogrular.
-    digest_hex = _sign_manifest(text)
-    return text + "sig=" + digest_hex + "\n"
-
-
-def _sign_manifest(text):
-    """Manifest govdesi uzerinde RSA/SHA-256 imzasi (hex, 512 karakter)."""
-    import hashlib
-    n, e, d = wlflib.load_key()
-    body = text.encode("utf-8")
-    h = hashlib.sha256(body).digest()
-    di = bytes.fromhex("3031300d060960864801650304020105000420")
-    ps_len = wlflib.SIG_RSA_LEN - 2 - 1 - len(di) - 32
-    em = b"\x00\x01" + (b"\xff" * ps_len) + b"\x00" + di + h
-    s = pow(int.from_bytes(em, "big"), d, n)
-    return s.to_bytes(wlflib.SIG_RSA_LEN, "big").hex()
+    return text + "sig=" + wlflib.sign_hex(text.encode("utf-8")) + "\n"
 
 
 def matches(a, q):

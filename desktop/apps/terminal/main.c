@@ -111,9 +111,29 @@ static void cmd_update(asi_t *asi, const char *arg) {
     (void)asi;
     int apply = 0;
     if (arg && arg[0]) {
+        /* url alt komutu: kaynak tabanini degistirir (kalici).
+         * "update url" tek basina mevcut adresi yazdirir;
+         * "update url varsayilan" derleme varsayilanina doner. */
+        if (starts_with(arg, "url")) {
+            const char *v = arg + 3;
+            while (*v == ' ') v++;
+            if (!v[0]) {
+                term_puts("Taban: "); term_puts(update_base_url()); term_putc('\n');
+                term_puts("Varsayilan: "); term_puts(update_default_url()); term_putc('\n');
+            } else if (str_eq(v, "varsayilan") || str_eq(v, "default")) {
+                update_set_base_url(update_default_url());
+                term_puts("Varsayilana donuldu: "); term_puts(update_base_url()); term_putc('\n');
+            } else {
+                update_set_base_url(v);
+                term_puts("Yeni taban: "); term_puts(update_base_url()); term_putc('\n');
+                term_puts("Kaydedildi (C:/etc/update.cfg)\n");
+            }
+            term_flush();
+            return;
+        }
         if (str_eq(arg, "kur") || str_eq(arg, "install") || str_eq(arg, "yukle")) apply = 1;
         else if (str_eq(arg, "kontrol") || str_eq(arg, "check")) apply = 0;
-        else { term_puts("Kullanim: update [kontrol|kur]\n"); return; }
+        else { term_puts("Kullanim: update [kontrol|kur|url <adres|varsayilan>]\n"); return; }
     }
     term_puts("Guncelleme sunucusu: "); term_puts(update_base_url()); term_putc('\n');
     term_puts("Mevcut surum: "); term_puts(update_applied_version());
@@ -3147,6 +3167,7 @@ static void term_exec(asi_t *asi, const char *cmd) {
         term_puts("  curl <url>           HTTP GET istegi\n");
         term_puts("  bgfetch <url>        arka plan indirme (UI donmaz)\n");
         term_puts("  update [kontrol|kur] sistem guncellemesi denetle/uygula\n");
+        term_puts("  update url <adres|varsayilan>  guncelleme kaynagi (bos: goster)\n");
         term_puts("  ntp                  saati NTP ile esitle\n");
         term_puts("  print <dosya>        yazdirma kuyruguna ekle\n");
         term_puts("  jobs                 yazdirma kuyrugunu listele\n");

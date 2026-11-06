@@ -1264,14 +1264,27 @@ tek seferlik yaratılır ve sonraki yeniden kurulumlarda yeniden oluşturulmaz
 
 ## 21. Güncelleme API'si (`update.h`)
 
-Sunucudan satır tabanlı bir sürüm manifesti çeker, listelenen modül paketlerini
-indirir, boyut + CRC32 ile doğrular ve DuckStore kurulum hattından geçirir.
+Satır tabanlı bir sürüm manifesti çeker, listelenen modül paketlerini indirir,
+boyut + CRC32 ile doğrular ve DuckStore kurulum hattından geçirir. İki kaynak
+sözleşmesi vardır:
+
+1. **GitHub varlık kipi (varsayılan):** taban adres `/download` ile biter
+   (`https://github.com/withermen/Arctian-OS/releases/latest/download`).
+   Manifest aynı sürümdeki `update.txt` adlı varlıktır; modüller de o sürümde
+   varlık olarak durur ve `package=<ad.wlf>` ile varlık adıyla anılır.
+2. **DuckStore beslemesi (eski):** manifest `GET {taban}/v1/update`.
+
+Taban adresi `update url <adres>` (terminal) ile değişir ve
+`C:/etc/update.cfg` içinde kalıcıdır; `update url varsayilan` derleme
+varsayılanına döner. Modüller kurulumda ayrıca imza + CRC doğrulamasından
+geçtiği için yanlış bir ayna sürüm itemi üretemez.
 
 ```c
 /* Başlatma (masaüstü main.c çağırır) */
 void        update_init(asi_t *asi);
-void        update_set_base_url(const char *url);
+void        update_set_base_url(const char *url);  /* kalıcı da yapar */
 const char *update_base_url(void);
+const char *update_default_url(void);              /* derlemeye gömülü */
 
 const char *update_current_version(void);   /* derleme sürümü (ARCTIAN_VERSION) */
 const char *update_applied_version(void);   /* kalıcı kurulmuş sürüm */
@@ -1318,23 +1331,26 @@ lv_bar_set_value(bar, st->progress, LV_ANIM_OFF);
 lv_label_set_text(lbl, st->message);
 ```
 
-Manifest formatı (sunucu tarafı):
+Manifest formatı (GitHub varlık kipinde `update.txt` varlığı):
 
 ```
 #arctian-update 1
 version=0.7.1
 notes=<kısa açıklama>
+released=<unix zaman>
 @file
 id=<uygulama kimliği>
 version=<modül sürümü>
 size=<bayt>
 crc=<8 haneli CRC32 (IEEE)>
-package=/packages/<id>.wlf
+package=<ad.wlf>        # varlık kipi: sürümdeki varlık adı
 sig=<govdenin RSA-2048 imzası (hex)>
 ```
 
 Gövde (`sig=` satırı hariç) mağaza anahtarıyla imzalanır; imzasız manifesto kabul
-edilmez. Görsel örnek: `store/server/duckstore_server.py`.
+edilmez. Üretim hattı: `tools/make_update.py` imzalı `update.txt` + modülleri
+hazırlar, `tools/publish_os_update.sh` GitHub'a `os-<sürüm>` etiketiyle yükler.
+Görsel örnek: `store/server/duckstore_server.py`.
 
 ---
 

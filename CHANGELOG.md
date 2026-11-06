@@ -36,6 +36,23 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
 - 36 px sekme şeridi (tek gerçek sekme, canlı sayfa başlığı), 52 px hap biçimli adres
   satırı, SVG simge düğmeleri ve 28 px alt durum çubuğu; pencere 880×560.
 
+**Sistem güncellemesi GitHub sürümlerinden**
+
+- Güncelleme kaynağı DuckStore sunucusundan bu deponun GitHub sürümlerine taşındı:
+  OS en son sürümdeki `update.txt` varlığını (imzalı manifest) çeker, modülleri aynı
+  sürümden indirir; boyut + CRC ve imza doğrulanır. Yeni sürüm yayınlamak için
+  `tools/publish_os_update.sh <sürüm> <not> <modüller>` yeter — OS'i yeniden derlemek
+  gerekmez. Eski DuckStore beslemesi (`/v1/update`) taban adresiyle korunur.
+- Terminal `update url <adres|varsayilan>`: kaynağı değiştirir, `C:/etc/update.cfg`
+  içinde kalıcıdır. Modüller kurulurken tek tek imza + CRC doğrulandığından yanlış
+  bir ayna sahte sürüm üretemez; adresi açmak bu yüzden güvenlidir.
+- Yerel HTTP sunucunun GitHub varlık düzenini taklit ettiği testte `update kontrol`
+  → `update kur` akışı uçtan uca doğrulandı (kurulum, kalıcı sürüm, yeniden
+  açılışta "Sistem guncel"). İlk taban sürüm olarak `os-0.8` yayınlandı; varlıklar
+  ve imza OS'un sabitlediği anahtarla dışarıdan doğrulandı. Gerçek GitHub'a QEMU'dan
+  HTTPS el sıkışması takıldığı için (madde 77) canlı indirme konuğun kendisinde
+  henüz denenmedi.
+
 **Düzeltmeler**
 
 - Onay penceresi açıkken uygulama isteklerinin otomatik reddedilmesine yol açan izin

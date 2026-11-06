@@ -148,8 +148,11 @@ sonra süreç başına adres alanı.
 
 ## 7. Güncelleme ve A/B yuva
 
-- Sunucu imzalı bir satır-tabanlı manifesto yayınlar (`#arctian-update 1`): her modül için boyut
-  + CRC32. İstemci indirdikten sonra doğrular.
+- Güncelleme kaynağı varsayılan olarak GitHub sürümleridir: en son sürümdeki
+  `update.txt` varlığı imzalı satır-tabanlı manifestodur (`#arctian-update 1`);
+  her modül için boyut + CRC32 bildirir, istemci indirdikten sonra doğrular.
+  Eski DuckStore beslemesi (`{taban}/v1/update`) taban adresiyle korunur;
+  adres `update url` ile kalıcı değiştirilebilir. Yayın: `tools/publish_os_update.sh`.
 - Ayarlar → Güncelleme: otomatik kontrol ve gecikme günü ayarı.
 - Kurulum **kapanışta** başlar, bitmezse **açılışta** tamamlanır (durum sektörü izler).
 - Sistem iki yuvada (A/B) durur; yarıda kesilmiş bir güncellemede açılış önceki yuvaya döner.

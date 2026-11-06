@@ -145,6 +145,12 @@ def sign_body(body: bytes, key=None) -> bytes:
     return SIG_MAGIC + s.to_bytes(SIG_RSA_LEN, "big")
 
 
+def sign_hex(body: bytes, key=None) -> str:
+    """Govde imzasi, ASG1 eki OLMADAN kucuk harf hex (512 karakter).
+    Guncelleme manifestindeki sig= satiri bu bicimdedir (desktop/sig.c)."""
+    return sign_body(body, key)[SIG_TRAILER_LEN - SIG_RSA_LEN:].hex()
+
+
 def verify_pkg(data: bytes, key=None) -> bool:
     """Verilen .wlf (trailer dahil) imzali ve gecerli mi?"""
     if not data or len(data) <= SIG_TRAILER_LEN:

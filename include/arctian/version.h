@@ -7,19 +7,17 @@
 #endif
 #define ARCTIAN_VERSION ARCTIAN_VERSION_STR
 
-/* Guncelleme manifesti icin varsayilan DuckStore sunucusu.
- * Derleme zamaninda -DARCTIAN_UPDATE_HOST=... -DARCTIAN_UPDATE_PORT=...
- * ile degistirilebilir (test icin: 10.0.2.2 8091). */
-#ifndef ARCTIAN_UPDATE_HOST
-#define ARCTIAN_UPDATE_HOST 45.143.99.75
-#endif
-#ifndef ARCTIAN_UPDATE_PORT
-#define ARCTIAN_UPDATE_PORT 8090
-#endif
-
-#define ARCTIAN_STR_(x) #x
-#define ARCTIAN_STR(x)  ARCTIAN_STR_(x)
+/* Varsayilan guncelleme kaynagi: GitHub surumlarindaki varlik koku.
+ * Sozlesme: en son surumde "update.txt" adli bir varlik durur (imzali
+ * manifest); moduller yine ayni surumde varlik olarak bulunur.
+ * Taban "/download" ile bitiyorsa varlik kipi kullanilir (manifest
+ * {taban}/update.txt), degilse eski DuckStore beslemesi ({taban}/v1/update).
+ * Test/ayna icin derleme zamaninda baska URL verilebilir:
+ *   -DARCTIAN_UPDATE_URL='"http://10.0.2.2:8091/download"'
+ * Kullanicinin kalici secimi C:/etc/update.cfg icindeki url= satiridir. */
+#ifndef ARCTIAN_UPDATE_URL
 #define ARCTIAN_UPDATE_URL \
-    "http://" ARCTIAN_STR(ARCTIAN_UPDATE_HOST) ":" ARCTIAN_STR(ARCTIAN_UPDATE_PORT)
+    "https://github.com/withermen/Arctian-OS/releases/latest/download"
+#endif
 
 #endif /* ARCTIAN_VERSION_H */

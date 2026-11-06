@@ -1,12 +1,20 @@
 /*
  * Arctian guncelleme mekanizmasi.
  *
- *   - Sunucudan satir tabanli surum manifesti ceker: GET {base}/v1/update
- *   - Manifestte listelenen modul paketlerini indirir (net->download)
+ *   - Surum manifestini ceker. Iki kaynak sozlesmesi vardir (taban adresi
+ *     secimi version.h'te; kullanicinin kalici secimi C:/etc/update.cfg):
+ *       * GitHub varlik kipi: taban "/download" ile biter (orn.
+ *         https://github.com/<sahip>/<depo>/releases/latest/download).
+ *         Manifest ayni surumde "update.txt" adli varliktir; moduller de
+ *         ayni surumde varlik olarak durur.
+ *       * DuckStore beslemesi (eski): manifest {base}/v1/update.
+ *   - Manifestte listelenen modul paketlerini indirir (net->download; HTTPS
+ *     ve yonlendirmeleri destekler)
  *   - Boyut + CRC32 (IEEE) ile dogrular
  *   - DuckStore kurulum hattina (store_install) verir
  *   - Uygulanan surumu "C:/etc/update.cfg" icinde kalici tutar
  *
+ * Manifestin govdesi imzali olmali; imzasiz/bozuk manifesto surum yukseltmez.
  * Manifest format ayrintilari icin update.h'ye bakin.
  */
 #include "update.h"
@@ -61,6 +69,14 @@ static int u_eq(const char *a, const char *b) {
     int i = 0;
     for (; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
     return a[i] == b[i];
+}
+
+/* s, suf ile mi bitiyor? Taban adres sozlesmesi icin ("/download"). */
+static int u_ends(const char *s, const char *suf) {
+    int a = u_len(s), b = u_len(suf);
+    if (b == 0 || b > a) return 0;
+    for (int i = 0; i < b; i++) if (s[a - b + i] != suf[i]) return 0;
+    return 1;
 }
 
 static uint32_t u_atoi(const char *s) {
@@ -234,11 +250,15 @@ static int u_parse(const char *t, uint32_t n) {
     return s_man.count;
 }
 
-/* ---- kalici surum (C:/etc/update.cfg) ---- */
+/* ---- kalici durum (C:/etc/update.cfg) ----
+ * Iki alan: version (uygulanan surum) ve url (kullanicinin sectigi taban
+ * adresi; yoksa derleme varsayilani kullanilir). */
+static int s_url_over;   /* kalici taban adresi secildi mi */
+
 static void cfg_load(void) {
     u_cpy(s_applied, sizeof(s_applied), ARCTIAN_VERSION);
     if (!s_asi || !s_asi->fs || !s_asi->fs->read_path) return;
-    char buf[192];
+    char buf[256];
     uint32_t n = s_asi->fs->read_path(UPD_CFG_PATH, buf, sizeof(buf) - 1);
     if (!n) return;
     buf[n] = 0;
@@ -252,6 +272,14 @@ static void cfg_load(void) {
             for (const char *v = p + 8; v < e && k < (int)sizeof(s_applied) - 1; v++)
                 s_applied[k++] = *v;
             s_applied[k] = 0;
+        } else if (e - p >= 4 && p[0] == 'u' && p[1] == 'r' && p[2] == 'l' &&
+                   p[3] == '=') {
+            char tmp[96];
+            int k = 0;
+            for (const char *v = p + 4; v < e && k < (int)sizeof(tmp) - 1; v++)
+                tmp[k++] = *v;
+            tmp[k] = 0;
+            if (k) { u_cpy(s_base, sizeof(s_base), tmp); s_url_over = 1; }
         }
         p = e;
         while (*p == '\n' || *p == '\r') p++;
@@ -263,11 +291,19 @@ static void cfg_save(const char *ver) {
     if (s_asi->fs->mkdir) s_asi->fs->mkdir("C:/etc");
     void *h = s_asi->fs->create_in("C:/etc", "update.cfg", 0);
     if (!h) return;
-    char line[64];
-    u_cpy(line, sizeof(line), "version=");
-    u_cat(line, sizeof(line), ver);
-    u_cat(line, sizeof(line), "\n");
-    s_asi->fs->write(h, line, (uint32_t)u_len(line));
+    char line[192];
+    int n = 0;
+    const char *a = "version=";
+    while (*a) line[n++] = *a++;
+    for (int i = 0; ver[i] && n < (int)sizeof(line) - 2; i++) line[n++] = ver[i];
+    line[n++] = '\n';
+    if (s_url_over) {
+        const char *b = "url=";
+        while (*b && n < (int)sizeof(line) - 2) line[n++] = *b++;
+        for (int i = 0; s_base[i] && n < (int)sizeof(line) - 2; i++) line[n++] = s_base[i];
+        line[n++] = '\n';
+    }
+    s_asi->fs->write(h, line, (uint32_t)n);
     u_cpy(s_applied, sizeof(s_applied), ver);
 }
 
@@ -292,8 +328,19 @@ void update_init(asi_t *asi) {
     cfg_load();
 }
 
-void update_set_base_url(const char *url) { if (url && url[0]) u_cpy(s_base, sizeof(s_base), url); }
+/* Taban adresini degistirir ve kalici yapar (C:/etc/update.cfg icindeki
+ * url= satiri). Varsayilana esit adres calisma zamani secimini siler.
+ * Guvenlik: her kurulum adiminda moduller tek tek imza + CRC dogrulamasiyla
+ * gecerdigi icin, yanlis/ruzgarli bir ayna surum itemi uretemez; adresi
+ * kullaniciya acmak bu yuzden guvenlidir. */
+void update_set_base_url(const char *url) {
+    if (!url || !url[0]) return;
+    u_cpy(s_base, sizeof(s_base), url);
+    s_url_over = u_eq(url, ARCTIAN_UPDATE_URL) ? 0 : 1;
+    cfg_save(s_applied);
+}
 const char *update_base_url(void) { return s_base; }
+const char *update_default_url(void) { return ARCTIAN_UPDATE_URL; }
 const char *update_current_version(void) { return ARCTIAN_VERSION; }
 const char *update_applied_version(void) { return s_applied; }
 const update_status_t   *update_status(void)   { return &s_st; }
@@ -303,15 +350,23 @@ int update_has_update(void) { return s_st.state == UPDATE_AVAILABLE; }
 void update_set_installer(int (*fn)(const void *, uint32_t, char *, int)) { s_install = fn; }
 void update_set_notify(void (*fn)(void)) { s_notify = fn; }
 
+/* Kaynak kipine gore manifest adresini kurar. "/download" ile biten taban
+ * GitHub varlik kipidir: manifest ayni surumdeki update.txt varligidir.
+ * Diger tabanlar eski DuckStore beslemesidir ({base}/v1/update). */
+static void u_manifest_url(char *url, int cap) {
+    u_cpy(url, cap, s_base);
+    if (u_ends(s_base, "/download")) u_cat(url, cap, "/update.txt");
+    else                             u_cat(url, cap, "/v1/update");
+}
+
 int update_check(void) {
     if (!s_asi || !s_asi->net || !s_asi->net->http_get) {
         u_set_state(UPDATE_ERROR, "Ag servisi yok");
         return -1;
     }
     u_set_state(UPDATE_CHECKING, "Kontrol ediliyor...");
-    char url[160];
-    u_cpy(url, sizeof(url), s_base);
-    u_cat(url, sizeof(url), "/v1/update");
+    char url[224];
+    u_manifest_url(url, sizeof(url));
 
     uint32_t len = 0;
     const char *body = s_asi->net->http_get(url, &len);
@@ -398,6 +453,10 @@ int update_apply(void) {
 
         char url[200];
         u_cpy(url, sizeof(url), s_base);
+        /* DuckStore yolu "/" ile baslar; GitHub varlik adi baslangic icin
+         * ayiriciyi kendimiz koyariz (taban "/" ile bitmiyorsa). */
+        if (f->package[0] != '/' && url[0] && url[u_len(url) - 1] != '/')
+            u_cat(url, sizeof(url), "/");
         u_cat(url, sizeof(url), f->package);
 
         uint32_t len = 0;
