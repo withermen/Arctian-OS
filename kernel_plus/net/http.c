@@ -304,6 +304,96 @@ static int hdr_find_clen(const char *h, uint32_t n, uint32_t *out) {
     return 0;
 }
 
+/* HEAD istegi atip Content-Length'i dondurur (govde indirilmez).
+ * Buyuk indirmelerden once tamponu dogru boyutta ayirmak icin. */
+int http_head_length(const char *url, uint32_t *out) {
+    if (!url || !out) return -1;
+
+    const char *p = url;
+    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
+        p += 4;
+        if (*p == 's') return -1;                 /* https burada desteklenmez */
+        if (p[0] == ':' && p[1] == '/' && p[2] == '/') p += 3;
+    }
+
+    char host[256];
+    int hi = 0;
+    while (*p && *p != '/' && *p != ':' && hi < 255) host[hi++] = *p++;
+    host[hi] = '\0';
+    if (hi == 0) return -1;
+
+    uint16_t port = HTTP_PORT;
+    if (*p == ':') {
+        p++;
+        uint32_t pv = 0;
+        while (*p >= '0' && *p <= '9') { pv = pv * 10u + (uint32_t)(*p - '0'); p++; }
+        if (pv > 0 && pv < 65536u) port = (uint16_t)pv;
+    }
+
+    char path[512];
+    int pi = 0;
+    if (*p) { while (*p && pi < 511) path[pi++] = *p++; }
+    else { path[pi++] = '/'; }
+    path[pi] = '\0';
+
+    dns_result_t res[DNS_RESULT_MAX];
+    int dn = 0;
+    if (!dns_resolve(host, res, &dn) || dn <= 0) return -2;
+
+    int conn = tcp_connect(res[0].ip, port);
+    if (conn < 0) return -3;
+
+    char req[1024];
+    int ri = 0;
+    const char *m = "HEAD ";
+    while (*m && ri < 1020) req[ri++] = *m++;
+    for (int i = 0; path[i] && ri < 1000; i++) req[ri++] = path[i];
+    const char *v = " HTTP/1.1\r\nHost: ";
+    while (*v && ri < 1020) req[ri++] = *v++;
+    for (int i = 0; host[i] && ri < 1020; i++) req[ri++] = host[i];
+    const char *t = "\r\nUser-Agent: Arctian/" ARCTIAN_VERSION "\r\nAccept: */*\r\nConnection: close\r\n\r\n";
+    while (*t && ri < 1023) req[ri++] = *t++;
+
+    if (!tcp_send(conn, (const uint8_t *)req, (uint16_t)ri)) {
+        tcp_close(conn);
+        return -4;
+    }
+
+    /* Basliklar kucuktur; tamamini okuyup (bos satir) Content-Length'i cevir. */
+    static char s_hd_buf[4096];
+    uint32_t have = 0;
+    long idle = 0;
+    int hdr_done = 0;
+    for (;;) {
+        int n = tcp_receive(conn, (uint8_t *)s_hd_buf + have,
+                            (int)(sizeof(s_hd_buf) - 1 - have));
+        if (n > 0) {
+            have += (uint32_t)n;
+            idle = 0;
+            for (uint32_t i = 0; i + 3 < have; i++) {
+                if (s_hd_buf[i] == '\r' && s_hd_buf[i + 1] == '\n' &&
+                    s_hd_buf[i + 2] == '\r' && s_hd_buf[i + 3] == '\n') {
+                    hdr_done = 1;
+                    break;
+                }
+            }
+            if (hdr_done) break;
+            if (have + 1 >= sizeof(s_hd_buf)) break;
+        } else {
+            if (n < 0) break;
+            int st = tcp_state(conn);
+            if (st == TCP_STATE_CLOSED || st == TCP_STATE_TIME_WAIT) break;
+            if (++idle > 20000L) break;
+            for (volatile int w = 0; w < 20000; w++) __asm__ volatile("pause");
+        }
+    }
+    tcp_close(conn);
+
+    if (!have) return -5;
+    if (!hdr_find_clen(s_hd_buf, have, out)) return -6;
+    return 0;
+}
+
 /* Buyuk govdeler icin akisli indirme (yalnizca http://). Sabit tampon
  * kullanmaz; gelen baytlari dogrudan dst'ye yazar. Donus: 0 ok, <0 hata. */
 int http_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out) {

@@ -39,7 +39,7 @@ WLF_TITLE_LEN = 64
 WLF_VER_LEN = 16
 WLF_AUTHOR_LEN = 40
 WLF_CATEGORY_LEN = 24
-WLF_MAX_PACKAGE = 256 * 1024    # OS tamponu (s_wlf_buf)
+WLF_MAX_PACKAGE = 2 * 1024 * 1024 * 1024   # OS tavanı 0.8'de kalktı (bkz. wlf.h)
 
 # Bayraklar (izinler + pencere davranisi)
 WLF_FLAG_FS = 0x0001

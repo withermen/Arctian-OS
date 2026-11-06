@@ -330,6 +330,13 @@ static int net_download(const char *url, void *dst, uint32_t cap, uint32_t *len_
     return http_download(url, dst, cap, len_out);
 }
 
+/* Indirilecek dosyanin boyunu HEAD ile ogren; buyuk paketlerde tamponu
+ * dogru boyutta ayirmak icin. https icin destek yok (-1). */
+static int net_dl_size(const char *url, uint32_t *size_out) {
+    if (net_perm()) return -1;
+    return http_head_length(url, size_out);
+}
+
 /* Arka plan ag gorevleri (fiber) icin ASI sarmallari. */
 static int  net_submit(void (*fn)(void *), asi_net_done_t done, void *user) {
     if (net_perm()) return -1;
@@ -800,6 +807,7 @@ void kernel_plus_main(void *arg) {
     s_net.cookie_set = net_cookie_set;
     s_net.cookie_set2 = net_cookie_set2;
     s_net.download = net_download;
+    s_net.dl_size = net_dl_size;
     s_net.submit = net_submit;
     s_net.busy = net_busy;
     s_net.service = net_service;

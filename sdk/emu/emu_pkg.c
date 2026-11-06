@@ -87,8 +87,8 @@ int pkg_load(const char *path, emu_pkg_t *pkg, char *err, int errcap) {
     fseek(f, 0, SEEK_SET);
     if (sz <= 0 || sz > EMU_WLF_MAX) {
         fclose(f);
-        snprintf(err, errcap, "gecersiz boyut (%ld bayt; en fazla %d)",
-                 sz, EMU_WLF_MAX);
+        snprintf(err, errcap, "gecersiz boyut (%ld bayt; en fazla %llu)",
+                 sz, (unsigned long long)EMU_WLF_MAX);
         return -1;
     }
     uint8_t *raw = (uint8_t *)malloc((size_t)sz);

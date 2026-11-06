@@ -263,6 +263,11 @@ typedef struct {
      * secure=1 cerez yalnizca TLS baglantilarina gonderilir. */
     void (*cookie_set2)(const char *host, const char *name, const char *value,
                         int secure);
+
+    /* Indirilecek URL'nin govde boyunu HEAD ile sorar; buyuk paketlerde
+     * tamponu bastan dogru boyutta ayirmak icin. Donus 0 = *size_out
+     * gecerli; -1 = sunucu boy vermedi ya da desteklenmiyor. ABI sonda. */
+    int (*dl_size)(const char *url, uint32_t *size_out);
 } asi_net_t;
 
 typedef struct {

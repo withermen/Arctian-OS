@@ -285,5 +285,3 @@ Hobi sistem, ağa çıkıyor; bunlar "ileride" denmeyecek cinsten.
     timeout); DNS ve düz HTTP çalışıyor, aynı adres WSL tarafında açılıyor. GitHub
     kataloğundan `wf install` gerçek ağda denenemedi, yerel HTTP sunucuyla doğrulandı
     (`kernel_plus/tls/https.c` civarı).
-78. Terminal `ls C:/apps` kurulu dosyalar varken "(bos)" yazıyor; dosyalar diskte
-    sağlam ve tarama/çalıştırma zinciri görüyor — listeleme tarafının kozmetik derdi.

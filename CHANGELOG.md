@@ -21,6 +21,12 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
 - Tam ekran uygulama desteği: bayraklı `.wlf` penceresi çerçevesiz açılır, dock gizlenir.
 - `wf install <ad>` uygulamayı katalogdan indirir; katalog adresi `wf store` ile değişir.
   Katalog GitHub sürümünde durur, yeni uygulama için sistemi yeniden derlemek gerekmez.
+- Beş ofis uygulaması artık gerçek fotoğraflardan üretilen ikonlarla geliyor (128 px
+  PNG, paketin içinde taşınır; eski kutu çizimi ikonlar kalktı).
+- `.wlf` paket tavanı kalktı: eski 256 KB sınırı yok; paketler dosya boyutu kadar
+  dinamik okunuyor. Biçimin kendi tavanı ~4 GB (32 bitlik kaydırmalar), pratikte
+  sınır artık bellek ve disk. 2,2 MB'lık test paketi HTTP üzerinden kurulup
+  çalıştırıldı; indirmeden önce HEAD ile boy soruluyor, tampon baştan doğru ayrılıyor.
 - Metin: düz metin düzenleyici (birlikte açma ve dosya argümanını destekler).
 - Takvim: aylık ızgara, gün adları ve bugün vurgusu.
 - Foto: görüntü görüntüleyici, dosya listesi ve ayrıntı satırıyla.
@@ -36,6 +42,10 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
   bayrağı hatası düzeltildi; bayrak artık yalnız diyalog pompalanırken devrede.
 - C'nin açgözlü onaltılık kaçışları (`\xHH` sonrasındaki onaltılık karakteri yutar)
   kaynak genelinde tarandı ve temizlendi; Takvim'de "Çar" etiketini bozan hata buydu.
+- AFS: dosya büyüyen bir yazım aldığında komşusunun LBA'si yeni aralığın içinde
+  kalıyordu ve komşunun üstüne yazılıp o bozuluyordu (örneğin yeni sürüm `.wlf`
+  kurulumunda). Artık komşu çakışıyorsa dosya boş bölgeye taşınıyor; kurulum
+  zinciri bozulmadan tamamlanıyor.
 
 **Lisans**
 

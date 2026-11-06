@@ -2026,17 +2026,33 @@ static void wf_info(const char *path) {
     char p[176];
     path_resolve(p, sizeof(p), path);
     uint32_t len = 0;
-    if (afs_read_at(p, s_wf_pkg, sizeof(s_wf_pkg), &len) != 0) {
-        term_puts("Dosya okunamadi\n"); return;
+    uint8_t *pkg = s_wf_pkg;
+    uint32_t pcap = (uint32_t)sizeof(s_wf_pkg);
+    int own = 0;
+    /* Buyuk paketler 160 KB'lik scratch'e sigmaz; stat tutarsa boyut
+     * kadar ayir. */
+    if (g_asi->fs && g_asi->fs->stat) {
+        asi_stat_t st;
+        if (g_asi->fs->stat(p, &st) == 0 && st.size > pcap) {
+            uint8_t *dyn = (uint8_t *)g_asi->mem->alloc(st.size);
+            if (!dyn) { term_puts("Bellek yetersiz (dosya buyuk)\n"); return; }
+            pkg = dyn; pcap = st.size; own = 1;
+        }
+    }
+    if (afs_read_at(p, pkg, pcap, &len) != 0) {
+        term_puts("Dosya okunamadi\n");
+        if (own) g_asi->mem->free(pkg);
+        return;
     }
     const wlf_header_t *h = 0;
-    int v = wlf_validate(s_wf_pkg, len, &h);
+    int v = wlf_validate(pkg, len, &h);
     if (v != 0) {
         term_puts("Gecersiz .wlf (kod ");
         int k = -v;
         if (k >= 10) term_putc((char)('0' + (k / 10) % 10));
         term_putc((char)('0' + k % 10));
         term_puts(")\n");
+        if (own) g_asi->mem->free(pkg);
         return;
     }
     term_puts("Ad      : "); term_puts(h->name); term_putc('\n');
@@ -2048,7 +2064,7 @@ static void wf_info(const char *path) {
                                          : "bytecode (OS ici derlendi)");
     term_putc('\n');
     wlf_meta_t wm;
-    int hm = (wlf_meta_read(s_wf_pkg, len, &wm) == 0);
+    int hm = (wlf_meta_read(pkg, len, &wm) == 0);
     term_puts("Rol     : ");
     term_puts(role_name(hm ? wm.role : h->role));
     if (hm && (wm.flags & WLF_META_TERMINAL)) term_puts(" (terminal)");
@@ -2070,6 +2086,7 @@ static void wf_info(const char *path) {
         if (h->flags & WLF_FLAG_EXEC) term_puts("exec");
     }
     term_putc('\n');
+    if (own) g_asi->mem->free(pkg);
 }
 
 static void wf_new(const char *name) {

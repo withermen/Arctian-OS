@@ -71,8 +71,10 @@
 #define WLF_AUTHOR_LEN   40
 #define WLF_CATEGORY_LEN 24
 
-/* Paket boyutu siniri: ag tamponu ve bellek butcesiyle uyumlu. */
-#define WLF_MAX_PACKAGE  (256u * 1024u)
+/* Paket boyutu tavan: 0.8'de yapay 256KB siniri kalkti. Bicimdeki
+ * offset/uzunluk alanlari uint32 oldugundan asamayacagi tavan ~4GB;
+ * pratik sinir artik makinenin bellek ve diskidir. */
+#define WLF_MAX_PACKAGE  (2u * 1024u * 1024u * 1024u)
 
 /* Bayraklar: izinler + pencere davranisi */
 #define WLF_FLAG_FS         0x0001u

@@ -8,6 +8,6 @@
   "fullscreen": true,
   "w": 1280,
   "h": 720,
-  "icon": "icon.svg",
+  "icon": "icon.png",
   "permissions": ["fs", "exec"]
 }

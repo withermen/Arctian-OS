@@ -52,8 +52,41 @@ void wlf_diag(const char *tag, const char *s) {
     wlf_puts("[wlf] " tag " "); wlf_puts(name ? name : "?"); \
     wlf_puts(" rc="); wlf_puti(rc); wlf_puts("\n"); } while (0)
 
-/* .wlf paket tamponu: DPK tamponundan ayri (256 KB sinir). */
-static uint8_t s_wlf_buf[WLF_MAX_PACKAGE];
+/* Paket okuma tamponu: 0.8'de sabit boyutlu dev tampon kalkti; paketler
+ * dosya boyutu kadar dinamik okunur (wlf_pkg_read). Buradaki 256 KB'lik
+ * alan yalniz stat/alism düserse kullanilan yedek; .bss'i tavan boyutuyla
+ * sismiyor. */
+static uint8_t s_wlf_buf[256u * 1024u];
+
+/* Paketi tamamina okur: dosya boyutu kadar yer ayirir. own=1 ise tamponu
+ * cagiran birakir. Stat alinamazsa ya da yer yoksa yedek tampona duser;
+ * buyuk paket bu durumda kisitli okunur ve dogrulamadan doner. */
+static int wlf_pkg_read(const char *path, uint8_t **out, uint32_t *out_len,
+                        int *own) {
+    uint32_t sz = 0;
+    if (g_asi && g_asi->fs && g_asi->fs->stat) {
+        asi_stat_t st;
+        if (g_asi->fs->stat(path, &st) == 0) sz = st.size;
+    }
+    if (sz > WLF_MAX_PACKAGE) return -2;   /* uint32 offset tavani asiliyor */
+    if (sz && g_asi->mem && g_asi->mem->alloc) {
+        uint8_t *buf = (uint8_t *)g_asi->mem->alloc(sz);
+        if (buf) {
+            uint32_t len = 0;
+            if (afs_read_at(path, buf, sz, &len) != 0 || len == 0) {
+                g_asi->mem->free(buf);
+                return -1;
+            }
+            *out = buf; *out_len = len; *own = 1;
+            return 0;
+        }
+    }
+    uint32_t len = 0;
+    if (afs_read_at(path, s_wlf_buf, (uint32_t)sizeof(s_wlf_buf), &len) != 0)
+        return -1;
+    *out = s_wlf_buf; *out_len = len; *own = 0;
+    return 0;
+}
 
 /* VM giris noktasi (wlf_vm.c) */
 int wlf_vm_run(const uint8_t *code, uint32_t len, lv_obj_t *body, asi_t *asi);
@@ -271,22 +304,28 @@ void wlf_apply_package(dyn_app_t *d, const uint8_t *buf, uint32_t size,
 }
 
 int wlf_scan_one(const char *full_path) {
+    uint8_t *buf = 0;
     uint32_t len = 0;
-    int rr = afs_read_at(full_path, s_wlf_buf, sizeof(s_wlf_buf), &len);
-    if (rr != 0) return -1;
+    int own = 0;
+    if (wlf_pkg_read(full_path, &buf, &len, &own) != 0) return -1;
     const wlf_header_t *h = 0;
-    int vv = wlf_validate(s_wlf_buf, len, &h);
-    if (vv != 0) { WLF_DBG("scan-dogrula", full_path, vv); return -1; }
+    int vv = wlf_validate(buf, len, &h);
+    if (vv != 0) {
+        WLF_DBG("scan-dogrula", full_path, vv);
+        if (own) g_asi->mem->free(buf);
+        return -1;
+    }
     char id[WLF_NAME_LEN];
     bin_copy(id, sizeof(id), h->name);
     dyn_app_t *d = dyn_register(id);
-    if (!d) return -1;
+    if (!d) { if (own) g_asi->mem->free(buf); return -1; }
     bin_copy(d->fname, sizeof(d->fname), full_path);
     if (h->title[0]) bin_copy(d->title, sizeof(d->title), h->title);
     if (h->category[0]) bin_copy(d->category, sizeof(d->category), h->category);
     if (h->ver[0]) bin_copy(d->version, sizeof(d->version), h->ver);
     if (h->author[0]) bin_copy(d->publisher, sizeof(d->publisher), h->author);
-    wlf_apply_package(d, s_wlf_buf, len, h);
+    wlf_apply_package(d, buf, len, h);
+    if (own) g_asi->mem->free(buf);
     return 0;
 }
 
@@ -319,16 +358,10 @@ void wlf_run_entry(dyn_app_t *d, lv_obj_t *body, asi_t *asi) {
      * boylece calisma sirasinda baska bir tara/kur o tamponu ezemez.
      * VM kodu kendi kopyasini ayrica alir (wlf_vm.c); native icin
      * payload load_addr'e kopyalanir, tampon hemen birakilir. */
-    uint32_t len = 0;
     uint8_t *buf = 0;
+    uint32_t len = 0;
     int own = 0;
-    if (g_asi && g_asi->mem && g_asi->mem->alloc) {
-        buf = (uint8_t *)g_asi->mem->alloc(WLF_MAX_PACKAGE);
-        own = buf != 0;
-    }
-    if (!buf) buf = s_wlf_buf;
-    if (afs_read_at(d->fname, buf, WLF_MAX_PACKAGE, &len) != 0) {
-        if (own) g_asi->mem->free(buf);
+    if (wlf_pkg_read(d->fname, &buf, &len, &own) != 0) {
         wlf_host_error("Paket diskten okunamadi");
         return;
     }
@@ -358,17 +391,11 @@ int wlf_run_cli(dyn_app_t *d, const char *arg, void (*puts)(const char *s)) {
     if (!d) return -1;
     /* Madde 36: paylasilan s_wlf_buf yerine kendi tamponu (bkz.
      * wlf_run_entry aciklamasi). */
-    uint32_t len = 0;
     uint8_t *buf = 0;
+    uint32_t len = 0;
     int own = 0;
-    if (g_asi && g_asi->mem && g_asi->mem->alloc) {
-        buf = (uint8_t *)g_asi->mem->alloc(WLF_MAX_PACKAGE);
-        own = buf != 0;
-    }
-    if (!buf) buf = s_wlf_buf;
-    if (afs_read_at(d->fname, buf, WLF_MAX_PACKAGE, &len) != 0) {
+    if (wlf_pkg_read(d->fname, &buf, &len, &own) != 0) {
         if (puts) puts("Paket diskten okunamadi\n");
-        if (own) g_asi->mem->free(buf);
         return -1;
     }
     const wlf_header_t *h = 0;
@@ -429,22 +456,27 @@ static void wlf_app_path(const char *name, char *out, int cap) {
 
 int wlf_install_file(const char *path, char *err, int cap) {
     if (!g_asi || !g_asi->fs) { bin_copy(err, cap, "Dosya sistemi yok"); return -1; }
+    uint8_t *buf = 0;
     uint32_t len = 0;
-    if (afs_read_at(path, s_wlf_buf, sizeof(s_wlf_buf), &len) != 0) {
+    int own = 0;
+    if (wlf_pkg_read(path, &buf, &len, &own) != 0) {
         bin_copy(err, cap, "Dosya okunamadi");
         return -1;
     }
     const wlf_header_t *h = 0;
-    int v = wlf_validate(s_wlf_buf, len, &h);
+    int v = wlf_validate(buf, len, &h);
     if (v != 0) {
+        if (own) g_asi->mem->free(buf);
         bin_copy(err, cap, "Gecersiz .wlf (kod -1)");
         return -1;
     }
-    if (wlf_write_app(h->name, s_wlf_buf, len) != 0) {
+    if (wlf_write_app(h->name, buf, len) != 0) {
+        if (own) g_asi->mem->free(buf);
         WLF_DBG("dosya-yaz", h->name, -1);
         bin_copy(err, cap, "C:/apps'a yazilamadi");
         return -1;
     }
+    if (own) g_asi->mem->free(buf);
     WLF_DBG("dosya-kuruldu", h->name, 0);
     /* Sicile hemen ekle (yeniden baslatmadan gorunur). */
     dyn_app_t *ex = 0;
@@ -464,29 +496,43 @@ int wlf_install_url(const char *url, char *err, int cap) {
         bin_copy(err, cap, "Ag servisi yok");
         return -1;
     }
-    static uint8_t *buf;
-    const uint32_t cap_buf = WLF_MAX_PACKAGE;
-    if (!buf) buf = (uint8_t *)g_asi->mem->alloc(cap_buf);
+    /* Boyutu once HEAD ile sor: buyuk paketlerde tamponu bastan dogru
+     * boyutta ayirmak gerekiyor (sinir artik ~2GB; sabit tampon yok).
+     * Sunucu boy vermezse eski davranis gibi 1 MB'lik tamponla denenir. */
+    uint32_t want = 0;
+    int probed = 0;
+    if (g_asi->net->dl_size && g_asi->net->dl_size(url, &want) == 0 &&
+        want > WLF_HEADER_SIZE && want <= WLF_MAX_PACKAGE)
+        probed = 1;
+    /* Pay: http_download basliklari da ayni tampona birikir, govde sonra
+     * basa kaydirilir; slack baslik boyunu (ve fazlasini) kapsamisali. */
+    uint32_t cap_buf = probed ? want + 2048u : 1024u * 1024u;
+    if (cap_buf > WLF_MAX_PACKAGE) cap_buf = WLF_MAX_PACKAGE;
+    uint8_t *buf = (uint8_t *)g_asi->mem->alloc(cap_buf);
     if (!buf) { bin_copy(err, cap, "Bellek yetersiz"); return -1; }
 
     uint32_t len = 0;
     int drc = g_asi->net->download(url, buf, cap_buf, &len);
     if (drc != 0 || len < WLF_HEADER_SIZE) {
+        g_asi->mem->free(buf);
         bin_copy(err, cap, "Indirme basarisiz");
         return -1;
     }
     const wlf_header_t *h = 0;
     int v = wlf_validate(buf, len, &h);
     if (v != 0) {
+        g_asi->mem->free(buf);
         WLF_DBG("url-dogrula", url, v);
         bin_copy(err, cap, "Indirilen dosya gecerli .wlf degil");
         return -1;
     }
     if (wlf_write_app(h->name, buf, len) != 0) {
+        g_asi->mem->free(buf);
         WLF_DBG("url-yaz", h->name, -1);
         bin_copy(err, cap, "C:/apps'a yazilamadi");
         return -1;
     }
+    g_asi->mem->free(buf);
     WLF_DBG("url-kuruldu", h->name, 0);
     char full[96];
     wlf_app_path(h->name, full, (int)sizeof(full));

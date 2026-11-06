@@ -34,4 +34,9 @@ const char *http_header_get(const http_response_t *resp, const char *name);
  * cap, basliklar + govde icin ayrilan toplam alandir. Donus: 0 ok, <0 hata. */
 int http_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out);
 
+/* HEAD istegi atip Content-Length'i ogrenir (govde indirilmez).
+ * Buyuk indirmelerden once tamponu dogru boyutta ayirmak icin.
+ * Donus 0 = *out gecerli boy; <0 = alinamadi. */
+int http_head_length(const char *url, uint32_t *out);
+
 #endif

@@ -594,6 +594,21 @@ int afs_rename(const char *from, const char *to) {
     return 0;
 }
 
+/* Tahsisli bolgelerin sonu: data_next tek basina yaniltici olabilir,
+ * cunku buyuk bir yazim data_next'i komsumun LBA'sinin Otesine tasimisti
+ * (eski hatali davranis). Bu, bos bolgenin gercek baslangicini bulur. */
+static uint32_t afs_tail_lba(void) {
+    uint64_t end = H.data_next;
+    for (uint32_t j = 0; j < H.max_files; j++) {
+        if (!H.files[j].used) continue;
+        uint64_t s = ((uint64_t)H.files[j].size + 511u) / 512u;
+        if (s == 0) s = 1;                       /* bos dosya 1 sektor */
+        if ((uint64_t)H.files[j].lba + s > end) end = (uint64_t)H.files[j].lba + s;
+    }
+    if (end > H.capacity) end = H.capacity;
+    return (uint32_t)end;
+}
+
 int afs_write_handle(void *h, const void *data, uint32_t size) {
     int i = hnd_dec(h);
     if (i < 0) return -1;
@@ -603,10 +618,26 @@ int afs_write_handle(void *h, const void *data, uint32_t size) {
     /* LBA ve kapasite 32 bitlik alanlarda duruyor (disk bicimi); 32 bitlik
      * toplamada tasma olmasin, boyut siniri asilsin. */
     if ((uint64_t)H.files[i].lba + secs > (uint64_t)H.capacity) return -1;
-    if (storage_write(H.files[i].lba, (uint32_t)secs, data) != 0) return -1;
+    /* Yerinde yazim ancak sonraki komsumun LBA'si yeni araligin disinda
+     * kaliyorsa guvenli. Buyuyen paket eski hali uzerine yazildiginda
+     * komsum dosyanin ustune yazilip onu bozuyordu (ornegin yeni surum
+     * .wlf kurulumunda). Sigmiyorsa dosya bos bolgeye tasinar. */
+    uint32_t lba = H.files[i].lba;
+    int fit = 1;
+    for (uint32_t j = 0; j < H.max_files; j++) {
+        if (j == (uint32_t)i || !H.files[j].used) continue;
+        if ((uint64_t)H.files[j].lba > (uint64_t)lba &&
+            (uint64_t)H.files[j].lba < (uint64_t)lba + secs) { fit = 0; break; }
+    }
+    if (!fit) {
+        lba = afs_tail_lba();
+        if ((uint64_t)lba + secs > (uint64_t)H.capacity) return -1;   /* disk dolu */
+    }
+    if (storage_write(lba, (uint32_t)secs, data) != 0) return -1;
+    H.files[i].lba = lba;
     H.files[i].size = size;
-    if ((uint64_t)H.files[i].lba + secs > (uint64_t)H.data_next)
-        H.data_next = (uint32_t)((uint64_t)H.files[i].lba + secs);
+    if ((uint64_t)lba + secs > (uint64_t)H.data_next)
+        H.data_next = (uint32_t)(lba + secs);
     hdr_commit();
     return 0;
 }
