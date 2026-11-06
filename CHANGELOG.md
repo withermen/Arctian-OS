@@ -49,11 +49,22 @@ anında okuyup `ARCTIAN_VERSION` olarak gömer.
 - Yerel HTTP sunucunun GitHub varlık düzenini taklit ettiği testte `update kontrol`
   → `update kur` akışı uçtan uca doğrulandı (kurulum, kalıcı sürüm, yeniden
   açılışta "Sistem guncel"). İlk taban sürüm olarak `os-0.8` yayınlandı; varlıklar
-  ve imza OS'un sabitlediği anahtarla dışarıdan doğrulandı. Gerçek GitHub'a QEMU'dan
-  HTTPS el sıkışması takıldığı için (madde 77) canlı indirme konuğun kendisinde
-  henüz denenmedi.
+  ve imza OS'un sabitlediği anahtarla dışarıdan doğrulandı. Gerçek GitHub'a HTTPS
+  el sıkışması aynı gün bulunan bir TLS hatası yüzünden takılıyordu; düzeltmeden
+  sonra `update kontrol` canlı GitHub kaynağıyla uçtan uca doğrulandı (aşağıya
+  bakınız).
 
 **Düzeltmeler**
+
+- Her yerde "bağlantı hatası" veren HTTPS düzeltildi: TLS gönderim BIO'su 1400
+  bayttan küçük kayıtları (ClientHello dahil) fiilen göndermeden "tamam" dönüyordu;
+  el sıkışma boşta bekleyip zaman aşımına düşüyordu. Hata, want_write sayaçlarının
+  eklendiği parçalama yeniden yazımında girmişti.
+- Yönlendirme tamponları 512'den 1024 bayta çıkarıldı: GitHub'ın imzalı varlık
+  bağlantıları bu sığaya sığmayıp kesiliyor, sunucu "jwt-not-provided" dönüyordu;
+  artık GitHub'dan modül indirme de aynı yoldan yürüyor.
+- TR-Q ve EN klavye haritalarında eksi ile eşit tuşu yer değiştirmişti (AT set1'de
+  0x0C "-/*", 0x0D "=?"); "-" yazan her yerde "*" çıkıyordu.
 
 - Onay penceresi açıkken uygulama isteklerinin otomatik reddedilmesine yol açan izin
   bayrağı hatası düzeltildi; bayrak artık yalnız diyalog pompalanırken devrede.

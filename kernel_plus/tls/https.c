@@ -145,17 +145,21 @@ static int tls_bio_send(void *ctx, const unsigned char *buf, size_t len) {
     int conn = *(int *)ctx;
     if (len == 0) return 0;
     if (len > 16384) len = 16384;
-    /* Tek seferde gonderilemezse (pencere kapandi) parca parca ilerle:
-     * tcp_send ortada takilirsa hicbir sey gonderilmemis sayilip record
-     * bastan denenirdi; hic ilerleme olmayan durumda WANT_WRITE doner. */
-    size_t chunk = len;
-    while (chunk > 1400) chunk >>= 1;
-    while (chunk < len && !tcp_send(conn, (const uint8_t *)buf, (uint16_t)chunk))
-        chunk >>= 1;
-    if (chunk == 0) return MBEDTLS_ERR_SSL_WANT_WRITE;
-    if (!tcp_send(conn, (const uint8_t *)buf + chunk, (uint16_t)(len - chunk)))
-        return (int)chunk;                /* kismi gonderim: mbedTLS devamini ister */
-    return (int)len;
+    /* En fazla 1400 baytlik parcalarla gonder; pencere yetmezse kucult.
+     * Dikkat: eski parcalama mantiginda len <= 1400 iken gonderim cagrisi
+     * hic yapilmadan "tamam" donuyordu; ClientHello (<=1400 bayt) bu yuzden
+     * hic yola cikmiyor, el sikisma boslukta zaman asimina dusuyordu. */
+    size_t off = 0;
+    while (off < len) {
+        size_t n = len - off;
+        if (n > 1400) n = 1400;
+        while (n > 0 && !tcp_send(conn, (const uint8_t *)buf + off, (uint16_t)n))
+            n >>= 1;
+        if (n == 0) break;               /* 1 bayt bile sigmadi: ilerleme yok */
+        off += n;
+    }
+    if (off == 0) return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return (int)off;                     /* kismi ise mbedTLS devamini ister */
 }
 
 static int tls_bio_recv(void *ctx, unsigned char *buf, size_t len) {
@@ -717,7 +721,10 @@ static void resolve_location(const char *base, const char *loc, char *out, int c
 const char *https_fetch_body(const char *url, uint32_t *len_out) {
     if (!url || !url[0]) return 0;
 
-    char cur[512];
+    /* GitHub cikis varliklari gibi yonlendirmelerde Location imzali sorgu
+     * ile 600-900 baytu ulasabiliyor; 512'lik tampon token'i kirpiyordu
+     * ("jwt-not-provided"). Yol+ sorgu icin 1024. */
+    char cur[1024];
     str_copy_n(cur, url, sizeof(cur));
 
     for (int hop = 0; hop < 6; hop++) {
@@ -748,9 +755,9 @@ const char *https_fetch_body(const char *url, uint32_t *len_out) {
             }
 
             if (status >= 300 && status < 400) {
-                char loc[512];
+                char loc[1024];
                 if (raw_header_value(raw, hlen, "Location", loc, sizeof(loc)) && loc[0]) {
-                    char nxt[512];
+                    char nxt[1024];
                     resolve_location(cur, loc, nxt, sizeof(nxt));
                     str_copy_n(cur, nxt, sizeof(cur));
                     continue;
