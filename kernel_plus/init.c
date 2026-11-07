@@ -396,7 +396,10 @@ static int net_download_raw(const char *url, uint32_t lba,
     c.lba = lba; c.sec = room; c.crc = 0xFFFFFFFFu;
     c.total = 0; c.fill = 0;
     int n = https_stream(url, rawdl_sink, &c);
-    if (n < 0) return -3;
+    if (n < 0) {
+        serial_printf("[rd] stream fail n=%d toplam=%u\n", n, c.total);
+        return -3;
+    }
     if (c.fill) {                          /* son eksik sektor: sifirla ve yaz */
         for (uint32_t k = c.fill; k < 512u; k++) c.part[k] = 0;
         if (c.sec == 0) return -2;

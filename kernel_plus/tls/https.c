@@ -840,11 +840,15 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
         uint8_t ip[4];
         dns_result_t res[DNS_RESULT_MAX];
         int dn = 0;
-        if (!dns_resolve(host, res, &dn) || dn <= 0) { s_last_err = -2; return -1; }
+        if (!dns_resolve(host, res, &dn) || dn <= 0) {
+            serial_printf("[hs] dns FAIL host=%s\n", host);
+            s_last_err = -2; return -1;
+        }
         for (int i = 0; i < 4; i++) ip[i] = res[0].ip[i];
+        serial_printf("[hs] hop%d host=%s\n", hop, host);
 
         int conn = tcp_connect(ip, port);
-        if (conn < 0) { s_last_err = -3; return -1; }
+        if (conn < 0) { serial_printf("[hs] tcp FAIL\n"); s_last_err = -3; return -1; }
 
         mbedtls_ssl_context ssl;
         mbedtls_ssl_init(&ssl);
@@ -866,6 +870,7 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                 break;
             }
         }
+        if (ret != 0) serial_printf("[hs] tls handshake ret=%d\n", ret);
 
         if (ret == 0) {
             char req[3072];
@@ -900,10 +905,12 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                 }
                 break;
             }
+            if (off >= r) ret = 0;   /* istek tam gitti: yukari sayilari
+                                      * basari sayma; govde okumaya gec */
         }
 
         int status = 0, hdr_end = -1, hdr_len = 0;
-        int has_cl = 0, chunked = 0;
+        int has_cl = 0, chunked = 0, body_live = 0;
         uint32_t content_len = 0, body_at = 0, total = 0;
         uint64_t delivered = 0;
         char loc[1024];
@@ -928,7 +935,7 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                             }
                         }
                         if (hdr_end > 0) {
-                            if (total >= 12 && https_buf[5] == ' ')
+                            if (total >= 12 && https_buf[8] == ' ')
                                 status = (https_buf[9] - '0') * 100 +
                                          (https_buf[10] - '0') * 10 + (https_buf[11] - '0');
                             char hv[24];
@@ -940,6 +947,8 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                                 has_cl = 1; content_len = v;
                             }
                             chunked = ci_contains_n(https_buf, (uint32_t)hdr_len, "chunked");
+                            serial_printf("[hs] status=%d clen=%d chunked=%d\n",
+                                          status, has_cl ? (int)content_len : -1, chunked);
                             if (status >= 300 && status < 400) {
                                 raw_header_value(https_buf, (uint32_t)hdr_len,
                                                  "Location", loc, sizeof(loc));
@@ -948,9 +957,10 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                             ck_absorb(https_buf, (uint32_t)hdr_len, host, 1);
                             if (chunked || status < 200 || status >= 300) { err = -3; break; }
                             body_at = (uint32_t)hdr_end;
+                            body_live = 1;
                         }
                     }
-                    if (body_at) {
+                    if (body_live) {
                         uint32_t avail = total - body_at;
                         uint32_t want = 0;
                         if (has_cl) {
@@ -981,10 +991,19 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                     if ((int64_t)(clock_ms() - rd_deadline) >= 0) { ret = -101; break; }
                     continue;
                 }
+                if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
+                    /* BIO'nun 6 sn'lik ic beklemesi: hizli akista anlik
+                     * duraklama baglanti kopuk demek degil; dis bekleme
+                     * siniri (30 sn) dolana kadar dinlenmeye devam et. */
+                    if ((int64_t)(clock_ms() - rd_deadline) >= 0) { ret = -101; break; }
+                    continue;
+                }
+                serial_printf("[hs] read son ret=%d total=%u deliv=%u\n",
+                              ret, total, (unsigned)delivered);
                 break;                              /* EOF / close */
             }
             if (!done && !err && status >= 200 && status < 300) {
-                if (body_at && total > body_at) {   /* sonsuz akis: baglanti kapandi */
+                if (body_live && total > body_at) {  /* sonsuz akis: baglanti kapandi */
                     uint32_t avail = total - body_at;
                     if (has_cl && (uint64_t)(delivered + avail) > content_len)
                         avail = (uint32_t)((uint64_t)content_len - delivered);
@@ -1004,7 +1023,7 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
         mbedtls_ssl_free(&ssl);
         tcp_close(conn);
 
-        if (err) { s_last_err = err; return err; }
+        if (err) { s_last_err = err; serial_printf("[hs] err=%d deliv=%u\n", err, (unsigned)delivered); return err; }
         if (redirected) {
             char nxt[1024];
             resolve_location(cur, loc, nxt, sizeof(nxt));
@@ -1012,6 +1031,7 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
             continue;
         }
         str_copy_n(s_last_url, cur, sizeof(s_last_url));
+        serial_printf("[hs] tamam deliv=%u\n", (unsigned)delivered);
         return (int)delivered;
     }
     return -7;                                      /* yonlendirme limiti */
