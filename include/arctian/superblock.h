@@ -16,6 +16,15 @@
 #define MODULE_DATA_START_LBA 4096u
 #define MAX_MODULES           32
 
+/* 0.8.2: B yuvasi (cekirdek guncellemesi). Moduller B tablosundan once
+ * bitmeli; AFS yeni duzende 65536'dan baslar, boylece B bolgesi kullanici
+ * dosyalarina dokunmaz. Eski disklerde (AFS 20000) bu bolge dolu oldugu
+ * icin kernel update reddedilir. */
+#define SLOTB_TABLE_LBA       32768u   /* B yuvasi modul tablosu (1 sektor) */
+#define SLOTB_DATA_LBA        32832u   /* B yuvasi modullerinin ilk sektoru */
+#define SLOTB_MAX_END         65536u   /* B verisi bu sektorde BITMELI */
+#define SLOTB_TABLE_MAGIC     0x42544253u /* "SBTB" */
+
 /* superblock.flags */
 #define SB_FLAG_INSTALLED   0x00000001u
 

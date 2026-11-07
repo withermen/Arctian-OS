@@ -9,12 +9,17 @@ Sozlesme (GitHub varlik kipi, bkz. include/arctian/update.h):
     RSA/SHA-256 imzalanir; OS imzasiz manifesti kabul etmez.
 
 Kullanim (repo kokunden):
-  python3 tools/make_update.py --version 0.8.1 --notes "duzeltmeler" \
-      [--out build/update] murekkep=build/wlf/murekkep.wlf ...
+  python3 tools/make_update.py --version 0.8.2 --notes "duzeltmeler" \
+      [--out build/update] murekkep=build/wlf/murekkep.wlf \
+      [--system kernel_plus=build/obj/kernel_plus.bin] ...
 
   --version OS surumudur; kullanici update_check()'te kendi surumuyle
   karsilastirir. Moduller .wlf olmali (imzali) — kurulumda OS tarafinda
   da imza + CRC dogrulanir, bozuk/ruuzgarli paket kurulmaz.
+
+  --system cekirdek guncellemesi dosyasidir (0.8.2): duz .bin ikilisi.
+  Boyut/CRC yaninda AMOD icin gerekli load/bss/type/flags de manifesta
+  yazilir (layout.json + elf'ten); dosya B yuvasina akisla indirilir.
 
 Cikt: build/update/update.txt ve build/update/<ad>.wlf (oldugu gibi
 kopyalanir; release'e hepsi birlikte yuklenir).
@@ -29,10 +34,31 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(_ROOT, "store", "common"))
 import wlflib  # noqa: E402
+sys.path.insert(0, _HERE)
+from arctianpack import elf_bss_size  # noqa: E402
 
 
-def build_manifest(version, notes, modules):
-    """modules: [(id, dosya_yolu)] -> (govde, icerik_listesi)."""
+def layout_module(mid):
+    """layout.json'daki modul kaydi (load/type/flags/elf yollari)."""
+    import json
+    cfg = json.load(open(os.path.join(_ROOT, "config", "layout.json"), encoding="utf-8"))
+    objdir = os.environ.get("ARCTIAN_OBJ", "build/obj").replace("\\", "/")
+    def _fix(v):
+        if isinstance(v, str) and v.startswith("build/obj/"):
+            return objdir + v[len("build/obj"):]
+        return v
+    for m in cfg.get("modules", []):
+        if m["name"] == mid:
+            for k in ("bin", "elf"):
+                if k in m:
+                    m[k] = _fix(m[k])
+            return m
+    return None
+
+
+def build_manifest(version, notes, modules, system=()):
+    """modules: [(id, dosya_yolu)] -> (govde, icerik_listesi).
+    system:  [(id, dosya_yolu)] cekirdek guncellemesi ikilileri (0.8.2)."""
     lines = ["#arctian-update 1\n",
              "version=" + wlflib.enc(version) + "\n",
              "notes=" + wlflib.enc(notes) + "\n",
@@ -52,6 +78,28 @@ def build_manifest(version, notes, modules):
         lines.append("crc=%08x\n" % crc)
         lines.append("package=" + asset + "\n")   # varlik adi: taban + ad
         staged.append((asset, data))
+    for mid, path in system:
+        with open(path, "rb") as f:
+            data = f.read()
+        lay = layout_module(mid)
+        if not lay:
+            raise SystemExit("layout.json'da sistem modulu yok: %s" % mid)
+        bss = elf_bss_size(lay["elf"]) if lay.get("elf") else 0
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        asset = mid + ".bin"
+        lines.append("@file\n")
+        lines.append("id=" + wlflib.enc(mid) + "\n")
+        lines.append("version=" + wlflib.enc(version) + "\n")
+        lines.append("kind=system\n")
+        lines.append("size=%d\n" % len(data))
+        lines.append("crc=%08x\n" % crc)
+        lines.append("package=" + asset + "\n")
+        # AMOD basligi icin alanlar (onluk taban; desktop u_atoi ile okur)
+        lines.append("type=%d\n" % lay.get("type", 1))
+        lines.append("load=%d\n" % int(lay["load_addr"], 16))
+        lines.append("bss=%d\n" % bss)
+        lines.append("flags=%d\n" % lay.get("flags", 0))
+        staged.append((asset, data))
     body = "".join(lines)
     text = body + "sig=" + wlflib.sign_hex(body.encode("utf-8")) + "\n"
     return text, staged
@@ -59,10 +107,13 @@ def build_manifest(version, notes, modules):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--version", required=True, help="surum, orn. 0.8.1")
+    ap.add_argument("--version", required=True, help="surum, orn. 0.8.2")
     ap.add_argument("--notes", default="", help="kisa aciklama")
     ap.add_argument("--out", default=os.path.join(_ROOT, "build", "update"))
-    ap.add_argument("modules", nargs="+", metavar="id=yol.wlf")
+    ap.add_argument("--system", action="append", default=[],
+                    metavar="id=yol.bin",
+                    help="cekirdek guncellemesi dosyasi (tekrarlanabilir)")
+    ap.add_argument("modules", nargs="*", metavar="id=yol.wlf")
     a = ap.parse_args()
 
     mods = []
@@ -73,16 +124,26 @@ def main():
         if not os.path.isfile(path):
             raise SystemExit("dosya yok: %s" % path)
         mods.append((mid, path))
+    sysmods = []
+    for m in a.system:
+        if "=" not in m:
+            raise SystemExit("sistem bicimi id=yol.bin: %s" % m)
+        mid, path = m.split("=", 1)
+        if not os.path.isfile(path):
+            raise SystemExit("dosya yok: %s" % path)
+        sysmods.append((mid, path))
+    if not mods and not sysmods:
+        raise SystemExit("en az bir modul veya --system verilmeli")
 
     os.makedirs(a.out, exist_ok=True)
-    text, staged = build_manifest(a.version, a.notes, mods)
+    text, staged = build_manifest(a.version, a.notes, mods, sysmods)
     with open(os.path.join(a.out, "update.txt"), "w", newline="") as f:
         f.write(text)
     for asset, data in staged:
         with open(os.path.join(a.out, asset), "wb") as f:
             f.write(data)
-    print("yazildi: %s (%d modul, %d bayt manifest)"
-          % (os.path.join(a.out, "update.txt"), len(staged), len(text)))
+    print("yazildi: %s (%d modul, %d sistem, %d bayt manifest)"
+          % (os.path.join(a.out, "update.txt"), len(mods), len(sysmods), len(text)))
 
 
 if __name__ == "__main__":

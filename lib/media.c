@@ -9,10 +9,72 @@
 #include "sbio.h"
 #include "amod.h"
 #include "kernel.h"
+#include "slot.h"
 
 #define BOOT_MEDIA_ADDR 0x7100
 
 static int is_cd = 0;
+static int s_slot_b = 0;
+
+/* ---- A/B yuva durumu (boot tarafi) ----
+ * slot.c masaustu ASI'siyle calisir; boot yolu ASI'siz oldugu icin ayni
+ * kayit burada ham sektor uzerinden okunur/yazilir. */
+static uint32_t slot_crc32(const uint8_t *p, uint32_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < n; i++) {
+        c ^= p[i];
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(c & 1u)));
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
+static int slot_state_read(slot_state_t *out) {
+    uint8_t buf[512];
+    if (storage_read(STATE_LBA, 1, buf) != 0) return -1;
+    slot_state_t s;
+    for (uint32_t i = 0; i < sizeof(s); i++) ((uint8_t *)&s)[i] = buf[i];
+    if (s.magic != SLOT_MAGIC || s.version != SLOT_VERSION) return -2;
+    if (s.size != (uint16_t)sizeof(s) || s.active > 1) return -2;
+    if (s.crc != slot_crc32((const uint8_t *)&s, (uint32_t)sizeof(s) - 4u)) return -2;
+    *out = s;
+    return 0;
+}
+
+static int slot_state_write(const slot_state_t *in) {
+    slot_state_t s = *in;
+    s.magic = SLOT_MAGIC;
+    s.version = SLOT_VERSION;
+    s.size = (uint16_t)sizeof(s);
+    s.crc = slot_crc32((uint8_t *)&s, (uint32_t)sizeof(s) - 4u);
+    uint8_t buf[512];
+    for (int i = 0; i < 512; i++) buf[i] = 0;
+    for (uint32_t i = 0; i < sizeof(s); i++) buf[i] = ((const uint8_t *)&s)[i];
+    return storage_write(STATE_LBA, 1, buf);
+}
+
+/* Erken acilis bekcesi: masaustune hic ulasamayan yuva iki denemede
+ * birakilir. Masaustu acildiginda boot_ok 1 olur (slot_mark_boot_ok). */
+int media_boot_attempt(void) {
+    if (is_cd) return 0;
+    slot_state_t s;
+    if (slot_state_read(&s) != 0) return 0;   /* taze disk: A zaten saglam */
+    if (s.boot_ok) return 0;
+    if (s.tries >= 2) {
+        s.active = (uint8_t)(1 - s.active);
+        s.pending = 0xFF;
+        s.boot_ok = 1;
+        s.tries = 0;
+        if (slot_state_write(&s) != 0) return -1;
+        s_slot_b = (s.active == SLOT_B) ? 1 : 0;
+        return 2;                              /* onceki yuvaya donuldu */
+    }
+    s.tries++;
+    if (slot_state_write(&s) != 0) return -1;
+    return 1;                                  /* bu yuva denenecek */
+}
+
+int media_slot(void) { return s_slot_b; }
 
 int media_init(void) {
     uint8_t src = *(volatile uint8_t *)BOOT_MEDIA_ADDR;
@@ -21,11 +83,17 @@ int media_init(void) {
 #endif
     is_cd = (src == 2);
     if (is_cd) {
+        s_slot_b = 0;
         if (atapi_init() != 0) return -1;
         if (iso9660_init() != 0) return -1;
         return 0;
     }
-    return storage_init();
+    if (storage_init() != 0) return -1;
+    {   /* Hangi yuva etkin? Guncellenmis cekirdek B tablosundan yuklenir. */
+        slot_state_t s;
+        s_slot_b = (slot_state_read(&s) == 0 && s.active == SLOT_B) ? 1 : 0;
+    }
+    return 0;
 }
 
 int media_is_cd(void) { return is_cd; }
@@ -104,6 +172,27 @@ int media_find_module(const char *name, module_entry_t *out) {
         out->entry_off = h->entry_off;
         out->checksum = h->checksum;
         return 0;
+    }
+
+    /* B yuvasi: guncellemede yazilmis modul tablosu tek sektordur
+     * (magic + sayi + en fazla 7 girdi). Bozuksa A tablosuna dusulur;
+     * sistem bozuk B yuzunden hic acilmamazlik etmesin. */
+    if (s_slot_b) {
+        uint8_t sec[512];
+        if (storage_read(SLOTB_TABLE_LBA, 1, sec) == 0) {
+            uint32_t magic = 0, cnt = 0;
+            for (int b = 0; b < 4; b++) { magic |= (uint32_t)sec[b] << (8 * b);
+                                          cnt   |= (uint32_t)sec[4 + b] << (8 * b); }
+            if (magic == SLOTB_TABLE_MAGIC && cnt <= 7) {
+                for (uint32_t i = 0; i < cnt; i++) {
+                    module_entry_t e;
+                    const uint8_t *g = sec + 8 + i * 64u;
+                    for (uint32_t b = 0; b < sizeof(e); b++) ((uint8_t *)&e)[b] = g[b];
+                    e.name[31] = 0;
+                    if (strcmp(e.name, name) == 0) { *out = e; return 0; }
+                }
+            }
+        }
     }
 
     superblock_t sb;

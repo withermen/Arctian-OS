@@ -185,6 +185,13 @@ def main():
     module_table_sectors = max(1, (len(module_table) + SECTOR - 1) // SECTOR)
     module_table = pad(module_table)
 
+    # B yuvasi (cekirdek guncellemesi) tablosu 32768'de; modul bolgesi o
+    # LBA'ya dokunmamali (AFS de 65536'dan baslar, superblock.h).
+    SLOTB_TABLE_LBA = 32768
+    if next_lba > SLOTB_TABLE_LBA:
+        raise SystemExit("  HATA: modul bolgesi bitisi %d > B tablosu %d"
+                         % (next_lba, SLOTB_TABLE_LBA))
+
     total_sectors = max(next_lba + 64, cfg.get("min_sectors", 131072))
     img = bytearray(total_sectors * SECTOR)
     img[0:len(boot_image)] = boot_image

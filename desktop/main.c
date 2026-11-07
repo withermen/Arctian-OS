@@ -386,12 +386,10 @@ void desktop_main(void *arg) {
     update_set_installer(store_install);
     update_set_notify(rebuild_shell_ui);
     update_set_settings(upd_auto_setting, upd_delay_setting);
-    /* 0.7: acilis adimi. Kapanista bitmemis kurulum burada biter;
-     * boot_ok vermeyen yuva bir onceki yuvaya doner. Ag cagrisi yapilmaz. */
+    /* 0.7: acilis adimi. Kapanista bitmemis kurulum burada biter.
+     * 0.8.2: yuva geri donusu artik bootloader'da (media_boot_attempt);
+     * buraya ulasan cekirdek masaustune kadar cikmis demektir. */
     {
-        int bad = -1;
-        if (slot_boot_guard(&bad, 0) && g_asi->console && g_asi->console->puts)
-            g_asi->console->puts("[yuva] yeni yuva acilamadi, onceki yuvaya donuldu\n");
         slot_mark_boot_ok();
         update_boot_step();
     }

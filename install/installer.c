@@ -207,6 +207,35 @@ void install_main(void *arg) {
         terminal_writestring("HATA: superblock yazilamadi.\n");
         return;
     }
+
+    /* 4) Temiz A/B yuva durumu: A etkin ve saglam. Hedef disk daha once
+     * guncellenmis bir disktiye eski durum (pending=B) yeni kuruluma
+     * miras kalmasun; bootloader B tablosu aramaya kalkmasin. */
+    {
+        uint8_t st[512];
+        for (unsigned i = 0; i < sizeof(st); i++) st[i] = 0;
+        uint32_t magic = 0x544C4F53u;         /* "SOLT" (slot.h) */
+        st[0] = (uint8_t)magic; st[1] = (uint8_t)(magic >> 8);
+        st[2] = (uint8_t)(magic >> 16); st[3] = (uint8_t)(magic >> 24);
+        st[4] = 1;  st[6] = 16;   /* version=1, size=16 (slot_state_t) */
+        st[8] = 0;  /* active = A   */
+        st[9] = 0xFF; /* pending yok */
+        st[10] = 1; /* boot_ok      */
+        st[11] = 0; /* tries        */
+        uint32_t c = 0xFFFFFFFFu;
+        for (int i = 0; i < 12; i++) {
+            c ^= st[i];
+            for (int k = 0; k < 8; k++)
+                c = (c >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(c & 1u)));
+        }
+        c ^= 0xFFFFFFFFu;
+        st[12] = (uint8_t)c; st[13] = (uint8_t)(c >> 8);
+        st[14] = (uint8_t)(c >> 16); st[15] = (uint8_t)(c >> 24);
+        if (blockdev_write(target, STATE_LBA, 1, st) != 0) {
+            terminal_writestring("HATA: yuva durumu yazilamadi.\n");
+            return;
+        }
+    }
     blockdev_flush(target);
 
     terminal_writestring("\nKURULUM TAMAMLANDI. Diski cikarip yeniden baslatin.\n");

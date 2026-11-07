@@ -4,10 +4,18 @@
 #include <stdint.h>
 #include "asi.h"
 
-#define AFS_BASE_LBA   20000u  /* disktaki temel LBA (modul bolgesinin sonrasi) */
-#define AFS_VERSION    5u      /* header surumu; uymayan disk yeniden formatlanir
-                                * (5: kapasite alani 64 bit, tablo ofseti kaydi) */
+/* Yeni duzen (0.8.2): taban 65536. Modul bolgesi 27836'da biterken eski
+ * taban 20000 AFS'yi modullerin uzerine yaziyordu; yeni kurulumlar 65536'dan
+ * formatlanir, eski diskler legacy tabandan okunmaya devam eder. */
+#define AFS_BASE_LBA        65536u
+#define AFS_BASE_LEGACY_LBA 20000u
+#define AFS_VERSION    6u      /* header surumu; uymayan disk yeniden formatlanir
+                                * (5: kapasite 64 bit; 6: taban 65536 - surum
+                                *  5 diskler mount sirasinda yeni surume tasinar) */
 #define AFS_NAME_MAX   64u     /* dosya/klasor adi azami bayt (+ sonlandirici) */
+
+/* Mount sirasinda saptanan etkin taban LBA (legacy 20000 veya yeni 65536). */
+uint32_t    afs_base(void);
 
 /* Kullanici diski (C:/) kok yolu. Sistem dosyalari (ayar, .dpk) ham kokte
  * tutulur; bunlar masaustunde gizlidir. C: diski kullaniciya aittir. */

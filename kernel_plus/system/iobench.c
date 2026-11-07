@@ -27,7 +27,7 @@ void io_bench(void) {
     int dev = bench_dev();
     if (dev < 0) { serial_printf("[iobench] blok cihaz yok\n"); return; }
 
-    uint32_t lba = AFS_BASE_LBA;
+    uint32_t lba = afs_base();   /* kendi dosya sistemimizin alaninda olc */
     uint32_t mb = (BENCH_SECTORS * BENCH_REPEATS * 512u) >> 20;
     if (mb == 0) mb = 1;
 

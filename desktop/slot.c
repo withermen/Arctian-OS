@@ -119,7 +119,9 @@ int slot_switch_pending(void) {
     s.active = (uint8_t)cand;
     s.pending = 0xFF;
     s.boot_ok = 0;                 /* masaustune ulasirsa 1 yazilir */
-    if (s.tries < 3) s.tries++;
+    s.tries = 1;                   /* her gecis yeni deneme butcesi (0.8.2:
+                                    * sayac birikirse bir sonraki guncelleme
+                                    * hic denemeden geri alinirdi) */
     return slot_write(&s);
 }
 

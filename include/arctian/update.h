@@ -27,6 +27,15 @@
  *   crc=<8 haneli CRC32 (IEEE)>
  *   package=<ad.wlf>        (varlik kipinde varlik adi; DuckStore'da /packages/...)
  *
+ *   @file
+ *   id=kernel_plus         (0.8.2: sistem dosyasi - cekirdek guncellemesi)
+ *   kind=system
+ *   size=<bayt>  crc=<CRC32>  package=<ad.bin>
+ *   type=<amod_type>  load=<onluk>  bss=<onluk>  flags=<onluk>
+ *   Sistem dosyalari RAM'e alinmadan B yuvasina akisla yazilir; yuva
+ *   gecisi yeniden baslatmada olur, masaustuune ulasilamazsa eski yuva
+ *   kendiliginden geri gelir.
+ *
  * Manifest govdesi magaza anahtariyla imzali olmali (sig= satiri); imzasiz
  * manifesto surum yukseltmez.
  */
@@ -40,6 +49,13 @@ typedef struct {
     uint32_t size;
     uint32_t crc;          /* indirilen paketin tamami uzerinde CRC32 */
     char     package[64];  /* sunucu-goreli yol: /packages/<id>.dpk */
+    /* 0.8.2: kind=system (cekirdek guncellemesi) alanlari. Uygulama
+     * dosyalarinda kind=0 kalir; eski manifestolar bozulmaz. */
+    uint8_t  kind;         /* 0=uygulama (.wlf)  1=sistem (cekirdek ikilisi) */
+    uint8_t  type;         /* amod_type_t */
+    uint32_t bss;          /* AMOD: image sonrasi sifirlanacak alan */
+    uint32_t load;         /* AMOD: yukleme adresi */
+    uint32_t mflags;       /* AMOD: bayraklar */
 } update_file_t;
 
 /* 0.7: sistem imaji tanimi.       */

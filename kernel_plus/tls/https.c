@@ -801,3 +801,218 @@ void https_last_error(char *buf, int cap) {
     if (!buf || cap <= 0) return;
     mbedtls_strerror(s_last_err, buf, (size_t)cap);
 }
+
+/* ================================================================== */
+/* 0.8.2: Akisli govde indirme (cekirdek guncellemesi)                 */
+/*                                                                    */
+/* Govde HTTPS_BUF_MAX tamponuna sigmaz (kernel_plus ~900 KB); bu yol  */
+/* yanit geldikce parcalari cagriya devreder ve boylece disk sektorle- */
+/* rine dogrudan yazilabilir. chunked govde desteklenmez (GitHub cikis */
+/* varliklari Content-Length gonderir). Yonlendirmeler takip edilir.   */
+/* ================================================================== */
+
+#define STREAM_HIWATER (32u * 1024u)
+
+int https_stream(const char *url, https_sink_fn sink, void *ctx) {
+    if (!s_inited) https_init();
+    if (!s_inited || !url || !url[0] || !sink) return -1;
+
+    char cur[1024];
+    str_copy_n(cur, url, sizeof(cur));
+
+    for (int hop = 0; hop < 6; hop++) {
+        if (!ci_starts_with(cur, "https://")) return -1;  /* ham yazim yalniz TLS */
+        const char *p = cur + 8;
+        char host[128];
+        int hl = 0;
+        while (*p && *p != '/' && *p != ':' && hl < 127) host[hl++] = *p++;
+        host[hl] = 0;
+        if (hl == 0) return -1;
+        uint16_t port = 443;
+        if (*p == ':') {
+            p++;
+            uint32_t pv = 0;
+            while (*p >= '0' && *p <= '9') { pv = pv * 10u + (uint32_t)(*p - '0'); p++; }
+            if (pv > 0 && pv < 65536u) port = (uint16_t)pv;
+        }
+        const char *path = (*p == '/') ? p : "/";
+
+        uint8_t ip[4];
+        dns_result_t res[DNS_RESULT_MAX];
+        int dn = 0;
+        if (!dns_resolve(host, res, &dn) || dn <= 0) { s_last_err = -2; return -1; }
+        for (int i = 0; i < 4; i++) ip[i] = res[0].ip[i];
+
+        int conn = tcp_connect(ip, port);
+        if (conn < 0) { s_last_err = -3; return -1; }
+
+        mbedtls_ssl_context ssl;
+        mbedtls_ssl_init(&ssl);
+        int ret = mbedtls_ssl_setup(&ssl, &s_conf);
+        if (ret == 0) {
+            mbedtls_ssl_set_hostname(&ssl, host);
+            mbedtls_ssl_set_bio(&ssl, &conn, tls_bio_send, tls_bio_recv, NULL);
+            uint64_t hs_deadline = clock_ms() + 30000;
+            for (;;) {
+                ret = mbedtls_ssl_handshake(&ssl);
+                if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+                    ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    if ((int64_t)(clock_ms() - hs_deadline) >= 0) {
+                        ret = MBEDTLS_ERR_SSL_TIMEOUT;
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
+
+        if (ret == 0) {
+            char req[3072];
+            uint32_t r = 0;
+            const char *pre = "GET ";
+            while (*pre) req[r++] = *pre++;
+            for (int i = 0; path[i] && r < 1400; i++) req[r++] = path[i];
+            const char *v = " HTTP/1.1\r\nHost: ";
+            while (*v) req[r++] = *v++;
+            for (int i = 0; host[i] && r < 1500; i++) req[r++] = host[i];
+            char ck[6144];
+            if (ck_build(host, 1, ck, sizeof(ck)) > 0) {
+                const char *ch = "\r\nCookie: ";
+                while (*ch) req[r++] = *ch++;
+                for (int i = 0; ck[i] && r < 2700; i++) req[r++] = ck[i];
+            }
+            const char *tail =
+                "\r\nUser-Agent: ArctianOS-Update/1.0"
+                "\r\nAccept: application/octet-stream"
+                "\r\nAccept-Encoding: identity"
+                "\r\nConnection: close\r\n\r\n";
+            while (*tail && r < sizeof(req) - 1) req[r++] = *tail++;
+
+            uint64_t wr_deadline = clock_ms() + 20000;
+            size_t off = 0;
+            while (off < r) {
+                ret = mbedtls_ssl_write(&ssl, (const unsigned char *)req + off, r - off);
+                if (ret > 0) { off += (size_t)ret; continue; }
+                if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    if ((int64_t)(clock_ms() - wr_deadline) >= 0) { ret = -100; break; }
+                    continue;
+                }
+                break;
+            }
+        }
+
+        int status = 0, hdr_end = -1, hdr_len = 0;
+        int has_cl = 0, chunked = 0;
+        uint32_t content_len = 0, body_at = 0, total = 0;
+        uint64_t delivered = 0;
+        char loc[1024];
+        loc[0] = 0;
+        int err = 0, done = 0;
+
+        if (ret == 0) {
+            uint64_t rd_deadline = clock_ms() + 30000;
+            for (;;) {
+                unsigned char tmp[2048];
+                ret = mbedtls_ssl_read(&ssl, tmp, sizeof(tmp));
+                if (ret > 0) {
+                    rd_deadline = clock_ms() + 30000;
+                    append(https_buf, HTTPS_BUF_MAX, &total, (const char *)tmp, (uint32_t)ret);
+
+                    if (hdr_end < 0) {
+                        for (uint32_t i = 0; i + 3 < total; i++) {
+                            if (https_buf[i] == '\r' && https_buf[i + 1] == '\n' &&
+                                https_buf[i + 2] == '\r' && https_buf[i + 3] == '\n') {
+                                hdr_end = (int)(i + 4); hdr_len = (int)i;
+                                break;
+                            }
+                        }
+                        if (hdr_end > 0) {
+                            if (total >= 12 && https_buf[5] == ' ')
+                                status = (https_buf[9] - '0') * 100 +
+                                         (https_buf[10] - '0') * 10 + (https_buf[11] - '0');
+                            char hv[24];
+                            if (raw_header_value(https_buf, (uint32_t)hdr_len,
+                                                 "Content-Length", hv, sizeof(hv))) {
+                                uint32_t v = 0;
+                                for (int i = 0; hv[i] >= '0' && hv[i] <= '9'; i++)
+                                    v = v * 10u + (uint32_t)(hv[i] - '0');
+                                has_cl = 1; content_len = v;
+                            }
+                            chunked = ci_contains_n(https_buf, (uint32_t)hdr_len, "chunked");
+                            if (status >= 300 && status < 400) {
+                                raw_header_value(https_buf, (uint32_t)hdr_len,
+                                                 "Location", loc, sizeof(loc));
+                                break;             /* govde gerekmez */
+                            }
+                            ck_absorb(https_buf, (uint32_t)hdr_len, host, 1);
+                            if (chunked || status < 200 || status >= 300) { err = -3; break; }
+                            body_at = (uint32_t)hdr_end;
+                        }
+                    }
+                    if (body_at) {
+                        uint32_t avail = total - body_at;
+                        uint32_t want = 0;
+                        if (has_cl) {
+                            uint64_t remain = (uint64_t)content_len - delivered;
+                            if (avail > remain) avail = (uint32_t)remain;
+                            if (avail && (avail >= STREAM_HIWATER ||
+                                          (uint64_t)avail >= remain))
+                                want = avail;      /* bitise yakinse hemen bosalt */
+                        } else if (avail >= STREAM_HIWATER) {
+                            want = avail;
+                        }
+                        if (want) {
+                            if (sink(ctx, (const uint8_t *)https_buf + body_at, want) != 0) {
+                                err = -4; break;
+                            }
+                            delivered += want;
+                            uint32_t rest = total - body_at - want;
+                            for (uint32_t i = 0; i < rest; i++)
+                                https_buf[i] = https_buf[body_at + want + i];
+                            total = rest; body_at = 0;
+                        }
+                        if (has_cl && delivered >= content_len) { done = 1; break; }
+                        if (total >= HTTPS_BUF_MAX - 1) { err = -5; break; }
+                    }
+                    continue;
+                }
+                if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    if ((int64_t)(clock_ms() - rd_deadline) >= 0) { ret = -101; break; }
+                    continue;
+                }
+                break;                              /* EOF / close */
+            }
+            if (!done && !err && status >= 200 && status < 300) {
+                if (body_at && total > body_at) {   /* sonsuz akis: baglanti kapandi */
+                    uint32_t avail = total - body_at;
+                    if (has_cl && (uint64_t)(delivered + avail) > content_len)
+                        avail = (uint32_t)((uint64_t)content_len - delivered);
+                    if (avail) {
+                        if (sink(ctx, (const uint8_t *)https_buf + body_at, avail) != 0)
+                            err = -4;
+                        else
+                            delivered += avail;
+                    }
+                }
+                if (!err && has_cl && delivered < content_len) err = -6;
+            }
+        } else if (!err) err = -1;
+
+        int redirected = (status >= 300 && status < 400 && loc[0]);
+        mbedtls_ssl_close_notify(&ssl);
+        mbedtls_ssl_free(&ssl);
+        tcp_close(conn);
+
+        if (err) { s_last_err = err; return err; }
+        if (redirected) {
+            char nxt[1024];
+            resolve_location(cur, loc, nxt, sizeof(nxt));
+            str_copy_n(cur, nxt, sizeof(cur));
+            continue;
+        }
+        str_copy_n(s_last_url, cur, sizeof(s_last_url));
+        return (int)delivered;
+    }
+    return -7;                                      /* yonlendirme limiti */
+}

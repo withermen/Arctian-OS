@@ -21,6 +21,8 @@
 #include "version.h"
 #include "sig.h"
 #include "slot.h"
+#include "superblock.h"
+#include "amod.h"
 #include <stdint.h>
 
 #define UPD_CFG_PATH "C:/etc/update.cfg"
@@ -138,6 +140,11 @@ static void u_file_defaults(update_file_t *f) {
     u_cpy(f->package, sizeof(f->package), "");
     f->size = 0;
     f->crc = 0;
+    f->kind = 0;
+    f->type = 0;
+    f->bss = 0;
+    f->load = 0;
+    f->mflags = 0;
 }
 
 static void u_manifest_reset(void) {
@@ -229,6 +236,11 @@ static int u_parse(const char *t, uint32_t n) {
             else if (u_eq(key, "size")) cur->size = u_atoi(val);
             else if (u_eq(key, "crc")) cur->crc = u_hex(val);
             else if (u_eq(key, "package")) u_cpy(cur->package, sizeof(cur->package), val);
+            else if (u_eq(key, "kind")) cur->kind = u_eq(val, "system") ? 1 : 0;
+            else if (u_eq(key, "type")) cur->type = (uint8_t)u_atoi(val);
+            else if (u_eq(key, "load")) cur->load = u_atoi(val);
+            else if (u_eq(key, "bss")) cur->bss = u_atoi(val);
+            else if (u_eq(key, "flags")) cur->mflags = u_atoi(val);
         } else if (mode == 2) {
             if (u_eq(key, "id")) u_cpy(s_man.image.id, sizeof(s_man.image.id), val);
             else if (u_eq(key, "size")) s_man.image.size = u_atoi(val);
@@ -404,6 +416,98 @@ int update_check(void) {
     return 0;
 }
 
+/* ---- 0.8.2: sistem dosyalari (cekirdek guncellemesi) -> B yuvasi ----
+ * Manifestodaki kind=system dosyalari RAM'e alinmadan diske akirilir
+ * (net->download_raw). AMOD basligi burada uretilir; B tablosu tum veri
+ * yazildiktan, yuva gecisi tablo yazildiktan SONRA yapilir. Herhangi bir
+ * adimda elektrik kesilse eski yuva gecerliligini korur. */
+static uint8_t  s_btab[512];
+static uint32_t s_b_next;
+static int      s_b_cnt;
+
+static void sys_prepare(void) {
+    for (int i = 0; i < 512; i++) s_btab[i] = 0;
+    s_b_next = SLOTB_DATA_LBA;
+    s_b_cnt = 0;
+}
+
+static int sys_install(const update_file_t *f, const char *url,
+                       char *err, int errcap) {
+    if (!s_asi->net->download_raw) { u_cpy(err, errcap, "Cekirdek eski: ham indirme yok"); return -1; }
+    if (!s_asi->storage || !s_asi->storage->write_sectors) { u_cpy(err, errcap, "Disk yazma yok"); return -1; }
+    if (s_b_cnt >= 7) { u_cpy(err, errcap, "B tablosu dolu"); return -1; }
+    if (!f->load) { u_cpy(err, errcap, "Sistem kaydinda adres yok"); return -1; }
+    uint32_t body_secs = (f->size + 511u) / 512u;
+    if (s_b_next + 1u + body_secs > SLOTB_MAX_END) { u_cpy(err, errcap, "B yuvasi dolu"); return -1; }
+
+    uint32_t size = 0, crc = 0;
+    int rc = s_asi->net->download_raw(url, s_b_next + 1u, &size, &crc);
+    if (rc == -5) { u_cpy(err, errcap, "Disk duzeni eski; temiz kurulum gerekir"); return -1; }
+    if (rc != 0) { u_cpy(err, errcap, "Akisli indirme hatasi"); return -1; }
+    if (f->size && size != f->size) { u_cpy(err, errcap, "Boyut uyusmuyor"); return -1; }
+    if (f->crc && crc != f->crc) { u_cpy(err, errcap, "CRC dogrulama hatasi"); return -1; }
+
+    uint8_t sec[512];
+    for (int i = 0; i < 512; i++) sec[i] = 0;
+    amod_header_t *h = (amod_header_t *)sec;
+    h->magic = AMOD_MAGIC;
+    h->abi_version = AMOD_ABI_VERSION;
+    h->type = f->type ? f->type : 1;         /* 1 = kernel */
+    h->load_addr = f->load;
+    h->image_size = size;
+    h->bss_size = f->bss;
+    h->entry_off = 0;
+    h->checksum = crc;
+    for (int i = 0; f->id[i] && i < 31; i++) h->name[i] = f->id[i];
+    for (int i = 0; s_man.version[i] && i < 15; i++) h->version[i] = s_man.version[i];
+    h->flags = f->mflags | AMOD_FLAG_REQUIRED;
+    if (s_asi->storage->write_sectors(s_b_next, 1, sec) != 0) {
+        u_cpy(err, errcap, "Diske yazilamadi"); return -1;
+    }
+
+    module_entry_t e;
+    for (uint32_t i = 0; i < sizeof(e); i++) ((uint8_t *)&e)[i] = 0;
+    for (int i = 0; f->id[i] && i < 31; i++) e.name[i] = f->id[i];
+    e.type = (uint16_t)h->type;
+    e.abi_version = AMOD_ABI_VERSION;
+    e.flags = h->flags;
+    e.load_addr = f->load;
+    e.image_lba = s_b_next;
+    e.image_sectors = 1u + body_secs;
+    e.image_size = size;
+    e.entry_off = 0;
+    e.checksum = crc;
+    uint8_t *g = s_btab + 8 + (size_t)s_b_cnt * 64u;
+    for (uint32_t i = 0; i < sizeof(e); i++) g[i] = ((const uint8_t *)&e)[i];
+    s_b_cnt++;
+    s_b_next += 1u + body_secs;
+    return 0;
+}
+
+static int sys_finish(char *err, int errcap) {
+    if (!s_b_cnt) return 0;
+    for (int b = 0; b < 4; b++) {
+        s_btab[b]     = (uint8_t)(SLOTB_TABLE_MAGIC >> (8 * b));
+        s_btab[4 + b] = (uint8_t)((uint32_t)s_b_cnt >> (8 * b));
+    }
+    if (s_asi->storage->write_sectors(SLOTB_TABLE_LBA, 1, s_btab) != 0) {
+        u_cpy(err, errcap, "B tablosu yazilamadi"); return -1;
+    }
+    /* Sistem dosyalari daima B bolgesine yazilir; gecis hedefi bu yuzden
+     * generik slot_switch_pending DEGIL, dogrudan B'dir (B uzerinden
+     * calisan sistemde switch A'ya, yani eski cekirdege donerdi). */
+    slot_state_t s;
+    if (slot_read(&s) != 0) {
+        s.active = SLOT_A; s.pending = 0xFF; s.boot_ok = 1; s.tries = 0;
+    }
+    s.active = SLOT_B;
+    s.pending = 0xFF;
+    s.boot_ok = 0;               /* masaustuune ulasirsa 1 olur */
+    s.tries = 1;
+    if (slot_write(&s) != 0) { u_cpy(err, errcap, "Yuva gecisi basarisiz"); return -1; }
+    return 0;
+}
+
 int update_apply(void) {
     if (!s_asi || !s_asi->net || !s_asi->net->download) {
         u_set_state(UPDATE_ERROR, "Ag servisi yok");
@@ -437,6 +541,7 @@ int update_apply(void) {
     }
     u_set_state(UPDATE_DOWNLOADING, "Indiriliyor...");
     s_st.total = s_man.count;
+    sys_prepare();
 
     int installed = 0;                           /* gercekten kurulan modul */
     for (int i = 0; i < s_man.count; i++) {
@@ -458,6 +563,17 @@ int update_apply(void) {
         if (f->package[0] != '/' && url[0] && url[u_len(url) - 1] != '/')
             u_cat(url, sizeof(url), "/");
         u_cat(url, sizeof(url), f->package);
+
+        if (f->kind == 1) {              /* sistem dosyasi: B yuvasina akis */
+            char serr[72];
+            serr[0] = 0;
+            if (sys_install(f, url, serr, sizeof(serr)) != 0) {
+                u_set_state(UPDATE_ERROR, serr[0] ? serr : "Sistem kurulum hatasi");
+                return -7;
+            }
+            installed++;
+            continue;
+        }
 
         uint32_t len = 0;
         int rc = s_asi->net->download(url, s_buf, (uint32_t)s_buf_cap, &len);
@@ -484,13 +600,29 @@ int update_apply(void) {
         return -6;
     }
 
+    /* Sistem dosyalari yazildiysa: B tablosunu yaz ve yuvayi cev. */
+    if (s_b_cnt) {
+        char serr[72];
+        serr[0] = 0;
+        u_cpy(s_st.message, sizeof(s_st.message), "Yuva hazirlaniyor...");
+        if (s_notify) s_notify();
+        if (sys_finish(serr, sizeof(serr)) != 0) {
+            u_set_state(UPDATE_ERROR, serr[0] ? serr : "B yuvasi hatasi");
+            return -8;
+        }
+    }
+
     s_st.progress = 100;
     s_st.cur = s_st.total;
     cfg_save(s_man.version);
 
     char m[96];
-    u_cpy(m, sizeof(m), "Guncellendi: ");
-    u_cat(m, sizeof(m), s_man.version);
+    if (s_b_cnt) {
+        u_cpy(m, sizeof(m), "Sistem dosyalari B yuvasinda; yeniden baslatin");
+    } else {
+        u_cpy(m, sizeof(m), "Guncellendi: ");
+        u_cat(m, sizeof(m), s_man.version);
+    }
     u_set_state(UPDATE_DONE, m);
     if (s_notify) s_notify();
     return 0;

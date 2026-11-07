@@ -61,6 +61,11 @@ static afs_hdr_t H;
 static int mounted = 0;
 static int s_locked = 0;
 
+/* Etkin taban LBA. Eski diskler legacy (20000), yeni kurulumlar 65536;
+ * afs_mount probe ile secimi yapar, afs_format yeni duzeni kurar. */
+static uint32_t s_base = AFS_BASE_LEGACY_LBA;
+uint32_t afs_base(void) { return s_base; }
+
 void afs_set_locked(int v) { s_locked = v ? 1 : 0; }
 int  afs_is_locked(void) { return s_locked; }
 
@@ -138,11 +143,11 @@ static uint64_t compute_capacity(void) {
     }
     uint64_t cap;
     if (secs == 0) {
-        return AFS_BASE_LBA + 65536u;   /* bilinmeyen disk: guvenli varsayilan */
+        return s_base + 65536u;   /* bilinmeyen disk: guvenli varsayilan */
     }
     cap = secs > AFS_RESERVE_SEC ? secs - AFS_RESERVE_SEC : secs;
     if (cap > 0xFFFFFFFEull) cap = 0xFFFFFFFEull;
-    if (cap < (uint64_t)AFS_BASE_LBA + AFS_CLUSTER_SEC) cap = (uint64_t)AFS_BASE_LBA + AFS_CLUSTER_SEC;
+    if (cap < (uint64_t)s_base + AFS_CLUSTER_SEC) cap = (uint64_t)s_base + AFS_CLUSTER_SEC;
     return cap;
 }
 
@@ -251,10 +256,10 @@ static uint32_t hdr_crc(void) {
 /* Gunluk bolgesinin LBA'si; 0 = gunluk kullanilamaz (dogrudan yazim). */
 static uint32_t journal_lba(void) {
     uint64_t secs = storage_sector_count();
-    uint64_t base = (uint64_t)AFS_BASE_LBA + AFS_RESERVE_SEC + AFS_JOURNAL_SEC;
+    uint64_t base = (uint64_t)s_base + AFS_RESERVE_SEC + AFS_JOURNAL_SEC;
     if (secs < base) return 0;
     uint64_t j = secs - AFS_RESERVE_SEC - AFS_JOURNAL_SEC;
-    if (j <= (uint64_t)AFS_BASE_LBA) return 0;
+    if (j <= (uint64_t)s_base) return 0;
     if (j + 1u + AFS_HDR_MAX_SEC > secs) return 0;
     return (uint32_t)j;
 }
@@ -279,7 +284,7 @@ static int hdr_commit(void) {
     uint32_t jl = journal_lba();
     if (jl == 0 || H.data_next > jl || H.hdr_sectors + 1u > AFS_JOURNAL_SEC) {
         /* Gunluk yok ya da veriyle cakisir: dogrudan yaz (geriye uyumlu). */
-        return hdr_save_at(AFS_BASE_LBA, H.hdr_sectors);
+        return hdr_save_at(s_base, H.hdr_sectors);
     }
 
     /* H.flags az once eski header'in CRC'sini tasiryordu; eski deger kayit
@@ -304,7 +309,7 @@ static int hdr_commit(void) {
     if (storage_write(jl, 1, sec) != 0) return -1;
     storage_flush();
     /* 3) Header'a uygula. */
-    if (hdr_save_at(AFS_BASE_LBA, H.hdr_sectors) != 0) return -1;
+    if (hdr_save_at(s_base, H.hdr_sectors) != 0) return -1;
     storage_flush();
     /* 4) Gunlugu temizle (state=0). */
     rec->state = 0;
@@ -329,38 +334,39 @@ static void journal_replay(void) {
      * uygulanmaz; eskiden yalniz CRC'ye bakildigi icin eski bir gunluk kaydi
      * guncel tablonun ustune yazilabiliyordu. */
     uint32_t cur_hdr[9];
-    if (storage_read(AFS_BASE_LBA, 1, cur_hdr) != 0) return;
+    if (storage_read(s_base, 1, cur_hdr) != 0) return;
     if (cur_hdr[0] == AFS_MAGIC && cur_hdr[8] != rec->prev_crc) {
         journal_clear(jl);
         return;
     }
 
     if (hdr_load_at(jl + 1u, rec->hdr_sectors) != 0) return;
-    if (H.magic != AFS_MAGIC || H.version != AFS_VERSION ||
+    if (H.magic != AFS_MAGIC || (H.version != AFS_VERSION && H.version != 5u) ||
         H.max_files < 32u || H.max_files > AFS_MAX_FILES_HARD) { journal_clear(jl); return; }
     if (crc32_buf(&H, hdr_bytes()) != rec->crc) { journal_clear(jl); return; }
-    hdr_save_at(AFS_BASE_LBA, rec->hdr_sectors);
+    hdr_save_at(s_base, rec->hdr_sectors);
     storage_flush();
     journal_clear(jl);
 }
 
 void afs_format(void) {
+    s_base = AFS_BASE_LBA;     /* yeni kurulum: moduller B bolgesiyle celismesin */
     H.magic = AFS_MAGIC;
     H.version = AFS_VERSION;
     H.capacity = compute_capacity();
     /* Gunluk icin sonda AFS_JOURNAL_SEC sektor birak (sifreli bolgede kalir). */
-    if (H.capacity > AFS_BASE_LBA + AFS_JOURNAL_SEC)
+    if (H.capacity > s_base + AFS_JOURNAL_SEC)
         H.capacity -= AFS_JOURNAL_SEC;
     H.flags = 0;
 
-    uint32_t room = (uint32_t)(H.capacity - AFS_BASE_LBA);
+    uint32_t room = (uint32_t)(H.capacity - s_base);
     uint32_t mf = room / AFS_CLUSTER_SEC;
     if (mf < 32u) mf = 32u;
     if (mf > AFS_MAX_FILES_HARD) mf = AFS_MAX_FILES_HARD;
     H.max_files = mf;
     H.count = 0;
     hdr_sync_size();
-    H.data_next = AFS_BASE_LBA + H.hdr_sectors;
+    H.data_next = s_base + H.hdr_sectors;
 
     for (uint32_t i = 0; i < AFS_MAX_FILES_HARD; i++) {
         H.files[i].used = 0;
@@ -381,9 +387,30 @@ void afs_mount(void) {
     uint32_t first[128];   /* 512-byte ilk sektor */
     if (s_locked) return;
     if (storage_sector_count() == 0) storage_init();
+
+    /* Taban secimi (0.8.2): once yeni duzen (65536, surum 6 sartiyla),
+     * sonra legacy (20000; surum 5 veya 6). Eski kullanicinin dosyalari
+     * legacy tabanda kalir; yeni kurulumlar ve yeniden formatlamalar
+     * surum 6 kaydini 65536'ya yazar, boylece eski-basak yeni-kayit
+     * ayrimi surum alaniyla netlesir. */
+    int have = 0;
+    if (storage_read(AFS_BASE_LBA, 1, first) == 0 &&
+        first[0] == AFS_MAGIC && first[1] == AFS_VERSION) {
+        s_base = AFS_BASE_LBA; have = 1;
+    } else if (storage_read(AFS_BASE_LEGACY_LBA, 1, first) == 0 &&
+               first[0] == AFS_MAGIC &&
+               (first[1] == AFS_VERSION || first[1] == 5u)) {
+        s_base = AFS_BASE_LEGACY_LBA; have = 1;
+    }
+    if (!have) {
+        if (afs_disk_is_encrypted()) return;
+        afs_format();
+        return;
+    }
     journal_replay();      /* yarim kalan commit'i tamamla */
-    if (storage_read(AFS_BASE_LBA, 1, first) != 0 ||
-        first[0] != AFS_MAGIC || first[1] != AFS_VERSION) {
+    if (storage_read(s_base, 1, first) != 0 ||
+        first[0] != AFS_MAGIC ||
+        (first[1] != AFS_VERSION && first[1] != 5u)) {
         if (afs_disk_is_encrypted()) return;
         afs_format();
         return;
@@ -403,7 +430,7 @@ void afs_mount(void) {
         afs_format();
         return;
     }
-    if (hdr_load_at(AFS_BASE_LBA, H.hdr_sectors) != 0) {
+    if (hdr_load_at(s_base, H.hdr_sectors) != 0) {
         if (afs_disk_is_encrypted()) return;
         afs_format();
         return;
@@ -418,6 +445,12 @@ void afs_mount(void) {
         return;
     }
     mounted = 1;
+    if (H.version != AFS_VERSION) {
+        /* Eski (surum 5) disk: icerik ayni, yalniz surum alanini ve taban
+         * kaydini yeni duzene tas. Veri bloklarinin yeri degismez. */
+        H.version = AFS_VERSION;
+        hdr_commit();
+    }
     afs_ensure_tree();
 }
 
@@ -800,7 +833,7 @@ int afs_perm_selftest(void) {
 int afs_fsck(int fix, int *problems, int *fixed) {
     if (!mounted) afs_mount();
     int prob = 0, fixd = 0;
-    uint32_t data_start = AFS_BASE_LBA + H.hdr_sectors;
+    uint32_t data_start = s_base + H.hdr_sectors;
     uint32_t max_end = data_start;
     uint32_t used = 0;
 
@@ -903,7 +936,7 @@ int afs_journal_selftest(void) {
             storage_flush();
             /* Header'i diskten geri yukle: commit ile header yazimi arasinda
              * reset olmus gibi (header eski, gunluk yeni). */
-            hdr_load_at(AFS_BASE_LBA, H.hdr_sectors);
+            hdr_load_at(s_base, H.hdr_sectors);
             journal_replay();   /* yarim kalan commit'i tamamla */
             ok = (find_idx("afs_jrn_replay") >= 0);
         }

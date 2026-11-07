@@ -786,8 +786,18 @@ static void cmd_touch(const char *name) {
     if (!g_asi || !g_asi->fs || !g_asi->fs->create_in) { term_puts("Desteklenmiyor\n"); return; }
     char p[176];
     path_resolve(p, sizeof(p), name);
-    if (g_asi->fs->find_in && g_asi->fs->find_in("C:/", p)) return;
-    void *h = g_asi->fs->create_in("C:/", p, 0);
+    if (g_asi->fs->find && g_asi->fs->find(0, p)) return;
+    /* create_in ad kisminin goreli yol oldugunu bekler; tam yolu ad diye
+     * vermek "C:/C:/..." ile yetim bir kayit uretiyordu (dizin listesinde
+     * hicbir yerde gorunmeyen dosya). Klasor + ad olarak bolup yaz. */
+    int n = slen(p), k = n - 1;
+    while (k > 0 && p[k] != '/') k--;
+    if (k <= 0 || k == n - 1) { term_puts("Gecersiz yol\n"); return; }
+    char dir[176];
+    if (k >= (int)sizeof(dir)) { term_puts("Yol cok uzun\n"); return; }
+    for (int i = 0; i < k; i++) dir[i] = p[i];
+    dir[k] = 0;
+    void *h = g_asi->fs->create_in(dir, p + k + 1, 0);
     if (!h) { term_puts("Olusturulamadi\n"); return; }
     term_puts("Olusturuldu: "); term_puts(p); term_putc('\n');
 }

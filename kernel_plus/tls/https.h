@@ -24,6 +24,13 @@ const char *https_fetch_body(const char *url, uint32_t *len_out);
 /* Son https_fetch_body cagrisinin ulastigi nihai (yonlendirme sonrasi) URL. */
 const char *https_fetch_last_url(void);
 
+/* 0.8.2: Akisli indirme. Govde parcalari geldikce sink'e verilir (0 = devam,
+ * <0 = iptal). Content-Length govdeyi bilmiyorsa baglanti kapanisina kadar
+ * akar; chunked govde reddedilir. Yonlendirme takip eder. Donus: govde bayt
+ * sayisi ya da <0 hata. */
+typedef int (*https_sink_fn)(void *ctx, const uint8_t *data, uint32_t len);
+int https_stream(const char *url, https_sink_fn sink, void *ctx);
+
 /* Son TLS hatasini okunabilir metin olarak yazar (hata ayiklama). */
 void https_last_error(char *buf, int cap);
 

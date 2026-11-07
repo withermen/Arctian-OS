@@ -3,6 +3,43 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
+## 0.8.2 — Çekirdek güncellemesi ve disk yerleşimi düzeltmesi
+
+**Çekirdek güncellemesi (`update kur` → B yuvası)**
+
+- Manifestoda `kind=system` ile anılan sistem dosyaları (örn. `kernel_plus`) B
+  yuvasına akışla indirilir: gövde RAM'den geçmeden disk sektörlerine yazılır,
+  HTTPS tamponunun 320 KB tavanı çekirdek boyutunu artık sınır değildir. Boyut +
+  CRC32 doğrulanır, AMOD başlığı manifestodaki yük/bss/type alanlarıyla yerinde
+  üretilir.
+- Yuva devri en son yapılır: veri → B tablosu (LBA 32768) → durum kaydı. Hangi
+  adımda elektrik kesilirse kesilsin eski çekirdek boot eder. Yeni çekirdek
+  masaüstüne ulaşamazsa iki denemede otomatik olarak eski yuvaya dönülür; bu
+  bekçi artık yükleyicinin erken adımıdır, çekirdek erken çökerse de çalışır.
+  Ayarlar ve uç birim aynı `update kur` yolunu kullanır; kurulumdan sonra
+  yeniden başlatma beklenir.
+- Eski düzen disklerde (AFS 20000'den formatlı) B bölgesi kullanıcı dosyalarına
+  denk gelir; çekirdek güncellemesi o disklerde yazmadan "temiz kurulum gerekir"
+  der.
+- `make_update.py --system kernel_plus=<bin>` alanları manifestsize yazar
+  (layout.json + ELF'ten); `tools/publish_os_update.sh` ile aynı şekilde
+  yayınlanır.
+
+**Disk yerleşimi (kritik düzeltme)**
+
+- AFS 20000'den formatlanıyordu ama modül bölgesi 27836'da bitiyor: yeni
+  kurulan diskte kullanıcı dosyaları diskteki desktop modülünün üstüne
+  yazılabiliyordu. Yeni kurulumlarda AFS 65536'dan formatlanır (başlık sürümü
+  6); eski diskler 20000'den mount edilmeye devam eder, ilk açılışta yalnız
+  sürüm kayıtları yenilenir, veri yerinden kıpırdamaz.
+- Paketleyici bekçisi: modül bölgesi 32768'i aşarsa paketleme hata verir.
+- Kurulum temiz yuva durumu yazar: diske bulaşmış eski `pending=B` kaydı yeni
+  kuruluma miras kalmaz.
+- `slot_switch_pending` her geçişte deneme sayacını 1'e çeker; sayaç
+  biriktiğinde bir sonraki güncelleme hiç denenmeden geri alınıyordu.
+- Uç birimde `touch <yol>` düzeltmesi: tam yol "ad" olarak verildiği için
+  `C:/C:/...` kaydı oluşuyor, dosya hiçbir klasör listesinde görünmüyordu.
+
 ## 0.8 — Yeni arayüz dili, yeni uygulamalar, CC BY lisansı
 
 **Arayüz: tasarım şartnamesi 8 ekrana uygulandı**

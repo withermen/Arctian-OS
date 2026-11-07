@@ -4,7 +4,10 @@
 # üzerinden çeker; her yeni sürüm "latest"i kendisi yapar.
 #
 # Kullanim (repo kokunden):
-#   tools/publish_os_update.sh 0.8.1 "notlar" murekkep=build/wlf/murekkep.wlf ...
+#   tools/publish_os_update.sh 0.8.2 "notlar" murekkep=build/wlf/murekkep.wlf \
+#       --system kernel_plus=build/obj/kernel_plus.bin
+# (--system 0.8.2: cekirdek guncellemesi; dosyalar build/update/ altindan
+#  otomatik yuklenir. --system icin ARCTIAN_OBJ derleme dizini gostermeli.)
 #
 # Token ekrana yazilmaz; git credential helper'dan alinir.
 set -euo pipefail
@@ -27,6 +30,10 @@ H1="Authorization: Bearer $tok"
 H2="Accept: application/vnd.github+json"
 H3="User-Agent: arctian-upd"
 
+# PRERELEASE=1 ile one surum olusturulur (releases/latest one surumleri
+# dahil etmez; cekirdek guncellemesi denemeleri icin kullanisli).
+PRERE="${PRERELEASE:-0}"
+
 # release var mi, yoksa olustur
 rel=$(curl -sf -H "$H1" -H "$H2" -H "$H3" \
       "https://api.github.com/repos/$REPO/releases/tags/$TAG") || rel=""
@@ -35,7 +42,7 @@ if [ -z "$rel" ]; then
       "tag_name": sys.argv[1], "name": "Arctian OS " + sys.argv[1],
       "body": "OS guncellemesi " + sys.argv[1] + ": " + sys.argv[2]
               + ". update.txt imzali manifest; moduller ayni surumde varlik.",
-      "draft": False, "prerelease": False}))' "$TAG" "$NOTES")
+      "draft": False, "prerelease": sys.argv[3] == "1"}))' "$TAG" "$NOTES" "$PRERE")
   rel=$(curl -sf -X POST -H "$H1" -H "$H2" -H "$H3" \
         -H "Content-Type: application/json" -d "$body" \
         "https://api.github.com/repos/$REPO/releases")

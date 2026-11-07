@@ -268,6 +268,15 @@ typedef struct {
      * tamponu bastan dogru boyutta ayirmak icin. Donus 0 = *size_out
      * gecerli; -1 = sunucu boy vermedi ya da desteklenmiyor. ABI sonda. */
     int (*dl_size)(const char *url, uint32_t *size_out);
+
+    /* 0.8.2: cekirdek guncellemesi icin akisli indirme. Govde ara tampona
+     * alinmadan dogrudan lba'dan baslayan disk sektorlerine yazilir; boylece
+     * HTTPS tampon siniri (320K) asilir. *out_size govde boyu, *out_crc govde
+     * CRC32 (IEEE). 0 = basarili; <0 hata (-2 boyut siniri, -5 eski disk
+     * duzeni). Eski duzen disklerde (AFS tabani 20000) B bolgesi kullanici
+     * verine denk geldigi icin yazim reddedilir. ABI icin yapinin sonunda. */
+    int (*download_raw)(const char *url, uint32_t lba,
+                        uint32_t *out_size, uint32_t *out_crc);
 } asi_net_t;
 
 typedef struct {

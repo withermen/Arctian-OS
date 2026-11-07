@@ -337,6 +337,77 @@ static int net_dl_size(const char *url, uint32_t *size_out) {
     return http_head_length(url, size_out);
 }
 
+/* 0.8.2: cekirdek guncellemesi. Govde ara tampona alinmadan dogrudan disk
+ * sektorlerine akilir; boylece HTTPS tamponu (320K) asilir. Yazi bolgesi
+ * SLOTB_MAX_END ile sinirlidir ve eski duzen disklerde (AFS tabani 20000)
+ * B bolgesi kullanici dosyalarina denk geldigi icin islem reddedilir. */
+typedef struct {
+    uint32_t lba;        /* siradaki yazilacak sektor */
+    uint32_t sec;        /* kalan yazilabilir sektor */
+    uint32_t crc;        /* devam eden CRC32 (IEEE, terslenmemis hali) */
+    uint32_t total;
+    uint32_t fill;
+    uint8_t  part[512];
+} rawdl_ctx_t;
+
+static int rawdl_sink(void *vctx, const uint8_t *data, uint32_t len) {
+    rawdl_ctx_t *c = (rawdl_ctx_t *)vctx;
+    uint32_t crc = c->crc;
+    for (uint32_t k = 0; k < len; k++) {
+        crc ^= data[k];
+        for (int b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
+    }
+    c->crc = crc;
+    c->total += len;
+
+    uint32_t i = 0;
+    while (c->fill && i < len) {
+        uint32_t need = 512u - c->fill;
+        uint32_t take = (len - i < need) ? (len - i) : need;
+        for (uint32_t k = 0; k < take; k++) c->part[c->fill + k] = data[i + k];
+        c->fill += take; i += take;
+        if (c->fill == 512u) {
+            if (c->sec == 0) return -1;
+            if (storage_write(c->lba, 1, c->part) != 0) return -2;
+            c->lba++; c->sec--; c->fill = 0;
+        }
+    }
+    while (i + 512u <= len) {
+        if (c->sec == 0) return -1;
+        if (storage_write(c->lba, 1, data + i) != 0) return -2;
+        c->lba++; c->sec--; i += 512u;
+    }
+    while (i < len) c->part[c->fill++] = data[i++];
+    return 0;
+}
+
+static int net_download_raw(const char *url, uint32_t lba,
+                            uint32_t *out_size, uint32_t *out_crc) {
+    if (net_perm()) return -1;
+    if (!url || !url[0] || !out_size || !out_crc) return -1;
+    if (afs_base() == AFS_BASE_LEGACY_LBA) return -5;
+    uint64_t secs = storage_sector_count();
+    if (lba >= SLOTB_MAX_END || (uint64_t)lba + 1u >= secs) return -2;
+    uint32_t room = SLOTB_MAX_END - lba;
+    if ((uint64_t)room > secs - lba) room = (uint32_t)(secs - lba);
+
+    rawdl_ctx_t c;
+    c.lba = lba; c.sec = room; c.crc = 0xFFFFFFFFu;
+    c.total = 0; c.fill = 0;
+    int n = https_stream(url, rawdl_sink, &c);
+    if (n < 0) return -3;
+    if (c.fill) {                          /* son eksik sektor: sifirla ve yaz */
+        for (uint32_t k = c.fill; k < 512u; k++) c.part[k] = 0;
+        if (c.sec == 0) return -2;
+        if (storage_write(c.lba, 1, c.part) != 0) return -3;
+    }
+    storage_flush();
+    *out_size = c.total;
+    *out_crc = ~c.crc;
+    return 0;
+}
+
 /* Arka plan ag gorevleri (fiber) icin ASI sarmallari. */
 static int  net_submit(void (*fn)(void *), asi_net_done_t done, void *user) {
     if (net_perm()) return -1;
@@ -808,6 +879,7 @@ void kernel_plus_main(void *arg) {
     s_net.cookie_set2 = net_cookie_set2;
     s_net.download = net_download;
     s_net.dl_size = net_dl_size;
+    s_net.download_raw = net_download_raw;
     s_net.submit = net_submit;
     s_net.busy = net_busy;
     s_net.service = net_service;

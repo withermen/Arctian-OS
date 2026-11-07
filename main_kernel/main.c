@@ -131,6 +131,15 @@ void kernel_main(void) {
     asi_setup();
     serial_puts("[mk] media ok\n");
 
+    /* A/B: yarim kalan guncelleme denemesi / geri donus (yalniz disk). */
+    {
+        int g = media_boot_attempt();
+        if (g == 2) {
+            serial_puts("[slot] guncel yuva acilamadi, onceki yuvaya donuldu\n");
+            terminal_writestring("Guncel yuva acilamadi; onceki yuvaya donuldu.\n");
+        }
+    }
+
 #ifdef ARCTIAN_SELFTESTS
     if (!afs_disk_is_encrypted()) ring3_file_selftest();
 #endif
