@@ -143,14 +143,15 @@ Kalan: .xlsx salt-okur ayristirma ikinci faz (zip+inflate+XML, common
 kütüphaneye bağlı); coklu sayfa (Sayfa 2) dekoratif.
 
 ### Sahne (sunum) — metin düzenleme + dosya
-Bugün: küçük resme tıkla slayt değişimi çalışıyor; içerik sabit.
-Yapılacak:
-- Başlık/madde metinleri yer tutucu etiketlerden gerçek veriye geçsin;
-  çift tık → satır içi `wolf_input`, yazılan slayt modeline işlensin,
-  küçük resim başlığı tazelenensin.
-- Belge dosyası: tek dosya, basit satır biçimi (`# baslik`, `- madde`);
-  kaydet/aç `fs_write/fs_read` ile. Pptx ikinci faz.
-- "Yeni slayt" ve silme ribondan çalışır hale gelsin.
+**Durum (0.9): tamamlandı; emülatör ve QEMU'da doğrulandı.** Slaytlar
+düzenlenebilir bir modelde tutulur (başlık/altbaşlık/3 madde, en çok 12
+slayt). Metne tıkla → yerinde `wolf_input` (Enter veya başka yere tıkla
+kaydeder); başlık değişince küçük resim tazelenir. Ribondaki Ac/Kaydet
+belge dosyasını (*.sln düz metin: `# başlık` yeni slayt, `> altbaşlık`,
+`- madde`) `fs_read/fs_write` ile okur/yazar; açılışta Şafak'tan gelen yol
+argümanı işlenir. Yeni slayt / Slayti sil / Madde ekle gerçekten çalışır;
+durum satırı ve başlık çubuğu dosya adını gösterir. Kalan: pptx ikici faz;
+tema/vurgu rengi/geçiş şimdilik dekoratif.
 
 ### Mürekkep (belge) — düz metin editörü olarak başla
 Bugün: her şey dekor; tek hareket sekme çizgisi.
