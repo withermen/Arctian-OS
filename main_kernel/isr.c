@@ -114,6 +114,24 @@ void isr_handler(registers_t *regs) {
             serial_puts(" cr2=");
             serial_hex(cr2);
         }
+        /* Kisa kayit dokumu: #GP gibi sessiz cokmelerde hangi isaretcinin
+         * bozuk oldugunu ve cagiran zinciri tek seri satirindan okumak
+         * icin. rsp, az once cozumlenen tuzak cercevesiyle ayni yiginda. */
+        if (int_no != 14) {
+            serial_puts(" rdi=");
+            serial_hex(regs->rdi);
+            serial_puts(" rsp=");
+            serial_hex(regs->rsp);
+            serial_puts(" rbp=");
+            serial_hex(regs->rbp);
+            serial_puts("\n[isr]  stk");
+            for (int si = 0; si < 24; si++) {
+                if (si && (si % 8) == 0) serial_puts("\n[isr]      ");
+                uint64_t w = *(volatile uint64_t *)(regs->rsp + (uint64_t)si * 8);
+                serial_puts(" ");
+                serial_hex(w);
+            }
+        }
         serial_puts("\n");
         // Page Fault: print CR2 (faulting address) and RIP before panic
         if (int_no == 14) {

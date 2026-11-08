@@ -2047,6 +2047,11 @@ static void wf_run(const char *what) {
         return;
     }
 
+    /* 0.9: ui rolu de dosyayla acilabilir; launch.c'deki acilis argumani
+     * aktarimi bu hedefi okuyup wolf_arg()'a tasir. Pointer terminalin
+     * satir tamponunu gosterir: acilis eszamanda tamamlanir ve launch.c
+     * hedefi tuketip temizler, ele eski isaret kalmaz. */
+    if (arg[0]) arctian_open_target = arg;
     wf_launch_id(d->id);
     term_puts("Baslatildi: "); term_puts(d->title); term_putc('\n');
 }

@@ -17,7 +17,7 @@
 /* Oturum basina widget siniri. Ofis uygulamalari (Abakus izgarasi 70 hucre
  * + baslik gozleri) 192'yi astigi icin 0.8'de 256'ya cikarildi; slot 264
  * bayt, oturum basina ~16 KB ek yuk. ID sozlesmesi ayni (1-tabanli indeks). */
-#define WOLF_MAX_WIDGETS 256
+#define WOLF_MAX_WIDGETS 512
 #define WOLF_MAX_TEXT    256
 
 typedef struct {
@@ -111,6 +111,8 @@ typedef struct wolf_sess {
     int       ev_click_n;
     wolf_ev_t ev_change[WOLF_MAX_EV];
     int       ev_change_n;
+    wolf_ev_t ev_enter[WOLF_MAX_EV];
+    int       ev_enter_n;
     wolf_line_t line[WOLF_MAX_LINE];
     wolf_cv_t   cv[WOLF_MAX_CANVAS];
     wolf_timer_t timer[WOLF_MAX_TIMER];
@@ -121,6 +123,16 @@ typedef struct wolf_sess {
     /* v3: boyut degisimi geri cagrisi (cozunurluk değişimine karsi) */
     wolf_event_fn on_resize;
     void         *on_resize_user;
+    /* v4: oturumun kendi klavye grubu. wolf_input nesneleri buraya
+     * katilir; pencere ustteyken keypad bu grubu takip eder (launch.c
+     * entry sonrasi degisen keypad grubunu fgroup'a yazar, main.c
+     * pencere ustte gezindirikce geri getirir). Bos grup bir sey
+     * degistirmez. */
+    lv_group_t *group;
+    /* Acilis argumaninin kopyasi: kuresel s_arg sonraki uygulama
+     * acilisinda asilanir; her oturum kendi kopyasini gorur, boylece
+     * "dosyayla ac" zinciri oturum boyunca okunur kalir. */
+    char        arg[200];
 } wolf_sess_t;
 
 #define WOLF_MAX_SESS 4
@@ -137,6 +149,8 @@ static uint32_t    s_birth_ctr;
 #define s_ev_click_n   s_cur->ev_click_n
 #define s_ev_change    s_cur->ev_change
 #define s_ev_change_n  s_cur->ev_change_n
+#define s_ev_enter     s_cur->ev_enter
+#define s_ev_enter_n   s_cur->ev_enter_n
 #define s_line     s_cur->line
 #define s_cv       s_cur->cv
 #define s_timer    s_cur->timer
@@ -190,6 +204,7 @@ static wolf_slot_t *slot_of(wolf_id id) {
     return s;
 }
 
+
 static wolf_id slot_new(lv_obj_t *obj, int kind) {
     if (!obj || !s_cur) return 0;
     for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
@@ -233,6 +248,19 @@ static void ev_click_cb(lv_event_t *e) {
     for (int i = 0; i < s_ev_click_n; i++) {
         if (s_ev_click[i].wid == wid && s_ev_click[i].cb) {
             s_ev_click[i].cb(wid, s_ev_click[i].user);
+            return;
+        }
+    }
+}
+
+static void ev_enter_cb(lv_event_t *e) {
+    wolf_sess_t *sess = (wolf_sess_t *)lv_event_get_user_data(e);
+    if (!sess || sess->dead) return;
+    s_cur = sess;
+    int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    for (int i = 0; i < s_ev_enter_n; i++) {
+        if (s_ev_enter[i].wid == wid && s_ev_enter[i].cb) {
+            s_ev_enter[i].cb(wid, s_ev_enter[i].user);
             return;
         }
     }
@@ -394,6 +422,14 @@ static wolf_id h_button(wolf_id p, int x, int y, int w, int h, const char *text)
     return id;
 }
 
+/* Girdiye tiklaninca klavye odagina alinir: keypad bu oturumun grubunu
+ * takip eder (asagida baglanir); odakli nesne olmadan tuslar hicbir
+ * yere gitmez. */
+static void input_focus_cb(lv_event_t *e) {
+    lv_obj_t *t = (lv_obj_t *)lv_event_get_target(e);
+    if (t) lv_group_focus_obj(t);
+}
+
 static wolf_id h_input(wolf_id p, int x, int y, int w, int h, const char *ph) {
     lv_obj_t *t = lv_textarea_create(parent_of(p));
     lv_obj_set_pos(t, x, y);
@@ -411,6 +447,16 @@ static wolf_id h_input(wolf_id p, int x, int y, int w, int h, const char *ph) {
     wolf_id id = slot_new(t, 4);
     if (id) lv_obj_set_user_data(t, (void *)(intptr_t)id);
     lv_obj_add_event_cb(t, ev_change_cb, LV_EVENT_VALUE_CHANGED, s_cur);
+    lv_obj_add_event_cb(t, ev_enter_cb, LV_EVENT_READY, s_cur);
+    if (s_cur->group) {
+        lv_group_add_obj(s_cur->group, t);
+        lv_obj_add_event_cb(t, input_focus_cb, LV_EVENT_CLICKED, 0);
+        /* Klavyeyi ilk girdide bu oturuma bagla: launch.c entry sonrasi
+         * degisen keypad grubunu pencerenin fgroup'una yazar, boylece
+         * tuslar pencere ustte kaldikca bu girdileri takip eder. */
+        lv_indev_t *kp = lv_port_get_keypad();
+        if (kp) lv_indev_set_group(kp, s_cur->group);
+    }
     return id;
 }
 
@@ -607,9 +653,36 @@ static void h_set_enabled(wolf_id id, int en) {
     else lv_obj_add_state(s->obj, LV_STATE_DISABLED);
 }
 
+/* Nesne agaci LVGL tarafindan silinirken slot tablosundaki karsilikleri
+ * dolu kalirdi: wolf_clear/destroy sonrasi yeniden uretilen nesneler bos
+ * slot arayip sinira takiliyordu (ofis uygulamalarinda yeniden cizimden
+ * sonrasi kayboluyordu) ve eski slotler serbest nesneyi gosterip sonrasi
+ * yanlis id cozumlerine kap aciyordu. Silme ONECE burada isaretlenir;
+ * LVGL nesneleri sonra gidecek (uzerinden gezinmek icin canli olmalilar). */
+static void slot_free_tree(lv_obj_t *root, int incl_self) {
+    if (!s_cur || !root) return;
+    for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
+        if (!s_cur->slot[i].used || !s_cur->slot[i].obj) continue;
+        int hit = incl_self && s_cur->slot[i].obj == root;
+        for (lv_obj_t *o = lv_obj_get_parent(s_cur->slot[i].obj);
+             !hit && o; o = lv_obj_get_parent(o))
+            if (o == root) hit = 1;
+        if (!hit) continue;
+        s_cur->slot[i].used = 0;
+        s_cur->slot[i].obj = 0;
+        for (int k = 0; k < s_cur->ev_click_n; k++)
+            if (s_cur->ev_click[k].wid == s_cur->idx * WOLF_MAX_WIDGETS + i + 1)
+                s_cur->ev_click[k].cb = 0;
+        for (int k = 0; k < s_cur->ev_change_n; k++)
+            if (s_cur->ev_change[k].wid == s_cur->idx * WOLF_MAX_WIDGETS + i + 1)
+                s_cur->ev_change[k].cb = 0;
+    }
+}
+
 static void h_clear(wolf_id id) {
     wolf_slot_t *s = slot_of(id);
     if (!s) return;
+    slot_free_tree(s->obj, 0);   /* root kalir, cocuklarin slotleri bosanir */
     lv_obj_clean(s->obj);
 }
 
@@ -617,9 +690,8 @@ static void h_destroy(wolf_id id) {
     wolf_slot_t *s = slot_of(id);
     if (!s) return;
     anim_release_obj(s->obj);
+    slot_free_tree(s->obj, 1);
     lv_obj_delete(s->obj);
-    s->used = 0;
-    s->obj = 0;
     for (int i = 0; i < s_ev_click_n; i++)
         if (s_ev_click[i].wid == id) s_ev_click[i].cb = 0;
     for (int i = 0; i < s_ev_change_n; i++)
@@ -646,6 +718,22 @@ static void h_on_click(wolf_id id, wolf_event_fn cb, void *user) {
     }
     s_ev_click[found].cb = cb;
     s_ev_click[found].user = user;
+}
+
+static void h_on_enter(wolf_id id, wolf_event_fn cb, void *user) {
+    if (!slot_of(id) || !cb) return;
+    for (int i = 0; i < s_ev_enter_n; i++) {
+        if (s_ev_enter[i].wid == id) {
+            s_ev_enter[i].cb = cb;
+            s_ev_enter[i].user = user;
+            return;
+        }
+    }
+    if (s_ev_enter_n >= WOLF_MAX_EV) return;
+    s_ev_enter[s_ev_enter_n].wid = id;
+    s_ev_enter[s_ev_enter_n].cb = cb;
+    s_ev_enter[s_ev_enter_n].user = user;
+    s_ev_enter_n++;
 }
 
 static void h_on_change(wolf_id id, wolf_event_fn cb, void *user) {
@@ -745,6 +833,15 @@ static int h_fs_read(const char *path, void *buf, int cap) {
     return (int)s_asi->fs->read_path(path, buf, (uint32_t)cap);
 }
 
+/* Dosya boyutu: okuma tamponunu dogru ayirmak icin (AFS listesi
+ * boyut tasimiyor). Dizin ve olmayan yol -1. */
+static int h_fs_size(const char *path) {
+    if (!path || !s_asi || !s_asi->fs || !s_asi->fs->stat) return -1;
+    asi_stat_t st;
+    if (s_asi->fs->stat(path, &st) != 0 || st.is_dir) return -1;
+    return (int)st.size;
+}
+
 static int h_fs_write(const char *path, const void *buf, int len) {
     if (!s_asi || !s_asi->fs || !s_asi->fs->create_in || !s_asi->fs->write || !path) return -1;
     char dir[200], name[80];
@@ -812,7 +909,7 @@ static void h_dialog(const char *title, const char *msg, const char *ok) {
     arctian_notify(title ? title : "Uygulama", msg ? msg : "");
 }
 
-static const char *h_arg(void) { return s_arg ? s_arg : ""; }
+static const char *h_arg(void) { return (s_cur && s_cur->arg[0]) ? s_cur->arg : ""; }
 
 static int h_exec(const char *cmd, char *out, int cap) {
     if (!cmd) return -1;
@@ -899,6 +996,20 @@ static int h_open_app(const char *name) {
     if (!name) return -1;
     /* Baska bir uygulama acmak da komut sayilir.     */
     if (perm_exec(name)) return -2;
+    return arctian_shell_launch(name);
+}
+
+/* Uygulamayi dosyayla ac: yolu kabugun acilis hedefine birak, kabuk
+ * hedefi hedef uygulamanin acilis argumanina ceviren dalda (launch.c)
+ * tuketir. Yol uygulama tamponundan kalici tampona kopyalanir: acilis
+ * kabuk dongusunun sonraki turunda gerceklesir, o anda uygulamanin
+ * metni coktan gecersiz olmus olabilir. */
+static char s_open_file[200];
+static int h_open_app_file(const char *name, const char *path) {
+    if (!name || !path || !path[0]) return -1;
+    if (perm_exec(name)) return -2;
+    bin_copy(s_open_file, sizeof(s_open_file), path);
+    arctian_open_target = s_open_file;
     return arctian_shell_launch(name);
 }
 
@@ -1125,6 +1236,14 @@ static void h_style(wolf_id id, int prop, int value, int flags) {
                            : value == 4 ? LV_LABEL_LONG_SCROLL_CIRCULAR
                                         : LV_LABEL_LONG_WRAP);
         }
+        break;
+    case WOLF_SP_INPUT_ONE_LINE:
+        if (lv_obj_check_type(o, &lv_textarea_class))
+            lv_textarea_set_one_line(o, value ? true : false);
+        break;
+    case WOLF_SP_INPUT_MAXLEN:
+        if (lv_obj_check_type(o, &lv_textarea_class) && value > 0)
+            lv_textarea_set_max_length(o, (uint32_t)value);
         break;
     default: break;
     }
@@ -1785,6 +1904,10 @@ static wolf_sess_t *sess_acquire(lv_obj_t *body) {
     s->anim_n = 0;
     s->on_resize = 0;
     s->on_resize_user = 0;
+    /* Grup oturumda yasar: nesneler pencereyle yok olur, grup sonraki
+     * oturumda yeniden kullanilir (lv_group ic nesne tutunca kendini
+     * tasir, sizmaz). */
+    if (!s->group) s->group = lv_group_create();
     for (int i = 0; i < WOLF_MAX_WIDGETS; i++) {
         s->slot[i].used = 0;
         s->slot[i].obj = 0;
@@ -1838,6 +1961,7 @@ static void api_fill(void) {
 
     s_api.on_click = h_on_click;
     s_api.on_change = h_on_change;
+    s_api.on_enter = h_on_enter;
 
     s_api.list_add = h_list_add;
     s_api.list_clear = h_list_clear;
@@ -1908,6 +2032,9 @@ static void api_fill(void) {
     s_api.win_close = h_win_close;
     s_api.win_min = h_win_min;
     s_api.on_resize = h_on_resize;
+    /* 0.9: dosya zinciri — uygulamayi dosyayla acma + dosya boyutu. */
+    s_api.open_app_file = h_open_app_file;
+    s_api.fs_size = h_fs_size;
 }
 
 /* v3: pencere boyutu degisti (buyut / cozunurluk degisimi). Kabuk bizi
@@ -1931,6 +2058,11 @@ void wlf_host_reset(lv_obj_t *body) {
     wolf_sess_t *s = sess_acquire(body);
     s_asi = g_asi;
     if (!s_api_ready) { api_fill(); s_api_ready = 1; }
+    /* Acilis argumanini oturuma kopyala: kuresel s_arg siradaki acilista
+     * asilanir, uygulama wolf_arg'i ne zaman okursa okusun kendi yolunu
+     * gorur (wlf.c cli akişi set_arg'i hemen once yapar; launch.c ui
+     * akişi entry'den once yapar — ikisi de buraya taze degerle girer). */
+    bin_copy(s->arg, (int)sizeof(s->arg), s_arg);
     lv_obj_add_event_cb(body, sess_body_del_cb, LV_EVENT_DELETE, s);
     /* v3: kabuk boyut degisimini bize bildirsin (on_resize icin). */
     win_set_relayout(body, host_relayout);

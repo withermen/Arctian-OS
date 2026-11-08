@@ -524,6 +524,7 @@ int winrec_alive(winrec_t *r);    /* 0.7: kayit hala tabloda mi (serbest
 void recover_set_reason(const char *s);
 void recover_prepare(const char *title);
 void recover_begin_call(uint32_t timeout_ms);
+void recover_touch(uint32_t ms);
 void recover_disarm(void);
 void launch_rebuild_reset(void);   /* kabuk yeniden kurulurken yarim kalan
                                     * acilis zamanlayicisini iptal eder */

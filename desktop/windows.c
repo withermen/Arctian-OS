@@ -124,6 +124,53 @@ void win_min_cb(lv_event_t *e) {
 }
 
 
+/* USER_2 isaretli govdeyi bulur (kabuk: launch.c koyar). Baslik cubugu
+ * USER_2 tasimadigi icin bastan aramak yeterlidir. */
+static lv_obj_t *win_body_of(lv_obj_t *win) {
+    int n = lv_obj_get_child_cnt(win);
+    for (int i = 0; i < n; i++) {
+        lv_obj_t *c = lv_obj_get_child(win, i);
+        if (c && lv_obj_has_flag(c, LV_OBJ_FLAG_USER_2)) return c;
+    }
+    return 0;
+}
+
+/* ---- Boyutlanima bildirimi yerlestirim disina tasinir ---------------
+ * LV_EVENT_SIZE_CHANGED, lv_obj_set_size'in icinden — yani LVGL'nin
+ * yerlestirim yiginin ortasinda — firlar. relayout callback'i govdedeki
+ * yuzlerce nesneyi silip yeniden kurabiliyor (ofis uygulamalari); bunu
+ * yerlestirmenin ortasinda kosmak LVGL ic yapilarini bozuyor (0.9'da
+ * Abakus'un #GP ile devrilmesinin kokü budur). Bildirimi tek atimlik
+ * kisa bir zamanlayiciyla yerlestirim sonrasina akiyoruz; ust uste
+ * boyut degisimleri tek kurulumda birlesir. Dosya yoneticisinin kendi
+ * icinde kullandigi kalibin kabuk düzeyinde uygulanmis hali. */
+static lv_timer_t *s_rel_timer;
+static winrec_t   *s_rel_rec;
+static lv_obj_t   *s_rel_win;
+
+static void win_rel_fire(lv_timer_t *t) {
+    (void)t;
+    s_rel_timer = 0;                 /* repeat=1: LVGL zamanlayiciyi siler */
+    winrec_t *r = s_rel_rec;
+    lv_obj_t *win = s_rel_win;
+    s_rel_rec = 0; s_rel_win = 0;
+    /* Pencere bu sirada kapandiysa (veya kayit geri alindiyssa) dokunmayiz. */
+    if (!r || !r->win || r->win != win || !r->relayout) return;
+    lv_obj_t *body = win_body_of(win);
+    r->relayout(body ? body : win);
+}
+
+static void win_rel_defer(winrec_t *r) {
+    s_rel_rec = r;
+    s_rel_win = r->win;
+    if (s_rel_timer) {               /* bekleyen bildirim tazel: tek kurulum */
+        lv_timer_reset(s_rel_timer);
+        return;
+    }
+    s_rel_timer = lv_timer_create(win_rel_fire, 120, 0);
+    lv_timer_set_repeat_count(s_rel_timer, 1);
+}
+
 /* pencere boyutu degince: baslik cubugu genislesin + icerik yeniden aksin.
  * launch.c'nin olusturdugu govde (USER2 isaretli) pencereyle birlikte
  * boyutlandirilir; uygulamalar icerigi govdeye cizdigi icin relayout da
@@ -133,33 +180,18 @@ static void win_size_cb(lv_event_t *e) {
     if (!r || !r->win) return;
     int W = lv_obj_get_width(r->win);
     int H = lv_obj_get_height(r->win);
-    /* tam ekran (USER_3): baslik cubugu yok; govde ekranin tamamini kaplar,
-     * relayout dogrudan govdeyle cagrilir. */
+    /* tam ekran (USER_3): baslik cubugu yok; govde ekranin tamamini kaplar */
     if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) {
-        lv_obj_t *fsb = 0;
-        int fn = lv_obj_get_child_cnt(r->win);
-        for (int i = 0; i < fn; i++) {
-            lv_obj_t *c = lv_obj_get_child(r->win, i);
-            if (c && lv_obj_has_flag(c, LV_OBJ_FLAG_USER_2)) {
-                lv_obj_set_size(c, W, H);
-                fsb = c;
-            }
-        }
-        if (r->relayout) r->relayout(fsb ? fsb : r->win);
+        lv_obj_t *fsb = win_body_of(r->win);
+        if (fsb) lv_obj_set_size(fsb, W, H);
+        if (r->relayout) win_rel_defer(r);
         return;
     }
     lv_obj_t *tb = lv_obj_get_child(r->win, 0);
     if (tb) lv_obj_set_size(tb, W - 2, 36);
-    lv_obj_t *body = 0;
-    int n = lv_obj_get_child_cnt(r->win);
-    for (int i = 1; i < n; i++) {
-        lv_obj_t *c = lv_obj_get_child(r->win, i);
-        if (c && lv_obj_has_flag(c, LV_OBJ_FLAG_USER_2)) {
-            lv_obj_set_size(c, W - 4, H - 42);
-            body = c;
-        }
-    }
-    if (r->relayout) r->relayout(body ? body : r->win);
+    lv_obj_t *body = win_body_of(r->win);
+    if (body) lv_obj_set_size(body, W - 4, H - 42);
+    if (r->relayout) win_rel_defer(r);
 }
 
 

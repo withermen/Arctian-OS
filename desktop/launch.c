@@ -64,6 +64,20 @@ void recover_begin_call(uint32_t timeout_ms) {
         g_asi->system->recover_begin(&g_recover, timeout_ms);
 }
 
+/* Onay penceresi acikken uygulama kullaniciyi bekler; takili degildir.
+ * 5 saniyelik yukselme siniri kullanici kararini beklerken yetismez ve
+ * saglikli uygulama "yanit vermedi" sayilip oldurulurdu. Bekleme dongusu
+ * (consent_pump) her turunda bunu cagirip son tarihi bir tur daha uzatir;
+ * diyalogun kendi guvenlik siniri (CONSENT_ITERS) yine gecerlidir. */
+void recover_touch(uint32_t ms) {
+    if (!g_recover.active) return;
+    uint32_t now = 0;
+    if (g_asi && g_asi->time && g_asi->time->ticks_ms)
+        now = (uint32_t)g_asi->time->ticks_ms();
+    uint32_t d = now + ms;
+    if (d > g_recover.deadline_ms) g_recover.deadline_ms = d;
+}
+
 
 void recover_disarm(void) {
     if (g_asi && g_asi->system && g_asi->system->recover_end)
@@ -290,6 +304,18 @@ void run_app_done(lv_timer_t *t) {
     /* Uygulama entry() icinde kendi klavye grubunu baglarsa kaydet.      */
     lv_indev_t *kp0 = lv_port_get_keypad();
     lv_group_t *g_before = kp0 ? lv_indev_get_group(kp0) : 0;
+    /* 0.9: dosyayla acma zinciri, ui rolu. Uzantisini handles ile ilan
+     * eden bir .wlf oldugunda cift tiklama yolu arctian_open_target'e
+     * birakip uygulamayi baslatiyor; cli/runtime dallari bu hedefi
+     * terminal uzerinden alirken ui pencerelerinde yol uygulamaya hic
+     * ulasmiyordu. Acilis argumanina tasi; uygulama wolf_arg() ile
+     * okur. Hedef tek kullanimliktir: sonraki normal acilis eski
+     * dosyayi devralmasin. */
+    if (c->idx >= arctian_app_count) {
+        const char *tgt = arctian_open_target ? arctian_open_target : "";
+        wlf_host_set_arg(tgt);
+        arctian_open_target = "";
+    }
     if (a->entry) a->entry(body, g_asi);
     perm_dispatch_end();
     if (kp0 && lv_indev_get_group(kp0) != g_before)

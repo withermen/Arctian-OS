@@ -45,6 +45,15 @@ void bin_copy(char *dst, int cap, const char *src);
 int  slen2(const char *s);
 void canvas_buf_free_cb(lv_event_t *e);
 
+/* SVG ikon (OS: dsk_util.c make_icon): svg_render ile tuval. */
+lv_obj_t *make_icon(lv_obj_t *parent, const char *svg, int size);
+
+/* Pencere kapanisi / yeniden yerlestirme (OS: windows.c).
+ * Emulatorde tek pencere var: kapanis cerceyi kapatma istegine,
+ * boyut bildirimi ise (boyunu emu vermedigi icin) kayda gecirilir. */
+void win_close_rec(winrec_t *r);
+void win_set_relayout(lv_obj_t *win, void (*cb)(lv_obj_t *));
+
 /* ---- Sistem servisleri (OS: shell/auth/clipboard) ---- */
 void        arctian_notify(const char *title, const char *msg);
 const char *arctian_auth_current(void);

@@ -250,6 +250,21 @@ typedef struct wolf_api {
      * uygulama tuvali yeniden cizilir (her cozunurlukta kalite icin). */
     void      (*on_resize)(wolf_event_fn cb, void *user);
 
+    /* --- 0.9: dosya zinciri (ofis uygulamalari) --------------------
+     * open_app_file: uygulamayi adla baslatip dosyayi acilis argumani
+     * olarak tasir; hedef uygulama wolf_arg() ile okur. open_app'in
+     * dosyali hali. fs_size: dosyanin byte karsiligi, yoksa -1 —
+     * okuma tamponunu dogru boyutlandirmak icin (AFS'de tarih yok,
+     * boyut var). */
+    int       (*open_app_file)(const char *name_or_title, const char *path);
+    int       (*fs_size)(const char *path);
+
+    /* --- 0.9: giride Enter (LV_EVENT_READY) olayi -------------------
+     * Tablo fx cubugu / formul formlari "Enter'a basınca yaz" ister;
+     * on_change her tusta ciler, Enter'i ayirt edemez. Eski paketler
+     * bu alani görmez (HAS korumasi), ABI kirilmaz. */
+    void      (*on_enter)(wolf_id w, wolf_event_fn cb, void *user);
+
     /* --- ileride: buraya yeni alanlar eklenir --- */
 } wolf_api_t;
 
@@ -331,7 +346,9 @@ enum wolf_style_prop {
     WOLF_SP_FONT_PX       = 51,  /* gomulu arayuz fontu, istenen piksel boyutu
                                   * (orn. 24 = 24px; 6..72 arasi serbest). */
     WOLF_SP_TEXT_ALIGN    = 52,  /* 0 sol 1 orta 2 sag (etiket hizada) */
-    WOLF_SP_TEXT_LONG     = 53   /* 0 sar 1 kirp 2 nokta 3 kaydir 4 don */
+    WOLF_SP_TEXT_LONG     = 53,  /* 0 sar 1 kirp 2 nokta 3 kaydir 4 don */
+    WOLF_SP_INPUT_ONE_LINE = 54, /* girdi: 1 tek satir (varsayilan) 0 cok satir */
+    WOLF_SP_INPUT_MAXLEN   = 55  /* girdi: karakter siniri (varsayilan 200) */
 };
 
 /* ---- Gecis (CSS `transition` karsiligi) ----------------------------
@@ -411,6 +428,8 @@ void wolf_on_click(wolf_id w, wolf_event_fn cb);
 void wolf_on_click_ex(wolf_id w, wolf_event_fn cb, void *user);
 void wolf_on_change(wolf_id w, wolf_event_fn cb);
 void wolf_on_change_ex(wolf_id w, wolf_event_fn cb, void *user);
+void wolf_on_enter(wolf_id w, wolf_event_fn cb);    /* giride Enter */
+void wolf_on_enter_ex(wolf_id w, wolf_event_fn cb, void *user);
 
 /* Liste */
 void wolf_list_add(wolf_id w, const char *item);
@@ -419,7 +438,9 @@ int  wolf_list_count(wolf_id w);
 int  wolf_list_item(wolf_id w, int index, char *out, int cap);
 int  wolf_list_selected(wolf_id w);
 
-/* Dosya sistemi */
+/* Dosya sistemi. Sozlesme: 0 basari, negatif hata (write da bayt sayisi
+ * DEGIL bu degeri dondurur); read okunan bayti, list eleman sayisini
+ * dondurur, 0/hata bos veya yok demektir. */
 int wolf_fs_read(const char *path, void *buf, int cap);
 int wolf_fs_write(const char *path, const void *buf, int len);
 int wolf_fs_list(const char *dir, int index, char *name, int cap, int *is_dir);
@@ -436,7 +457,7 @@ void     wolf_dialog(const char *title, const char *message, const char *ok);
 int      wolf_exec(const char *command, char *out, int cap);
 uint64_t wolf_ticks_ms(void);
 void     wolf_sleep_ms(uint32_t ms);
-int      wolf_now(int *year, int *month, int *day, int *hour, int *min, int *sec);
+int      wolf_now(int *year, int *month, int *day, int *hour, int *min, int *sec); /* 0 basari */
 int      wolf_version(char *out, int cap);
 int      wolf_open_app(const char *name_or_title);
 void     wolf_clip_set(const char *text);
@@ -507,6 +528,10 @@ void    wolf_scroll_to(wolf_id w, int x, int y);
 void    wolf_win_close(void);
 void    wolf_win_min(void);
 void    wolf_on_resize(wolf_event_fn cb, void *user);
+/** Bir uygulamayi dosyayla ac (yol wolf_arg ile gorunur). */
+int     wolf_open_app_file(const char *name_or_title, const char *path);
+/** Dosya boyutu (byte); yoksa -1. */
+int     wolf_fs_size(const char *path);
 /** Tablo v3 alanlarini iceriyor mu? */
 int     wolf_api_v3(void);
 

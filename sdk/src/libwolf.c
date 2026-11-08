@@ -102,6 +102,12 @@ void wolf_on_change(wolf_id w, wolf_event_fn cb) {
 void wolf_on_change_ex(wolf_id w, wolf_event_fn cb, void *user) {
     if (HAS(on_change)) API->on_change(w, cb, user);
 }
+void wolf_on_enter(wolf_id w, wolf_event_fn cb) {
+    if (HAS(on_enter)) API->on_enter(w, cb, 0);
+}
+void wolf_on_enter_ex(wolf_id w, wolf_event_fn cb, void *user) {
+    if (HAS(on_enter)) API->on_enter(w, cb, user);
+}
 
 /* ---------------- Liste ---------------- */
 void wolf_list_add(wolf_id w, const char *item) { if (HAS(list_add)) API->list_add(w, item); }
@@ -288,6 +294,12 @@ void wolf_win_close(void) { if (HAS(win_close)) API->win_close(); }
 void wolf_win_min(void)   { if (HAS(win_min)) API->win_min(); }
 void wolf_on_resize(wolf_event_fn cb, void *user) {
     if (HAS(on_resize)) API->on_resize(cb, user);
+}
+int wolf_open_app_file(const char *n, const char *path) {
+    return HAS(open_app_file) ? API->open_app_file(n, path) : -1;
+}
+int wolf_fs_size(const char *path) {
+    return HAS(fs_size) ? API->fs_size(path) : -1;
 }
 
 /* ==================================================================== */

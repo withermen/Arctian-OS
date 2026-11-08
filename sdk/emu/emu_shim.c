@@ -7,6 +7,7 @@
  */
 #include "emu.h"
 #include "dsk.h"
+#include "svg.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,15 +88,15 @@ static asi_mem_t s_mem = {mem_alloc, mem_free, mem_memset, mem_memcpy, mem_info}
 static uint64_t t_ticks(void) { return plat_ticks_ms(); }
 static void     t_sleep(uint32_t ms) { plat_wait_ms((int)ms); }
 static int      t_now(asi_datetime_t *out) {
-    if (!out) return -1;
+    if (!out) return 0;
     time_t t = emu_det_active() ? emu_det_unix() : time(NULL);
 #ifdef _WIN32
     struct tm tmv;
-    if (localtime_s(&tmv, &t) != 0) return -1;
+    if (localtime_s(&tmv, &t) != 0) return 0;
 #else
     struct tm tmv_s, *tmv_p = localtime_r(&t, &tmv_s);
     struct tm tmv;
-    if (!tmv_p) return -1;
+    if (!tmv_p) return 0;
     tmv = *tmv_p;
 #endif
     out->year = tmv.tm_year + 1900;
@@ -105,7 +106,7 @@ static int      t_now(asi_datetime_t *out) {
     out->minute = tmv.tm_min;
     out->second = tmv.tm_sec;
     out->weekday = tmv.tm_wday;
-    return 0;
+    return 1;   /* OS sozlesmesi: clock_now gibi dogru/salah (1 = basari) */
 }
 static int      t_ntp(uint32_t to) { (void)to; return -1; }
 static uint64_t t_unix(void) { return (uint64_t)(emu_det_active() ? emu_det_unix() : time(NULL)); }
@@ -601,6 +602,37 @@ void update_app_indicators(void) {
     if (s_winrec.title[0]) plat_set_title(s_winrec.title);
 }
 
+/* OS: dsk_util.c — SVG ikon: svg_render ile boyanan tuval; OS'taki ile
+ * ayni akis, boylece ikonlar emu ekraninda da gercek gibi gorunur. */
+lv_obj_t *make_icon(lv_obj_t *parent, const char *svg, int size) {
+    uint32_t *buf = (uint32_t *)g_asi->mem->alloc((size_t)size * (size_t)size * 4u);
+    if (!buf) {
+        lv_obj_t *e = lv_obj_create(parent);
+        lv_obj_remove_style_all(e);
+        return e;
+    }
+    svg_render(svg, size, size, buf);
+    lv_obj_t *c = lv_canvas_create(parent);
+    lv_obj_remove_style_all(c);
+    lv_canvas_set_buffer(c, buf, size, size, LV_COLOR_FORMAT_ARGB8888);
+    lv_obj_add_event_cb(c, canvas_buf_free_cb, LV_EVENT_DELETE, buf);
+    return c;
+}
+
+/* OS: windows.c — pencere kapatma. Emu'da tek pencere var: cerceveyi
+ * kapatma istegi calisma dongusune iletilir (son kare ekrana yazilir). */
+void win_close_rec(winrec_t *r) {
+    (void)r;
+    emu_request_quit();
+}
+
+/* OS: windows.c — boyut degisince uygulamayi yeniden yerlestirme kaydi.
+ * Emu penceresi secilen boyutta sabit dogar; bildirim hic gelmez, kayit
+ * yalnizca sembolu karsilar. */
+void win_set_relayout(lv_obj_t *win, void (*cb)(lv_obj_t *)) {
+    (void)win; (void)cb;
+}
+
 int perm_policy(const char *path, int is_write) {
     (void)path; (void)is_write;
     return 0;               /* emu kumu guvenli: pano/dosya serbest */
@@ -641,11 +673,16 @@ void arctian_notify(const char *title, const char *msg) {
     fflush(stdout);
 }
 
+/* OS: dsk_state.c — dosyayla acma hedefi (cift tiklama zinciri). Emu'da
+ * tek uygulama calisir; host yazarsa ayni deger geri okunur. */
+const char *arctian_open_target = "";
+
 const char *arctian_auth_current(void) { return "emu@arctian"; }
 
 int arctian_shell_launch(const char *q) {
-    printf("[emu] uygulama acma istegi reddedildi: %s\n", q ? q : "");
-    return -1;
+    /* Emu tek uygulama calistirir; acma istegi yalniz kayda gecer. */
+    printf("[emu] uygulama acma istegi: %s\n", q ? q : "");
+    return 0;
 }
 
 static char s_clip[8192];

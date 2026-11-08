@@ -99,6 +99,12 @@ void wolf_on_change(wolf_id w, wolf_event_fn cb) {
 void wolf_on_change_ex(wolf_id w, wolf_event_fn cb, void *user) {
     if (HAS(on_change)) API->on_change(w, cb, user);
 }
+void wolf_on_enter(wolf_id w, wolf_event_fn cb) {
+    if (HAS(on_enter)) API->on_enter(w, cb, 0);
+}
+void wolf_on_enter_ex(wolf_id w, wolf_event_fn cb, void *user) {
+    if (HAS(on_enter)) API->on_enter(w, cb, user);
+}
 
 /* ---------------- Liste ---------------- */
 void wolf_list_add(wolf_id w, const char *item) { if (HAS(list_add)) API->list_add(w, item); }

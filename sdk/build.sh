@@ -65,7 +65,7 @@ fi
 
 CFLAGS="-std=gnu11 -m64 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
  -O2 -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables \
- -mno-red-zone -fno-pie -Wall -Wextra"
+ -mno-red-zone -fno-pie -mstackrealign -Wall -Wextra"
 INC="-I$SDK/include"
 
 echo "[1/4] derleniyor (C, freestanding)..."

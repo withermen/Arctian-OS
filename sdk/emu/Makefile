@@ -53,7 +53,7 @@ LVGL_C := $(shell cd $(ROOT) && find third_party/lvgl/src -name '*.c' \
 
 # ---- OS'tan dogrudan derlenen dosyalar ----
 OS_C := desktop/wlf_host.c desktop/wlf_vm.c desktop/port/lv_port.c \
-        desktop/theme/adl_wolf.c desktop/sig.c lib/png.c
+        desktop/theme/adl_wolf.c desktop/sig.c lib/png.c lib/svg.c
 
 # ---- emulatorin kendi kaynaklari ----
 EMU_C := sdk/emu/emu_main.c sdk/emu/emu_shim.c sdk/emu/emu_pkg.c \

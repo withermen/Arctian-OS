@@ -150,6 +150,9 @@ static int consent_show(int type, const char *src) {
 /* Girisi kendi dongumuzde isleriz (LVGL timer kilitli oldugu icin). */
 static int consent_pump(void) {
     for (int i = 0; i < CONSENT_ITERS && s_answer < 0; i++) {
+        /* Kullanici karari beklenirken yukselme watchdog'u isletilmez:
+         * bekleyen uygulama takili degildir (bkz. launch.c recover_touch). */
+        recover_touch(2000);
         lv_port_tick_advance(16);
 
         lv_indev_t *m = lv_port_get_indev();
