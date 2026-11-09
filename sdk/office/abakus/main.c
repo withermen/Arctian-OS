@@ -1,10 +1,10 @@
 /**
- * Abakus — hucreli tablo (tam ekran, 0.9)
+ * Abakus — hucreli tablo (tam ekran, 0.8.4)
  *
  * Spec bolum 3.3: 36 baslik, 34 sekme, 70 ribon, 30 formul cubugu
  * (ad kutusu + fx), izgara A..G, sayfa sekmeleri, durum satiri.
  *
- * 0.9'da icerik gercek: hucreye tikla, fx cubuguna deger ya da formil
+ * 0.8.4'te icerik gercek: hucreye tikla, fx cubuguna deger ya da formil
  * yaz, Enter (veya Uygula) hucreye yazar; izgara yeniden hesaplanir.
  * Formul ayristirici: dort islem, parantez, hucre adresi, TOPLA/ORT
  * (aralik ve liste). Dongusel gonderim "#CEVRE!" ile durur. Ac/Kaydet
@@ -416,7 +416,7 @@ static const char *base_name(const char *p)
 static void soon(wolf_id w, void *u)
 {
     (void)w; (void)u;
-    wolf_notify("Abaküs", "Bu ozellik v0.9'da yok");
+    wolf_notify("Abaküs", "Bu ozellik simdilik yok");
 }
 
 /* ---- baslik (36): kompakt, kenar dugmeleri metin ---- */

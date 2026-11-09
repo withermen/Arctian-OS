@@ -1,11 +1,11 @@
 /**
- * Safak — ofis baslangic ekrani (tam ekran, 0.9)
+ * Safak — ofis baslangic ekrani (tam ekran, 0.8.4)
  *
  * Spec bolum 3.1: 36 px baslik, 72 px sol ray, karsilama + arama, dort kart,
  * son kullanilanlar tablosu. Olcek 1280x720 referansli; cozunurluk degisince
  * her sey bastan cizilir (wolf_on_resize).
  *
- * 0.9 gerceklik: son kullanilanlar listesi artik sabit degil. Acilan her
+ * 0.8.4 gerceklik: son kullanilanlar listesi artik sabit degil. Acilan her
  * belge kendi listemizde (C:/belgeler/son.txt, yoksa C:/son.txt) tutulur;
  * AFS'de degisim tarihi olmadigi icin satir "zaman|yol" bicimindedir ve
  * zaman kullanim anindaki saatten uretilir. Liste bosken

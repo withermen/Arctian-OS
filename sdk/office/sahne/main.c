@@ -1,9 +1,9 @@
 /**
- * Sahne — sunum uygulamasi (tam ekran, 0.9)
+ * Sahne — sunum uygulamasi (tam ekran, 0.8.4)
  *
  * Spec bolum 3.4 kabuk: 70 px ribon, solda 200 px kucuk resim rayi, ortada
  * koyu tuval uzerinde slayt, sagda 240 px Tasarim paneli, altta durum
- * satiri. 0.9'da icerik gercek: slayt duzenlenebilir modelde durur,
+ * satiri. 0.8.4'te icerik gercek: slayt duzenlenebilir modelde durur,
  * metne tiklama yerinde duzenler (Enter kaydeder), ribon Ac/Kaydet belge
  * dosyasiyla (*.sln: "# baslik", "> altbaslik", "- madde") calisir, yeni
  * slayt / sil / madde ekle gercekten isler. pptx ayristirma ikinci faz;

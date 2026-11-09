@@ -139,7 +139,7 @@ static lv_obj_t *win_body_of(lv_obj_t *win) {
  * LV_EVENT_SIZE_CHANGED, lv_obj_set_size'in icinden — yani LVGL'nin
  * yerlestirim yiginin ortasinda — firlar. relayout callback'i govdedeki
  * yuzlerce nesneyi silip yeniden kurabiliyor (ofis uygulamalari); bunu
- * yerlestirmenin ortasinda kosmak LVGL ic yapilarini bozuyor (0.9'da
+ * yerlestirmenin ortasinda kosmak LVGL ic yapilarini bozuyor (ofis calismasinda
  * Abakus'un #GP ile devrilmesinin kokü budur). Bildirimi tek atimlik
  * kisa bir zamanlayiciyla yerlestirim sonrasina akiyoruz; ust uste
  * boyut degisimleri tek kurulumda birlesir. Dosya yoneticisinin kendi
