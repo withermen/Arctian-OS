@@ -6,6 +6,10 @@ olarak yayınlandı ama hepsi vitrin: içerikler kaynağa gömülü, düğmeler
 dönüştürmek için yapılan etüdün sonucu. Sıra: önce altyapı açıkları (bir
 kerelik, host tarafı), sonra uygulamalar kolaydan zora.
 
+Sürüm disiplini: bu iş 0.8.x serisinde yürür — 0.8.4 Şafak+Abaküs+Sahne,
+0.8.5 Mürekkep, 0.8.6 Mercek (paket sürümleri wolf.json'da). 0.9 / 1.0 gibi
+büyük numaralar ayrı bir lansman konusu; bu çalışma onlara taşınmaz.
+
 ## Altyapı açıkları (host / libWolf / ABI)
 
 Uygulamalar native x86-64 çalışıyor; hız ve bellek sorunu yok. Eksik olan
@@ -52,10 +56,14 @@ taraması bir süre bu yüzden hiç dosya bulamadı). `wolf.h` yorumları günce
    Ek kural: tam ekran ofis penceresi kapanınca klavye grubu geri
    dönmeli (main.c'deki pencere-üstte mantığı bunu zaten yapıyor).
 
-2. **Çok satırlı girdi yok.** `h_input` hep `one_line=true` ve 200 karakter
-   sabit. Stil API'sine iki özellik eklenir (ABI kırılmaz, prop sona
-   eklenir): `WOLF_SP_INPUT_ONE_LINE` (0 = çok satırlı) ve
-   `WOLF_SP_INPUT_MAXLEN`. Mürekkep'in düz metin sayfaları için şart.
+2. **Çok satırlı girdi yok — düzeltildi (0.8.5).** `h_input` hep
+   `one_line=true` ve 200 karakterliydi. Önerilen stil-öneriği yolu yerine
+   ABI sona iki alanla çözüldü: `input_multi` (aynı widget, satır sonu
+   kabul eder, ~3900 karakter, odak kaydırması ve odak çerçevesi kapalı —
+   sayfa boyunda alan kendisi görünüm alanıdır) ve `ta_wrap(before, after)`
+   (secim varsa `before+secim+after` diye sarar, yoksa imlece koyup
+   aralarinda birakir). Mürekkep'in B/I/U/başlık/madde düğmeleri tek
+   çağrıya indi.
 
 3. **Dosyayla açma zinciri UI rollerinde kopuk.** Dosya yöneticisi
    çift tıkla `arctian_shell_open_file()` çağırıyor; uzantıyı `handles`
@@ -93,7 +101,7 @@ yüzeyi büyüsün istemem).
 ## Uygulama uygulama durum ve plan
 
 ### Şafak (başlangıç ekranı) — en kolay, altyapıyı da test eder
-**Durum (0.9): tamamlandı ve QEMU'da doğrulandı.** Liste `C:/Belgeler/son.txt`
+**Durum (0.8.4): tamamlandı ve QEMU'da doğrulandı.** Liste `C:/Belgeler/son.txt`
 (düşüş `C:/son.txt`) dosyasından geliyor, satır `GG.AA SS:MM|yol`; tarama
 Belgeler/Masaustu/Indirilenler klasörlerini tarıyor; satır tiki belgeyi
 turune gore ilgili uygulamayla aciyor (`open_app_file`); arama kutusu gercek
@@ -113,7 +121,7 @@ Yapılacak:
   yapsın.
 
 ### Abaküs (tablo) — formüller gerçek olsun
-**Durum (0.9): tamamlandı; emülatör ve QEMU'da (gerçek OS) doğrulandı.** fx çubuğu artık gerçek
+**Durum (0.8.4): tamamlandı; emülatör ve QEMU'da (gerçek OS) doğrulandı.** fx çubuğu artık gerçek
 `wolf_input`; Enter (veya "Uygula") değeri hücreye yazar, seçim bir alta
 düşer, izgara yeniden hesaplanır. Formül ayrıştırıcı: dört işlem, parantez,
 hücre adresi, `TOPLA`/`ORT` (aralık ve liste); döngüsel başvuru `#CEVRE!`,
@@ -143,7 +151,7 @@ Kalan: .xlsx salt-okur ayristirma ikinci faz (zip+inflate+XML, common
 kütüphaneye bağlı); coklu sayfa (Sayfa 2) dekoratif.
 
 ### Sahne (sunum) — metin düzenleme + dosya
-**Durum (0.9): tamamlandı; emülatör ve QEMU'da doğrulandı.** Slaytlar
+**Durum (0.8.4): tamamlandı; emülatör ve QEMU'da doğrulandı.** Slaytlar
 düzenlenebilir bir modelde tutulur (başlık/altbaşlık/3 madde, en çok 12
 slayt). Metne tıkla → yerinde `wolf_input` (Enter veya başka yere tıkla
 kaydeder); başlık değişince küçük resim tazelenir. Ribondaki Ac/Kaydet
@@ -153,15 +161,16 @@ argümanı işlenir. Yeni slayt / Slayti sil / Madde ekle gerçekten çalışır
 durum satırı ve başlık çubuğu dosya adını gösterir. Kalan: pptx ikici faz;
 tema/vurgu rengi/geçiş şimdilik dekoratif.
 
-### Mürekkep (belge) — düz metin editörü olarak başla
-Bugün: her şey dekor; tek hareket sekme çizgisi.
-Yapılacak:
-- Sayfa alanı çok satırlı `wolf_input` olsun (madde 2): C:/Belgeler'deki
-  .txt/.md dosyalarını açıp kaydedebilsin; kelime/satır sayacı durum
-  çubuğundan gerçek olsun.
-- Biçimlendirme çubuğu (B/I/U, başlık stilleri) markdown imleri
-  metne girsin; kalıcı "zengin metin" modeli ikinci faz.
-- Gerçek docx salt-okur (zip + document.xml'den düz metin) üçüncü faz.
+### Mürekkep (belge) — düz metin editörü
+**Durum (0.8.5): tamamlandı; emülatör ve QEMU'da (gerçek OS) doğrulandı.**
+Sayfa artık gerçek çok
+satırlı alan (`input_multi`): açılışta `C:/belgeler/belge.txt` (veya Şafak'tan
+gelen `.txt/.md` yolu) yüklenir, Pano grubundaki Aç/Kaydet aynı dosyayı
+okur/yazar, kelime/satır sayacı her tuşta tazelenir. B/I/U/S düğmeleri ve
+Başlık 1/Başlık 2/Madde satırbaşı düğmeleri markdown imlerini `ta_wrap` ile
+girer (seçili metin imler arasında korunur). Hizalama ikonları ve sekmeler
+görünüm amaçlıdır, tıklanınca dürüst uyarı verir. Kalan: zengin metin modeli
+ve salt-okur docx (zip + document.xml) sonraki fazlar.
 
 ### Mercek (PDF) — en zor, dürüst sınırla
 Bugün: sayfa çevirme ve zoom tek örnek içerik üzerinde numara değiştiriyor.

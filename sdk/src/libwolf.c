@@ -53,6 +53,9 @@ wolf_id wolf_button(wolf_id p, int x, int y, int w, int h, const char *text) {
 wolf_id wolf_input(wolf_id p, int x, int y, int w, int h, const char *ph) {
     return HAS(input) ? API->input(p, x, y, w, h, ph) : 0;
 }
+wolf_id wolf_input_multi(wolf_id p, int x, int y, int w, int h, const char *ph) {
+    return HAS(input_multi) ? API->input_multi(p, x, y, w, h, ph) : 0;
+}
 wolf_id wolf_listbox(wolf_id p, int x, int y, int w, int h) {
     return HAS(listbox) ? API->listbox(p, x, y, w, h) : 0;
 }
@@ -107,6 +110,9 @@ void wolf_on_enter(wolf_id w, wolf_event_fn cb) {
 }
 void wolf_on_enter_ex(wolf_id w, wolf_event_fn cb, void *user) {
     if (HAS(on_enter)) API->on_enter(w, cb, user);
+}
+void wolf_ta_wrap(wolf_id w, const char *before, const char *after) {
+    if (HAS(ta_wrap)) API->ta_wrap(w, before, after);
 }
 
 /* ---------------- Liste ---------------- */

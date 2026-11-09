@@ -250,7 +250,7 @@ typedef struct wolf_api {
      * uygulama tuvali yeniden cizilir (her cozunurlukta kalite icin). */
     void      (*on_resize)(wolf_event_fn cb, void *user);
 
-    /* --- 0.9: dosya zinciri (ofis uygulamalari) --------------------
+    /* --- 0.8.4: dosya zinciri (ofis uygulamalari) --------------------
      * open_app_file: uygulamayi adla baslatip dosyayi acilis argumani
      * olarak tasir; hedef uygulama wolf_arg() ile okur. open_app'in
      * dosyali hali. fs_size: dosyanin byte karsiligi, yoksa -1 —
@@ -259,11 +259,22 @@ typedef struct wolf_api {
     int       (*open_app_file)(const char *name_or_title, const char *path);
     int       (*fs_size)(const char *path);
 
-    /* --- 0.9: giride Enter (LV_EVENT_READY) olayi -------------------
+    /* --- 0.8.4: giride Enter (LV_EVENT_READY) olayi -------------------
      * Tablo fx cubugu / formul formlari "Enter'a basınca yaz" ister;
      * on_change her tusta ciler, Enter'i ayirt edemez. Eski paketler
      * bu alani görmez (HAS korumasi), ABI kirilmaz. */
     void      (*on_enter)(wolf_id w, wolf_event_fn cb, void *user);
+
+    /* --- 0.8.5: cok satirli alan + bicim sarmalama (Murekkep) ---------
+     * wolf_input tek satir ve 200 karakterle sinirli; belge sayfasi
+     * kaydirilabilir cok satirli alan ister. ayni widget turi (4):
+     * set/get text, on_change, Enter baglantilari onda da calisir.
+     * ta_wrap: secim varsa before+secim+after diye sarar; secim yoksa
+     * imlecin oldugu yere before+after koyar ve imleci aralarinda
+     * birakir (hemen yazmaya baslanir). Markdown imleri B/I/U/baslik
+     * boyle tek cagriya iner. Eski paketler HAS() ile gormez. */
+    wolf_id  (*input_multi)(wolf_id parent, int x, int y, int w, int h, const char *ph);
+    void     (*ta_wrap)(wolf_id w, const char *before, const char *after);
 
     /* --- ileride: buraya yeni alanlar eklenir --- */
 } wolf_api_t;
@@ -403,6 +414,7 @@ wolf_id wolf_panel(wolf_id parent, int x, int y, int w, int h);
 wolf_id wolf_label(wolf_id parent, int x, int y, const char *text);
 wolf_id wolf_button(wolf_id parent, int x, int y, int w, int h, const char *text);
 wolf_id wolf_input(wolf_id parent, int x, int y, int w, int h, const char *placeholder);
+wolf_id wolf_input_multi(wolf_id parent, int x, int y, int w, int h, const char *placeholder);
 wolf_id wolf_listbox(wolf_id parent, int x, int y, int w, int h);
 wolf_id wolf_image(wolf_id parent, int x, int y, int w, int h, const char *path);
 wolf_id wolf_progress(wolf_id parent, int x, int y, int w, int h, int percent);
@@ -430,6 +442,9 @@ void wolf_on_change(wolf_id w, wolf_event_fn cb);
 void wolf_on_change_ex(wolf_id w, wolf_event_fn cb, void *user);
 void wolf_on_enter(wolf_id w, wolf_event_fn cb);    /* giride Enter */
 void wolf_on_enter_ex(wolf_id w, wolf_event_fn cb, void *user);
+
+/* Cok satirli alan + secimi/boslugu markdown imiyle sarmala (0.8.5) */
+void wolf_ta_wrap(wolf_id w, const char *before, const char *after);
 
 /* Liste */
 void wolf_list_add(wolf_id w, const char *item);

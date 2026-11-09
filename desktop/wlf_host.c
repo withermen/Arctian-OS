@@ -460,6 +460,111 @@ static wolf_id h_input(wolf_id p, int x, int y, int w, int h, const char *ph) {
     return id;
 }
 
+/* 0.8.5: cok satirli alan — belge sayfasi (Murekkep). h_input ile ayni
+ * slot turi (4): set/get text, on_change, Enter baglantilari onda da
+ * calisir; farki satir sonunu kabul etmesi, ~3900 karakteri tasimasi ve
+ * kabuk suslemesi tasimamasi (renk/yazi uygulama stilinden gelir). */
+static wolf_id h_input_multi(wolf_id p, int x, int y, int w, int h, const char *ph) {
+    lv_obj_t *t = lv_textarea_create(parent_of(p));
+    lv_obj_set_pos(t, x, y);
+    lv_obj_set_size(t, w, h);
+    lv_textarea_set_one_line(t, false);
+    lv_textarea_set_max_length(t, 3900);
+    if (ph) lv_textarea_set_placeholder_text(t, ph);
+    lv_obj_set_style_radius(t, 0, 0);
+    lv_obj_set_style_bg_opa(t, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(t, 0, 0);
+    lv_obj_set_style_pad_all(t, 0, 0);
+    lv_obj_set_scrollbar_mode(t, LV_SCROLLBAR_MODE_OFF);
+    /* LVGL girdiye odaklaninca gorunur alana kaydirir; sayfa buyuklugundeki
+     * alanda bu, govdeyi kaydirip sayfanin basini ribon altina iter. Alanin
+     * kendisi gorunum alani — kendi kendine kaydirma kapali kalsin.
+     * Ayrica temanin odak cercevesi (mavi kenarlik) sayfa icinde cakici:
+     * odakta da cerceve/cekme çizgisi istemiyoruz. */
+    lv_obj_set_scroll_on_focus(t, false);
+    lv_obj_set_style_border_width(t, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(t, 0, LV_STATE_FOCUSED);
+    wolf_id id = slot_new(t, 4);
+    if (id) lv_obj_set_user_data(t, (void *)(intptr_t)id);
+    lv_obj_add_event_cb(t, ev_change_cb, LV_EVENT_VALUE_CHANGED, s_cur);
+    lv_obj_add_event_cb(t, ev_enter_cb, LV_EVENT_READY, s_cur);
+    if (s_cur->group) {
+        lv_group_add_obj(s_cur->group, t);
+        lv_obj_add_event_cb(t, input_focus_cb, LV_EVENT_CLICKED, 0);
+        lv_indev_t *kp = lv_port_get_keypad();
+        if (kp) lv_indev_set_group(kp, s_cur->group);
+    }
+    return id;
+}
+
+/* UTF-8 sayimi: yardimci baytlar (0x80..0xBF) karakter degildir. LVGL
+ * secirsinu bayt, imleci karakter numarasiyla tasir; iki kapi burada
+ * birbirine cevrir. */
+static int utf_chars(const char *s, int nb) {
+    int n = 0;
+    for (int i = 0; i < nb && s[i]; i++)
+        if (((unsigned char)s[i] & 0xC0) != 0x80) n++;
+    return n;
+}
+static int utf_bytes(const char *s, int nc) {
+    int i = 0, n = 0;
+    while (s[i] && n < nc) {
+        int lead = (((unsigned char)s[i] & 0xC0) != 0x80);
+        i++;
+        if (lead) n++;
+    }
+    return i;
+}
+
+/* 0.8.5: secimi/boslugu imle sarmala. Secim varsa icerik KAYBOLMAZ:
+ * before+secim+after yeniden yazilir. Secim yoksa imlecin oldugu yere
+ * before+after konur ve imlec ikisinin arasina park edilir — kullanci
+ * hemen yazmaya baslar. Metin tarayici (kind 4) disinda ses cikmaz. */
+static void h_ta_wrap(wolf_id id, const char *before, const char *after) {
+    wolf_slot_t *s = slot_of(id);
+    if (!s || s->kind != 4 || !before || !after) return;
+    lv_obj_t *ta = s->obj;
+    const char *txt = lv_textarea_get_text(ta);
+    int L = slen2(txt);
+    int bl = slen2(before), al = slen2(after);
+
+    /* secim araligi govdedeki etiketin bayt numaralarinda gelir */
+    int a = -1, b = -1;
+    if (lv_textarea_text_is_selected(ta)) {
+        lv_obj_t *lb = lv_obj_get_child(ta, 0);
+        if (lb) {
+            uint32_t sa = lv_label_get_text_selection_start(lb);
+            uint32_t sb = lv_label_get_text_selection_end(lb);
+            if (sa != LV_DRAW_LABEL_NO_TXT_SEL) { a = (int)sa; if (a > L) a = L; }
+            if (sb != LV_DRAW_LABEL_NO_TXT_SEL) { b = (int)sb; if (b > L) b = L; }
+            if (a >= 0 && b < 0) b = a;
+            if (b >= 0 && a < 0) a = b;
+            if (a > b) { int t = a; a = b; b = t; }
+        }
+    }
+    int sel = (a >= 0 && b > a);
+    int cut = sel ? a : utf_bytes(txt, (int)lv_textarea_get_cursor_pos(ta));
+    int end = sel ? b : cut;
+    if (cut > L) cut = L;
+    if (end > L) end = L;
+
+    static char tmp[4100];
+    int n = 0, cap = (int)sizeof(tmp);
+#define WRAP_PUTC(c) do { if (n < cap - 1) tmp[n++] = (char)(c); } while (0)
+    for (int i = 0; i < cut; i++) WRAP_PUTC(txt[i]);
+    for (int i = 0; i < bl; i++) WRAP_PUTC(before[i]);
+    if (sel) for (int i = a; i < b; i++) WRAP_PUTC(txt[i]);
+    for (int i = 0; i < al; i++) WRAP_PUTC(after[i]);
+    for (int i = end; i < L; i++) WRAP_PUTC(txt[i]);
+    tmp[n] = 0;
+#undef WRAP_PUTC
+    if (n >= cap - 1) return;   /* sigmadi: metne dokunmayi birak */
+    lv_textarea_set_text(ta, tmp);
+    /* imlec: secim sarmalandiysa sonuna, boslukta imler arasina */
+    int cbytes = cut + bl + (sel ? (b - a) + al : 0);
+    lv_textarea_set_cursor_pos(ta, utf_chars(tmp, cbytes));
+}
+
 /* Liste: LVGL'in deprecated lv_list'i yerine kendi dikey akisimiz.
  * Satirlar tiklanabilir; secim indeksi slot metninde tutulur. */
 static wolf_id h_listbox(wolf_id p, int x, int y, int w, int h) {
@@ -2032,9 +2137,11 @@ static void api_fill(void) {
     s_api.win_close = h_win_close;
     s_api.win_min = h_win_min;
     s_api.on_resize = h_on_resize;
-    /* 0.9: dosya zinciri — uygulamayi dosyayla acma + dosya boyutu. */
+    /* 0.8.4: dosya zinciri — uygulamayi dosyayla acma + dosya boyutu. */
     s_api.open_app_file = h_open_app_file;
     s_api.fs_size = h_fs_size;
+    s_api.input_multi = h_input_multi;
+    s_api.ta_wrap = h_ta_wrap;
 }
 
 /* v3: pencere boyutu degisti (buyut / cozunurluk degisimi). Kabuk bizi
