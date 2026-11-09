@@ -173,16 +173,20 @@ görünüm amaçlıdır, tıklanınca dürüst uyarı verir. Kalan: zengin metin
 ve salt-okur docx (zip + document.xml) sonraki fazlar.
 
 ### Mercek (PDF) — en zor, dürüst sınırla
-Bugün: sayfa çevirme ve zoom tek örnek içerik üzerinde numara değiştiriyor.
-Yapılacak (gerçekçi sıra):
-- PNG görüntüleri gerçekten açsın (`wolf_image` diskten okuyup çözüyor;
-  çok sayfalı PDF yerine önce gerçek görüntü).
-- Basit PDF alt kümesi: PDF sözdizimi ayraçlarıyla sayfa sayısı +
-  FlateDecode içerik akışından BT/Tj konumlandırmalı metin çıkarımı;
-  sayfayı beyaz panel + konumlu etiketler olarak çiz. Yazı tişi
-  sınırlı, ama kendi ürettiğimiz PDF'ler ve sade metin PDF'leri açılır.
-- Karmaşık PDF'lerde "bu belge desteklenmiyor" uyarısı — sessiz boş
-  sayfadan iyidir. Gerçek render motoru bu planın dışında.
+**Durum (0.8.6): tamamlandı; emülatör ve QEMU'da (gerçek OS) doğrulandı.**
+Dosya artık diskten okunur. PNG `wolf_image` ile gerçekten açılır ve
+kaydırılabilir tuvalde çizilir. PDF için sade alt küme kuruldu: sayfa
+sayacı `/Type /Page` ayraç taramasıyla, MediaBox sayfa sözlüğünden
+okunur; içerik akışı `/Contents` nesne gönderimi ya da satır-arası
+gömülü olabilir, FlateDecode ise uygulama içindeki tiny-inflate (sabit +
+dinamik Huffman) ile çözülür. BT/Td/TD/Tm/Tf/Tj/TJ ve re+boya işleyicisi
+metni ve dikdörtgenleri konumuyla beyaz sayfaya çizer; zoom içeriği de
+ölçer. Şifreli PDF ve görsel-ağırlıklı belgeler "desteklenmiyor" uyarısı
+görür; sayfa boşsa "içerik yok" yazılır — sessiz boş sayfa yok. Argüman
+yoksa C:/belgeler, C:/resimler, C:/masaustu klasörlerini listeleyen gerçek
+açma penceresi gelir. Sağ panel uydurma yorumlar yerine belge bilgisini
+(tür, boyut, sayfa, MediaBox, sınırlar) gösterir. Gerçek render motoru
+hâlâ plan dışıdır.
 
 ## Sıra
 
