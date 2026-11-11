@@ -62,7 +62,10 @@
 #define PCI_DEV_IWL_AX201_B      0xA0F0
 #define PCI_DEV_IWL_AX201_C      0x02F0
 #define PCI_DEV_IWL_AX210        0x2725
-#define PCI_DEV_IWL_AX211        0x51F0
+/* 0x51F0 So ailesi. Bu makinedeki kart subsys 0x0074: AX201 160 MHz.
+ * Ayni PCI kimligi baska alt sistemlerde AX211 olarak da gecer; surucu
+ * alt sistem ve RF kimligine bakar. */
+#define PCI_DEV_IWL_AX201_SO     0x51F0
 #define PCI_DEV_IWL_AX411        0x7AF0
 
 /* ---- Realtek Wi-Fi ---- */

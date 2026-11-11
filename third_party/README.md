@@ -10,6 +10,7 @@ girmeyen test/örnek/belge klasörleri ve üst seviye araçlar çıkarılmışt�
 | [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) | 3.6.2 (LTS) | Apache-2.0 (`mbedtls/LICENSE`) | ~8 MB | HTTPS / TLS (`kernel_plus`) |
 | [QuickJS](https://bellard.org/quickjs/) | 2025-09-13 | MIT (`quickjs/LICENSE`) | ~2,3 MB | Wolf Engine tarayıcısının JS motoru |
 | [Lexbor](https://github.com/lexbor/lexbor) | 3.1.0 | Apache-2.0 (`lexbor/LICENSE`) | ~41 MB | Lexbor tarayıcısı (HTML/CSS/selector) |
+| [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git) | `iwlwifi-so-a0-hr-b0-86` | Intel ikili lisans (`firmware/LICENCE.iwlwifi_firmware`) | ~1,4 MB | AX201/AX2xx Wi-Fi sürücüsü (`kernel_plus`) |
 
 Her kütüphanenin kendi lisans metni alt klasöründe durur; dağıtım sırasında bu dosyalar
 korunmalıdır (Apache-2.0 madde 4(c)).
@@ -77,6 +78,21 @@ Tarayıcı uygulamasının (`desktop/apps/lexbor`) parser katmanı. İki parça 
 - `lex_posix_stub.c` — `calloc` gibi POSIX bağımlılıklarını Arctian ayırıcısına bağlayan köprü.
 - `source/` ağacı başlıklar için `-Ithird_party/lexbor/source` ile yola eklenir.
 - `LICENSE` Apache-2.0 metnidir.
+
+## `firmware/` — Intel Wi-Fi mikro kodu
+
+`iwlwifi-so-a0-hr-b0-86.ucode` — linux-firmware deposundan alınmış, Intel'in ikili
+lisansıyla dağıtılan AX201 (So / HR) mikro kodu (1.507.388 bayt, TLV sihirli sayısı
+`0x0a4c5749`, API 86). Dosyaya dokunulmadı.
+
+`kernel_plus/drivers/iwl_fw.S` bunu `.incbin` ile çekirdeğe gömer, böylece kurulum
+medyasında ayrı bir dosya taşımak gerekmez. Çalışma anında `C:/firmware/` altında aynı
+adlı (veya sürüm eki olmayan) bir dosya varsa sürücü onu tercih eder; bu, farklı bir
+mikro kod sürümü denemek için yeterlidir.
+
+Bu ikili biçim değiştirilemez: lisans tersine mühendisliği yasaklar, ayrıca mikro kod
+yalnızca kendi imzasıyla yüklenir. Sürücü tarafında yapılan her şey `iwl_ax201.c`
+içindedir.
 
 ## Güncelleme yaparken
 

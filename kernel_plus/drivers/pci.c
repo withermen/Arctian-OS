@@ -332,7 +332,7 @@ void pci_scan_network_controllers(void) {
                           device == PCI_DEV_IWL_AX201_B ||
                           device == PCI_DEV_IWL_AX201_C ||
                           device == PCI_DEV_IWL_AX210 ||
-                          device == PCI_DEV_IWL_AX211 ||
+                          device == PCI_DEV_IWL_AX201_SO ||
                           device == PCI_DEV_IWL_AX411)) ||
                         (vendor == PCI_VENDOR_REALTEK &&
                          (device == PCI_DEV_RTL8188EE ||
