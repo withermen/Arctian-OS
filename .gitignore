@@ -28,6 +28,7 @@ store/public/
 # Ekran goruntusu ve test ciktilari
 *.ppm
 shots/
+emu-data/
 
 # Yerel tasarim referansi — hicbir zaman depoya girmez
 tasarim.md

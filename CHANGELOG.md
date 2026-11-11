@@ -3,6 +3,38 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
+## 0.9 — Açılış animasyonu ve AX201 ürün yazılımı
+
+**Açılış animasyonu**
+
+- Metin logu ve yaylı yükleme ekranı kaldırıldı. Çekirdek yüklenmeye başladığında
+  1280×720 "Arctian OS" sahnesi geliyor: 288 parçalı arka plan, logo, başlık ve altta
+  ilerleme çubuğu. Çizim tamamen C tarafında, çekirdeğin kendi arka tampon
+  rasterleştiricisiyle yapılıyor; LVGL veya tarayıcı yok.
+- İlerleme çubuğu gerçek init adımlarına bağlı: her adım ağırlığı kadar ilerletiyor,
+  uydurma zamanlayıcı yok. En az gösterim süresi dolduktan sonra sahne sönüyor ve
+  masaüstüne geçiliyor.
+- Animasyon ayrı bir görevde ~16 ms kareyle dönüyor; ana init iş parçacığı yalnızca
+  ilerleme bildiriyor. Tam ekran kopyalama 64 bitlik depolara çevrildi, TCG altında
+  kare süresi ~340 ms'den ~45 ms'ye indi.
+- Parça geometrisi, renkleri ve zamanlamaları derleme anında üretiliyor
+  (`tools/bootanim_gen.py` → `kernel_plus/system/bootanim_data.c`); çekirdekte
+  kayan nokta yok.
+
+**İlk açılış**
+
+- "Hadi seni tanıyalım!" 5 slaytlık özelleştirme sihirbazı kaldırıldı; kod, Makefile
+  girdileri, `dsk.h` bildirimleri ve tasarım varlıkları birlikte gitti. Disk kurulum
+  sihirbazı ve hoş geldin turu yerinde duruyor.
+
+**Intel AX201**
+
+- Sürücü ürün yazılımını gerçek gen3 akışıyla yüklüyor: TLV ayrıştırma, DMA'ya
+  yerleştirme, ALIVE el sıkışması (durum yalnızca RX halkasındaki `0xCAFE`
+  işaretinden okunuyor), FH/UMAC yapılandırması.
+- Tarama ve bağlantı adımları henüz iskelet; ALIVE dışında sahte bir hazır durumu
+  bildirilmiyor. Gerçek donanımda doğrulanmayı bekliyor.
+
 ## 0.8.2 — Çekirdek güncellemesi ve disk yerleşimi düzeltmesi
 
 **Çekirdek güncellemesi (`update kur` → B yuvası)**

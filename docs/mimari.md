@@ -53,7 +53,7 @@ LBA 2048    : superblock  (sihir "ARCT", sürüm 1)
 LBA 2049    : modul tablosu
 LBA 2050    : durum sektoru (kapanis/açilis kurulumu için)
 LBA 4096..  : modul imajlari  (512B AMOD başlığı + binary, 512B'ye yastalanmış)
-LBA 20000.. : AFS (kullanıcı diski C:/)
+LBA 65536.. : AFS (kullanıcı diski C:/; eski 0.8.2 öncesi diskler 20000'den mount edilir)
 ```
 
 ### ISO (`build/arctian.iso`)
@@ -75,12 +75,11 @@ tarafından sıfırlanır; `entry_off` adrese eklenip atılır.
 |---|---|
 | `boot/` | NASM ile yazılmış üç aşama: disk/ISO okuma, A20, uzun mod, sayfama, VESA modu seçimi, VBE info bloğu |
 | `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve VMM, modül yükleyici, syscall, ring3 iskeleti (`ring3.c` — henüz tam izolasyon sağlamaz) |
-| `install/` | Kurulum sihirbazı: bölümleme, AFS biçimlendirme, modül kopyalama, önyükleme kaydı; kalıp/görseller `design/setup/` HTML'inden üretilir |
-| `kernel_plus/` | Sürücüler (`drivers/`), ağ yığını (`net/`), zamanlayıcı/işlem/iplik/senkronizasyon, yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS |
+| `install/` | Kurulum sihirbazı: bölümleme, AFS biçimlendirme, modül kopyalama, önyükleme kaydı |
+| `kernel_plus/` | Sürücüler (`drivers/`), ağ yığını (`net/`), zamanlayıcı/işlem/iplik/senkronizasyon, yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS, açılış animasyonu (`system/bootanim.c`) |
 | `desktop/` | LVGL ile masaüstü kabuğu (dock, pencereler, paneller), gömülü uygulamalar, `.wlf` yükleyici/VM, tarayıcı motorları (Wolf Engine + QuickJS, Lexbor), tema (ADL-Wolf), kurulum sonrası ekranlar |
 | `lib/` | AFS, FAT32, ISO9660, blok katmanı (AHCI/ATA/NVMe), ses/medya kodekleri, PNG/SVG, malloc, `printf`, seri port/klog |
 | `include/arctian/` | Kamu başlıkları: `asi.h`, `app.h`, `wlf.h`, `amod.h`, `dpk.h`, `update.h`, `sig.h`, `slot.h`, `memory_map.h`, ... |
-
 | `third_party/` | Vendored kütüphaneler: LVGL (arayüz), mbedTLS (TLS), QuickJS (Wolf Engine JS), Lexbor (HTML/CSS). bkz. `third_party/README.md` |
 
 Uygulamalar `lib/` ve çekirdek sembollerini **bağlanma zamanında** değil, paket yüklenirken
@@ -174,7 +173,8 @@ sonra süreç başına adres alanı.
 `kernel_plus/net/` sıfırdan yazılmış bir yığındır: ARP, IPv4, TCP, UDP, DHCP, DNS, NTP,
 HTTP/HTTPS (mbedTLS ile TLS), artı uygulama seviyesi güvenlik duvarı. Sürücüler: e1000,
 PCnet, RTL8139, RTL8169, Atheros ath9k (uçtan uca: EEPROM/reset/halka/kanal/tarama/
-auth-assoc/WPA2/CCMP), Intel AX201 (iskelet). WPA2 katmanı `kernel_plus/drivers/wpa2.c`.
+auth-assoc/WPA2/CCMP), Intel AX201 (gen3 ürün yazılımı yükleme; tarama/bağlantı
+iskelet). WPA2 katmanı `kernel_plus/drivers/wpa2.c`.
 
 ## 10. Masaüstü kabuğu
 
@@ -200,4 +200,4 @@ make pack DEBUG=1 EXTRA_CFLAGS=-DARCTIAN_07_TEST
 
 Seri porta satır satır `OK`/`HATA` yazarlar (`desktop/t06test.c`, `desktop/t07test.c`,
 `desktop/selftest.c`). Ayrıca `make debug` kurulum/hesap ekranlarını atlayan geliştirme
-imajını, `make setuptest` kurulum özelleştirme ekranını doğrudan açan imajı üretir.
+imajını üretir.

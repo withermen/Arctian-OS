@@ -4,9 +4,7 @@ x86_64 için sıfırdan yazılmış, modüler bir masaüstü işletim sistemi. K
 kendi çekirdeği, kendi dosya sistemi (AFS), kendi TCP/IP yığını ve LVGL tabanlı bir masaüstü
 kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 
-ÖNEMLİ NOT: OS in en başındaki özelleştirme ekranını yaparken şahsen çok özenmedim ve muhtemelen kaldıracağım çünkü göze slayt gösterisi gibi geliyor, lütfen şimdilik oraya takılmayın.
-
-**Sürüm: 0.8** — tek kaynak [`version.json`](version.json).
+**Sürüm: 0.9** — tek kaynak [`version.json`](version.json).
 
 ![Arctian masaüstü](docs/img/masaustu.png)
 
@@ -16,13 +14,13 @@ kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 
 | Alan | Durum |
 |---|---|
-| Önyükleme | MBR (USB/CD) + El Torito ISO, VESA/Bochs VBE ile çerçeve tamponu, 64-bit uzun mod |
+| Önyükleme | MBR (USB/CD) + El Torito ISO, VESA/Bochs VBE ile çerçeve tamponu, 64-bit uzun mod; çekirdek yüklenirken gerçek ilerlemeye bağlı açılış animasyonu |
 | Modüller | `boot` → `main_kernel` → `install` → `kernel_plus` → `desktop`; her biri sabit adresli bağımsız `.bin` |
-| Masaüstü | Dock, başlat menüsü, gerçek arama, pencereler (taşıma/yakınlaştırma/boyut hatırlama), sanal masaüstleri, hızlı ayarlar + OSD, bildirim merkezi, gece modu, kurulum sihirbazı, çoklu hesap, kilit ekranı |
+| Masaüstü | Dock, başlat menüsü, gerçek arama, pencereler (taşıma/yakınlaştırma/boyut hatırlama), sanal masaüstleri, hızlı ayarlar + OSD, bildirim merkezi, gece modu, çoklu hesap, kilit ekranı |
 | Uygulamalar | Terminal, Dosya Yöneticisi, Tarayıcı (iki motor: Wolf Engine ve Lexbor), DuckStore, Ayarlar, Medya Oynatıcı, Görev Yöneticisi, Sistem Araçları, Çöp Kovası, Asistan (gömülü); Ofis paketi (Şafak, Mürekkep, Abaküs, Sahne, Mercek) ve `.wlf` olarak kurulan üçüncü parti uygulamalar |
 | Dosya sistemi | AFS v4 (`C:/`), FAT32, ISO9660, USB MSD; fsck benzeri bütünlük denetimi, AES-XTS disk şifreleme |
 | Ağ | ARP/IPv4/TCP/UDP + DHCP, DNS, HTTP/HTTPS (mbedTLS), NTP, uygulama seviyesi güvenlik duvarı |
-| Sürücüler | e1000, PCnet, RTL8139, RTL8169, Atheros ath9k, Intel AX201 (iskelet), USB UHCI/EHCI/XHCI + HID + MSD, AHCI/ATA/ATAPI/NVMe, AC'97 ses, PS/2 klavye-fare, CMOS RTC, ACPI (Güç Kapat / uyku durumları), VESA |
+| Sürücüler | e1000, PCnet, RTL8139, RTL8169, Atheros ath9k, Intel AX201 (gen3 ürün yazılımı yükleme; tarama/bağlantı iskelet), USB UHCI/EHCI/XHCI + HID + MSD, AHCI/ATA/ATAPI/NVMe, AC'97 ses, PS/2 klavye-fare, CMOS RTC, ACPI (Güç Kapat / uyku durumları), VESA |
 | Uygulama modeli | **Her uygulama bir `.wlf`'tir** (gömülü çekirdek uygulamalar hariç); roller: `ui`, `cli`, `runtime`; dosya uzantısı eşlemesi ("birlikte aç") |
 | Güvenlik | Yetenek maskesi + dosya kapısı + komut kapısı + kullanıcı onay penceresi + karar deposu; RSA-2048/SHA-256 paket ve manifesto imzası |
 | Güncelleme | İmzalı sürüm manifestosu, kapanışta/açılışta kurulum, A/B sistem yuvası ve geri dönüş |
@@ -90,7 +88,7 @@ include/       kamu başlıkları (asi.h, app.h, wlf.h, memory_map.h, ...)
 sdk/           libWolf SDK, wf CLI, örnek uygulamalar
 store/         DuckStore sunucusu (feed + web market) ve dağıtım dosyaları
 tools/         paketleme, imzalama, font/duvar kağıdı üretimi, QEMU yardımcıları
-design/        arayüz şartnamesi ve görseller (kurulum ekranı HTML'i derleme girdisidir)
+design/        arayüz şartnamesi, duvar kağıdı, logo ve açılış animasyonu görselleri
 third_party/   LVGL, mbedTLS, QuickJS, Lexbor (vendored — bkz. third_party/README.md)
 docs/          mimari, derleme, uygulama geliştirme
 ```
@@ -112,7 +110,9 @@ docs/          mimari, derleme, uygulama geliştirme
   tablosu) izolasyon henüz yok. Hedeflenen tasarım mimari belgesinde açıkça yazılı.
 - Tek çekirdekli çalışır; zamanlayıcı tik'iyle işleyen küçük bir planlayıcı vardır (en
   fazla 8 görev).
-- Intel AX201 sürücüsü donanım testi bekliyor; ath9k (AR928x) uçtan uca çalışıyor.
+- Intel AX201 sürücüsü ürün yazılımını gerçek gen3 akışıyla yüklüyor; tarama ve
+  bağlantı adımları henüz iskelet ve gerçek donanımda doğrulanmadı. ath9k (AR928x)
+  uçtan uca çalışıyor.
 - Windows üzerinde yerel `.wlf` derlemesi yok (ELF bağlayıcısı gerekiyor); Linux/WSL
   tarafında `wf` ile derlenir.
 - Depodaki imza anahtarı `tools/keys/dev_rsa2048.txt` bir **geliştirme** anahtarıdır;

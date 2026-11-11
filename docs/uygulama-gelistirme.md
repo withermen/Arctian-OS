@@ -5,7 +5,7 @@ isteyen biri için tek kaynak referanstır. Dosya sistemi, medya (ses), ağ,
 grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
 **tüm genel API'leri** ve çalışan **kod örneklerini** içerir.
 
-- Sürüm: **Arctian 0.7** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
+- Sürüm: **Arctian 0.9** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
 - Arayüz kiti: **LVGL v9.6** + ASI (Arctian System Interface, sürüm `2`)
 - Mimari: x86_64 (AMD64), 64-bit; uygulamalar `asi_t *asi` köprüsü üzerinden sisteme
   erişir. Uygulamalar kabukla aynı adres alanında çalışır — izinler bir *politika*
@@ -1690,5 +1690,5 @@ Yalnızca tarayıcı uygulamasını ilgilendirir.
 
 ---
 
-*Bu belge Arctian 0.7 API yüzeyini (`include/arctian/*.h`, `desktop/*`, LVGL v9.6)
+*Bu belge Arctian 0.9 API yüzeyini (`include/arctian/*.h`, `desktop/*`, LVGL v9.6)
 esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*

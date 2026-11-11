@@ -42,7 +42,6 @@ make            # tüm modüller + imaj + ISO  (varsayılan hedef: all -> pack)
 make qemu-iso   # ISO'dan önyükleme (CD-ROM)
 make qemu       # disk imajından önyükleme
 make debug      # kurulum + hesap ekranlarını atlayan geliştirme imajı (arctian-debug.iso)
-make setuptest  # kurulum özelleştirme ekranını doğrudan açan imaj
 make clean      # build/ silinir
 ```
 
@@ -62,7 +61,6 @@ aynı anda bozulmadan durur, karışık nesnelerden imaj üretilmez.
 | Değişken | Etkisi |
 |---|---|
 | `DEBUG=1` | açılış logları + otomatik kullanıcı (kurulum/hesap ekranları atlanır) |
-| `SETUP_TEST=1` | kurulum özelleştirme ekranı doğrudan açılır |
 | `T06_TEST=1` | 0.6 öz-testleri imaja girer |
 | `T07_TEST=1` | 0.7 öz-testleri imaja girer |
 | `EXTRA_CFLAGS=...` | ek derleme bayrakları |
