@@ -27,11 +27,6 @@ ifeq ($(NET_TEST),1)
 override EXTRA_CFLAGS += -DARCTIAN_NET_SELFTEST   # acilista DNS/TCP/TLS sinari
 endif
 
-SETUP_TEST ?= 0
-ifeq ($(SETUP_TEST),1)
-override EXTRA_CFLAGS += -DARCTIAN_SETUP_TEST
-endif
-
 T06_TEST ?= 0
 ifeq ($(T06_TEST),1)
 override EXTRA_CFLAGS += -DARCTIAN_06_TEST
@@ -110,7 +105,8 @@ KP_C = kernel_plus/init.c main_kernel/idt.c main_kernel/isr.c main_kernel/paging
        $(wildcard kernel_plus/tls/*.c) \
        $(wildcard kernel_plus/system/*.c)
 
-KP_ASM = kernel_plus/system/switch.S
+KP_ASM = kernel_plus/system/switch.S kernel_plus/drivers/iwl_fw.S \
+         kernel_plus/system/bootanim_art.S
 
 # --- mbedTLS (TLS 1.3, Apache-2.0) ---
 MBEDTLS_DIR  = third_party/mbedtls
@@ -118,7 +114,7 @@ MBEDTLS_SRCS = $(wildcard $(MBEDTLS_DIR)/library/*.c)
 MBEDTLS_OBJS = $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILD)/mbedtls/%.o,$(MBEDTLS_SRCS))
 MBEDTLS_LIB  = $(BUILD)/mbedtls/libmbedtls.a
 
-DESKTOP_C = desktop/main.c desktop/welcome.c desktop/dsk_state.c desktop/dsk_util.c desktop/windows.c desktop/launch.c desktop/startmenu.c desktop/network_panel.c desktop/power.c desktop/clock.c desktop/taskbar.c desktop/quickctl.c desktop/desktop_icons.c desktop/wallpaper.c desktop/dynapps.c desktop/settings.c desktop/shell_api.c desktop/store.c desktop/editor.c desktop/net_api.c desktop/selftest.c desktop/t06test.c desktop/t07test.c desktop/tour.c desktop/wlf.c desktop/wlf_host.c desktop/wlf_vm.c desktop/wlf_pack.c desktop/wolfc.c desktop/setup_wizard.c desktop/assistant.c desktop/perm.c desktop/consent.c desktop/sig.c desktop/slot.c desktop/port/lv_port.c desktop/theme/adl_wolf.c desktop/auth.c desktop/lock.c desktop/update.c lib/crt.c lib/png.c lib/svg.c
+DESKTOP_C = desktop/main.c desktop/welcome.c desktop/dsk_state.c desktop/dsk_util.c desktop/windows.c desktop/launch.c desktop/startmenu.c desktop/network_panel.c desktop/power.c desktop/clock.c desktop/taskbar.c desktop/quickctl.c desktop/desktop_icons.c desktop/wallpaper.c desktop/dynapps.c desktop/settings.c desktop/shell_api.c desktop/store.c desktop/editor.c desktop/net_api.c desktop/selftest.c desktop/t06test.c desktop/t07test.c desktop/tour.c desktop/wlf.c desktop/wlf_host.c desktop/wlf_vm.c desktop/wlf_pack.c desktop/wolfc.c desktop/assistant.c desktop/perm.c desktop/consent.c desktop/sig.c desktop/slot.c desktop/port/lv_port.c desktop/theme/adl_wolf.c desktop/auth.c desktop/lock.c desktop/update.c lib/crt.c lib/png.c lib/svg.c
 FONT_TTF  = design/font/Inter.ttf
 FONT_ARIMO_TTF = design/font/ArimoBold.ttf
 FONT_ARIMO_OBJ = $(BUILD)/desktop/assets/font_arimo.o
@@ -138,10 +134,6 @@ WALL_PNG  = design/wallpaper/back.png
 WALL_OBJ  = $(BUILD)/desktop/assets/wallpaper_data.o
 LOGO_PNG  = design/logo/logo.png
 LOGO_OBJ  = $(BUILD)/desktop/assets/logo_data.o
-SETUP_HTML = design/setup/Kurulum_Ozellestirme.html
-SETUP_DATA_C = $(BUILD)/desktop/assets/setup_data.c
-SETUP_DATA_OBJ = $(BUILD)/desktop/assets/setup_data.o
-SVGRENDER = $(BUILD)/tools/svgrender
 
 # Kullanici uygulamalari (desktop/apps/*)
 APP_DIRS    = $(notdir $(wildcard desktop/apps/*))
@@ -174,7 +166,7 @@ LVGL_C = $(shell find third_party/lvgl/src -name '*.c' \
 MAIN_OBJS    = $(patsubst %.c,$(BUILD)/%.o,$(MAIN_C)) $(patsubst %.asm,$(BUILD)/%.o,$(MAIN_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
 INSTALL_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(INSTALL_C))
 KP_OBJS      = $(patsubst %.c,$(BUILD)/%.o,$(KP_C)) $(patsubst %.S,$(BUILD)/%.o,$(KP_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
-DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(SETUP_DATA_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
+DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
 
 .PHONY: all boot main_kernel install kernel_plus desktop pack qemu qemu-iso clean store-packs FORCE
 
@@ -206,11 +198,6 @@ debug:
 	cp -f build/arctian.iso build/arctian-debug.iso
 	@echo "DEBUG ISO: build/arctian-debug.iso (kurulum + hesap olusturma atlandi)"
 
-setuptest:
-	rm -f $(BUILD)/desktop/main.o $(BUILD)/desktop/lock.o $(BUILD)/install/installer.o $(BUILD)/kernel_plus/init.o
-	$(MAKE) pack DEBUG=1 SETUP_TEST=1
-	@echo "SETUP TEST: kurulum ozellestirme ekrani dogrudan acilir"
-
 $(BUILD)/boot/stage1.bin: boot/stage1.asm
 	@mkdir -p $(dir $@)
 	$(NASM) -f bin -o $@ $<
@@ -234,6 +221,10 @@ $(BUILD)/%.o: %.asm
 $(BUILD)/%.o: %.S
 	@mkdir -p $(dir $@)
 	$(CC) $(COMMON) -c -o $@ $<
+
+$(BUILD)/kernel_plus/drivers/iwl_fw.o: third_party/firmware/iwlwifi-so-a0-hr-b0-86.ucode
+
+$(BUILD)/kernel_plus/system/bootanim_art.o: design/bootanim/logo.argb design/bootanim/title.argb
 
 $(ISR_STUB_OBJ): main_kernel/isr.asm
 	@mkdir -p $(dir $@)
@@ -350,18 +341,6 @@ $(BUILD)/desktop/assets/logo_data.c: $(LOGO_PNG) tools/bin2c.py
 	python3 tools/bin2c.py $(LOGO_PNG) $@ logo_png
 
 $(LOGO_OBJ): $(BUILD)/desktop/assets/logo_data.c
-	@mkdir -p $(dir $@)
-	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
-
-$(SVGRENDER): tools/svgrender.c lib/svg.c lib/svg.h
-	@mkdir -p $(dir $@)
-	gcc -O2 -Ilib -o $@ tools/svgrender.c lib/svg.c -lm
-
-$(SETUP_DATA_C): $(SETUP_HTML) tools/gen_setup_svg.py tools/gen_setup_png.py $(SVGRENDER)
-	@mkdir -p $(dir $@)
-	python3 tools/gen_setup_png.py $(SETUP_HTML) $(SVGRENDER) $@
-
-$(SETUP_DATA_OBJ): $(SETUP_DATA_C)
 	@mkdir -p $(dir $@)
 	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
 

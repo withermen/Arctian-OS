@@ -18,6 +18,7 @@
 #include "syscall.h"
 #include "vesa.h"
 #include "backbuffer.h"
+#include "bootanim.h"
 #include "mouse.h"
 #include "keyboard.h"
 #include "usb.h"
@@ -521,67 +522,10 @@ static int in_key_pop(void) {
     return -1;
 }
 
-/* ---- Yükleme ekrani: Loader with Arc ---- */
-static const int s_dx[8] = { 26, 18, 0, -18, -26, -18, 0, 18 };
-static const int s_dy[8] = { 0, 18, 26, 18, 0, -18, -26, -18 };
-
-static void draw_arc_loader(int cx, int cy, int frame) {
-    /* Arka plan */
-    backbuffer_clear(0x0E0B12);
-
-    /* Baslik */
-    backbuffer_draw_string_smooth(cx - 40, 110, "Arctian", 0xF5F5F7);
-    backbuffer_draw_string_smooth(cx - 92, 132, "Beyaz Kurt yukleniyor...", 0x9AA0A6);
-
-    /* Dots ring */
-    for (int i = 0; i < 8; i++) {
-        int active = ((frame + i) % 8) < 8;
-        int lead = (frame / 3) % 8;
-        uint32_t col;
-        int d = (i - lead + 8) % 8;
-        if (d == 0)      col = 0xFFFFFF;
-        else if (d == 1) col = 0xC9CCD6;
-        else if (d == 2) col = 0x8A8F98;
-        else             col = 0x2A2D34;
-        int px = cx + s_dx[i];
-        int py = cy + s_dy[i];
-        backbuffer_fill_rect(px - 3, py - 3, 6, 6, col);
-        (void)active;
-    }
-
-    /* Arc halkasi (basit daire) */
-    for (int a = 0; a < 360; a += 4) {
-        int idx = (a / 45) % 8;
-        int px = cx + (s_dx[idx] * 62) / 26;
-        int py = cy + (s_dy[idx] * 62) / 26;
-        backbuffer_put_pixel(px, py, 0x2A2D34);
-    }
-
-    backbuffer_draw_string_smooth(cx - 70, cy + 90, "Suruculer yukleniyor...", 0x9AA0A6);
-    backbuffer_blit();
-}
-
-/* Ekran logu (takilma yerini gormek icin) */
-static char g_log[14][40];
-static int  g_logn = 0;
-
-static void draw_log(void) {
-    backbuffer_clear(0x0E0B12);
-    backbuffer_draw_string_smooth(60, 40, "Arctian", 0xF5F5F7);
-    backbuffer_draw_string_smooth(60, 60, "64-bit Isletim Sistemi", 0x9AA0A6);
-    for (int i = 0; i < g_logn; i++)
-        backbuffer_draw_string_smooth(60, 100 + i * 16, g_log[i], 0x7DD3FC);
-    backbuffer_blit();
-}
+/* Ekran cizimi tamamen acilis animasyonuna aittir (bootanim.c).
+ * Buradaki yardimcilar yalnizca seri hatta yazar; ekranda metin/log yok. */
 static void LOG(const char *s) {
-    if (g_logn < 14) {
-        int i = 0;
-        for (; s[i] && i < 39; i++) g_log[g_logn][i] = s[i];
-        g_log[g_logn][i] = 0;
-        g_logn++;
-    }
     serial_puts(s);
-    draw_log();
 }
 
 /* LOG ile sayisal deger gosterir (teshis icin). */
@@ -733,20 +677,32 @@ void kernel_plus_main(void *arg) {
     if (gui) backbuffer_clear(0x0E0B12);
     serial_puts(gui ? "[kp] backbuffer ok\n" : "[kp] no gui\n");
 
+    /* Acilis animasyonu: ekranin tek sahibi. Cekirdek + VESA hazir (50). */
+    if (gui) {
+        bootanim_start();
+        bootanim_advance(50);
+    }
+
     /* Suruculer */
     LOG("[kp] pci...");
     pci_init();
+    if (gui) bootanim_advance(45);
     LOG("[kp] acpi...");
     acpi_init();
+    if (gui) bootanim_advance(30);
     LOG("[kp] mouse...");
     mouse_init();
+    if (gui) bootanim_advance(15);
     LOG("[kp] keyboard...");
     keyboard_init();
+    if (gui) bootanim_advance(15);
     LOG("[kp] usb...");
     usb_init();
     blockdev_set_scan_hook(usb_msd_scan);
+    if (gui) bootanim_advance(85);
     LOG("[kp] ses...");
     if (audio_init() != 0) serial_puts("[kp] AC97 yok (ses kapali)\n");
+    if (gui) bootanim_advance(25);
     LOG("[kp] net...");
     extern void iwl_ax201_register(void);
     extern void wifi_generic_register(void);
@@ -763,7 +719,9 @@ void kernel_plus_main(void *arg) {
     firewall_init();
     dns_init();
     net_task_init();
+    if (gui) bootanim_advance(75);
     ipv4_config_dhcp();   /* IP yapilandirmasi (gercek DHCP, olmazsa slirp) */
+    if (gui) bootanim_advance(100);
     ipv4_frag_selftest(); /* parca birlestirme/parcalama sinavi (madde 70) */
 #ifdef ARCTIAN_NET_SELFTEST
     net_selftest();
@@ -801,14 +759,18 @@ void kernel_plus_main(void *arg) {
 #endif
     LOG("[kp] disk...");
     disk_init();
+    if (gui) bootanim_advance(45);
     LOG("[kp] services...");
     system_services_init();
+    if (gui) bootanim_advance(20);
     LOG("[kp] media...");
     if (media_init() != 0) kernel_panic("kernel_plus: boot medyasi yok");
     LOG("[kp] media ok");
     blockdev_cache_enable(1);
+    if (gui) bootanim_advance(45);
     LOG("[kp] disk sifreleme...");
     diskcrypt_init();
+    if (gui) bootanim_advance(20);
 #ifdef ARCTIAN_BLK_SELFTEST
     io_bench();
 #endif
@@ -978,6 +940,7 @@ void kernel_plus_main(void *arg) {
     caps_init(g_asi);
     g_asi->fs = volfs_install(afs_asi());
     caps_fs_guard_install(&g_asi->fs);
+    if (gui) bootanim_advance(80);
     klog_set_sink(klog_file_sink, 0);
     klog_write(KLOG_INFO, "fs", "AFS hazir");
 #ifdef ARCTIAN_SPOOL_SELFTEST
@@ -1039,6 +1002,7 @@ void kernel_plus_main(void *arg) {
 #endif
     }
     lab_selftest();
+    if (gui) bootanim_advance(80);
 
     /* Desktop'u yukle */
     LOG("[kp] desktop find");
@@ -1058,15 +1022,13 @@ void kernel_plus_main(void *arg) {
         }
     }
     LOG("[kp] desktop ok");
+    if (gui) bootanim_advance(200);
 
-    /* Loader with Arc - en az 2 saniye */
+    /* Acilis tamam: cubugu doldur, sahneyi karart ve masaustune gec.
+     * Cubuk gercek isi gosterir; buradan sonra yalnizca kararma var. */
     if (gui) {
-        int cx = backbuffer_width() / 2;
-        int cy = backbuffer_height() / 2 - 40;
-        for (int f = 0; f < 240; f++) {
-            draw_arc_loader(cx, cy, f);
-            for (volatile int w = 0; w < 90000; w++) asm volatile("nop");
-        }
+        bootanim_advance(70);
+        bootanim_finish(4300);
     }
 
     terminal_writestring("kernel_plus: desktop baslatiliyor...\n");
