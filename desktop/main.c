@@ -423,13 +423,9 @@ void desktop_main(void *arg) {
     /* Kapatilabilir karsilama penceresi */
 #ifdef ARCTIAN_DEBUG_BOOT
     /* debug build: karsilama + tur atlanir */
-#ifdef ARCTIAN_SETUP_TEST
-    setup_wizard_show();
-#endif
 #else
     build_welcome_window();
     if (kv_get_int("setup_done", 0) && !kv_get_int("tour_done", 0)) tour_show();
-    if (!kv_get_int("setup_done", 0)) setup_wizard_show();
 #endif
 
     for (;;) {
