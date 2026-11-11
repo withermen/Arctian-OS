@@ -86,12 +86,11 @@ INCLUDES = -Iinclude/arctian -Imain_kernel -Ikernel_plus/drivers -Ikernel_plus/n
 
 LIB_SRCS = lib/util.c lib/console.c lib/printf.c lib/alloc.c lib/storage.c \
            lib/serial.c lib/sbio.c lib/atapi.c lib/iso9660.c lib/media.c lib/fs.c lib/mmio.c \
-           lib/blockdev.c lib/blk_ata.c lib/blk_ahci.c lib/blk_nvme.c lib/afs.c lib/fat32.c lib/klog.c
+           lib/blockdev.c lib/blk_ata.c lib/blk_ahci.c lib/blk_nvme.c lib/afs.c lib/fat32.c lib/klog.c \
+           lib/netdev.c lib/diag.c lib/ec.c
 
-MAIN_C   = main_kernel/main.c main_kernel/loader.c main_kernel/idt.c \
-           main_kernel/isr.c main_kernel/paging.c main_kernel/gdt.c \
-           main_kernel/syscall.c main_kernel/ring3.c main_kernel/pic.c $(LIB_SRCS)
-MAIN_ASM = main_kernel/entry.asm main_kernel/ring3_user.asm
+MAIN_C   = $(wildcard main_kernel/*.c) $(LIB_SRCS)
+MAIN_ASM = $(filter-out main_kernel/isr.asm,$(wildcard main_kernel/*.asm))
 ISR_STUB_OBJ = $(BUILD)/main_kernel/isr_stubs.o
 RECOVER_OBJ  = $(BUILD)/lib/recover.o
 
@@ -105,8 +104,7 @@ KP_C = kernel_plus/init.c main_kernel/idt.c main_kernel/isr.c main_kernel/paging
        $(wildcard kernel_plus/tls/*.c) \
        $(wildcard kernel_plus/system/*.c)
 
-KP_ASM = kernel_plus/system/switch.S kernel_plus/drivers/iwl_fw.S \
-         kernel_plus/system/bootanim_art.S
+KP_ASM = $(sort $(wildcard kernel_plus/system/*.S) kernel_plus/drivers/iwl_fw.S)
 
 # --- mbedTLS (TLS 1.3, Apache-2.0) ---
 MBEDTLS_DIR  = third_party/mbedtls
@@ -114,7 +112,7 @@ MBEDTLS_SRCS = $(wildcard $(MBEDTLS_DIR)/library/*.c)
 MBEDTLS_OBJS = $(patsubst $(MBEDTLS_DIR)/library/%.c,$(BUILD)/mbedtls/%.o,$(MBEDTLS_SRCS))
 MBEDTLS_LIB  = $(BUILD)/mbedtls/libmbedtls.a
 
-DESKTOP_C = desktop/main.c desktop/welcome.c desktop/dsk_state.c desktop/dsk_util.c desktop/windows.c desktop/launch.c desktop/startmenu.c desktop/network_panel.c desktop/power.c desktop/clock.c desktop/taskbar.c desktop/quickctl.c desktop/desktop_icons.c desktop/wallpaper.c desktop/dynapps.c desktop/settings.c desktop/shell_api.c desktop/store.c desktop/editor.c desktop/net_api.c desktop/selftest.c desktop/t06test.c desktop/t07test.c desktop/tour.c desktop/wlf.c desktop/wlf_host.c desktop/wlf_vm.c desktop/wlf_pack.c desktop/wolfc.c desktop/assistant.c desktop/perm.c desktop/consent.c desktop/sig.c desktop/slot.c desktop/port/lv_port.c desktop/theme/adl_wolf.c desktop/auth.c desktop/lock.c desktop/update.c lib/crt.c lib/png.c lib/svg.c
+DESKTOP_C = $(wildcard desktop/*.c) desktop/port/lv_port.c desktop/theme/adl_wolf.c lib/crt.c lib/png.c lib/svg.c
 FONT_TTF  = design/font/Inter.ttf
 FONT_ARIMO_TTF = design/font/ArimoBold.ttf
 FONT_ARIMO_OBJ = $(BUILD)/desktop/assets/font_arimo.o
@@ -168,7 +166,8 @@ INSTALL_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(INSTALL_C))
 KP_OBJS      = $(patsubst %.c,$(BUILD)/%.o,$(KP_C)) $(patsubst %.S,$(BUILD)/%.o,$(KP_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
 DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
 
-.PHONY: all boot main_kernel install kernel_plus desktop pack qemu qemu-iso clean store-packs FORCE
+.PHONY: all boot main_kernel install kernel_plus desktop pack qemu qemu-iso clean store-packs FORCE \
+        efi test-uefi test-net test-isolation test-smp
 
 all: pack
 
@@ -398,6 +397,54 @@ qemu: pack
 
 qemu-iso: pack
 	$(QEMU) -cdrom build/arctian.iso -boot d -m 512M -vga std -serial stdio -no-reboot
+
+# --- UEFI onyukleyici (0.9, S1) -------------------------------------------
+# boot/uefi/*.c + *.asm -> PE/COFF. UEFI firmware'i Microsoft x64 ABI'sini
+# kullanir; bu yuzden -mabi=ms zorunlu. -fshort-wchar: CHAR16 = 16 bit.
+UEFI_DIR   = boot/uefi
+UEFI_SRCS  = $(wildcard $(UEFI_DIR)/*.c)
+UEFI_ASMS  = $(wildcard $(UEFI_DIR)/*.asm)
+UEFI_OBJS  = $(patsubst $(UEFI_DIR)/%.c,$(BUILD)/uefi/%.o,$(UEFI_SRCS)) \
+             $(patsubst $(UEFI_DIR)/%.asm,$(BUILD)/uefi/%.o,$(UEFI_ASMS))
+UEFI_EFI   = build/uefi/BOOTX64.EFI
+UEFI_CFLAGS = $(COMMON) -mabi=ms -fshort-wchar -I$(UEFI_DIR) -Iinclude/arctian
+
+$(BUILD)/uefi/%.o: $(UEFI_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(UEFI_CFLAGS) -c -o $@ $<
+
+$(BUILD)/uefi/%.o: $(UEFI_DIR)/%.asm
+	@mkdir -p $(dir $@)
+	$(NASM) -f win64 -o $@ $<
+
+efi: $(UEFI_EFI)
+
+$(UEFI_EFI): $(UEFI_OBJS) $(UEFI_DIR)/linker.ld
+	@if [ -z "$(strip $(UEFI_OBJS))" ]; then \
+	    echo "HATA: $(UEFI_DIR)/*.c bulunamadi (S1 hatti henuz dosya eklemedi)"; \
+	    exit 1; \
+	fi
+	@mkdir -p $(dir $@)
+	$(LD) -m i386pep -nostdlib -T $(UEFI_DIR)/linker.ld -o $@ $(UEFI_OBJS)
+
+# --- test hedefleri -------------------------------------------------------
+# Her hat kendi betigini yazar; Makefile yalnizca cagirir. Boylece test
+# betikleri cakismaz ve Makefile ortak dosyasi kilitlenmez.
+test-uefi: efi
+	@test -f tests/uefi/run.sh || { echo "HATA: tests/uefi/run.sh yok (S1)"; exit 1; }
+	sh tests/uefi/run.sh
+
+test-net:
+	@test -f tests/net/run.sh || { echo "HATA: tests/net/run.sh yok (S4)"; exit 1; }
+	sh tests/net/run.sh
+
+test-isolation:
+	@test -f tests/wlf_isolation/run.sh || { echo "HATA: tests/wlf_isolation/run.sh yok (S5)"; exit 1; }
+	sh tests/wlf_isolation/run.sh
+
+test-smp:
+	@test -f tests/smp/run.sh || { echo "HATA: tests/smp/run.sh yok (S6)"; exit 1; }
+	sh tests/smp/run.sh
 
 clean:
 	rm -rf build
