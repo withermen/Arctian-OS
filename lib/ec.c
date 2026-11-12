@@ -284,6 +284,47 @@ bool ec_ac_online(bool *on) {
     return false;
 }
 
+bool ec_thermal_c(int *celsius) {
+    if (!celsius) return false;
+    int li = ec_layout_pick();
+    if (li < 0) return false;
+    const ec_layout_t *l = &s_layouts[li];
+    if (!l->thermal_off) return false;
+
+    uint8_t v = 0;
+    if (ec_read_byte(l->thermal_off, &v) != 0) return false;
+
+    int c;
+    if (l->thermal_kelvin) {
+        if (v < 220) return false;  /* uint8: ust sinir 255 K */
+        c = (int)v - 273;
+    } else {
+        c = (int)v + l->thermal_offset;
+    }
+    if (c < -20 || c > 150) return false;
+    *celsius = c;
+    return true;
+}
+
+bool ec_lid_closed(bool *closed) {
+    if (!closed) return false;
+    int li = ec_layout_pick();
+    if (li < 0) return false;
+    const ec_layout_t *l = &s_layouts[li];
+    if (!l->lid_off) return false;
+
+    uint8_t v = 0;
+    if (ec_read_byte(l->lid_off, &v) != 0) return false;
+    uint8_t mask = (uint8_t)(1u << l->lid_bit);
+    if (v & (uint8_t)~mask) return false;
+
+    bool bit = ((v & mask) != 0);
+    /* Polarite varsayimi: bazi makinelerde ters olabilir, bu yuzden
+     * lid_closed_high alani yerlesimde tutulur. */
+    *closed = l->lid_closed_high ? bit : !bit;
+    return true;
+}
+
 bool ec_battery_present(void) {
     int pct = 0;
     return ec_battery_percent(&pct);

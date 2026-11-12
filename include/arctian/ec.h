@@ -51,6 +51,13 @@ bool ec_battery_percent(int *pct);
 /* AC adaptor takili mi. Basarili: true ve *on yazilir; bilinmiyorsa false. */
 bool ec_ac_online(bool *on);
 
+/* EC termal alani, santigrat. Basarili: true ve *celsius yazilir;
+ * alan yok veya aralik disi: false. */
+bool ec_thermal_c(int *celsius);
+
+/* Kapak kapali mi. Basarili: true ve *closed yazilir; bilinmiyorsa false. */
+bool ec_lid_closed(bool *closed);
+
 /* Pil takili mi (gecerli yuzde okunabiliyorsa true). */
 bool ec_battery_present(void);
 
