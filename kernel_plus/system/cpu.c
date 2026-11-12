@@ -102,7 +102,15 @@ static const uint8_t *find_madt(void) {
     return sdt_find(sdt, "APIC");
 }
 
-/* MADT: type 0 LAPIC (etkin = flags bit 0), type 9 x2APIC varligi. */
+/* Ayni APIC ID'yi iki kez yazma (type 0 ve type 9 cakisabilir). */
+static void add_apic_id(uint32_t id) {
+    for (uint32_t i = 0; i < s_cpu.apic_count; i++)
+        if (s_cpu.apic_ids[i] == id) return;
+    if (s_cpu.apic_count < CPU_MAX_APICS)
+        s_cpu.apic_ids[s_cpu.apic_count++] = id;
+}
+
+/* MADT: type 0 LAPIC ve type 9 x2APIC (ikisinde de etkin = flags bit 0). */
 static void scan_madt(const uint8_t *madt) {
     uint32_t len = rd32(madt + 4);
     if (len < 44 || len > (16u << 20)) return;
@@ -113,13 +121,13 @@ static void scan_madt(const uint8_t *madt) {
         if (elen < 2 || off + elen > len) break;
         if (type == 0 && elen >= 8) {
             uint32_t flags = rd32(madt + off + 4);
-            if (flags & 1u) {
-                uint32_t id = madt[off + 3];
-                if (s_cpu.apic_count < CPU_MAX_APICS)
-                    s_cpu.apic_ids[s_cpu.apic_count++] = id;
-            }
+            if (flags & 1u) add_apic_id(madt[off + 3]);
         } else if (type == 9) {
             s_cpu.x2apic = true;
+            if (elen >= 12) {
+                uint32_t flags = rd32(madt + off + 8);
+                if (flags & 1u) add_apic_id(rd32(madt + off + 4));
+            }
         }
         off += elen;
     }
