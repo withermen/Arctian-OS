@@ -3,6 +3,44 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
+## 0.9 (devam ediyor) — UEFI iskeleti, DPI ölçekleme ve SMP
+
+Bu bölüm 0.9 dalgasında tamamlanan altyapıyı toplar; sürüm yayınlanana kadar
+maddeler değişebilir. Test kapsamı için [docs/0.9-durum.md](docs/0.9-durum.md).
+
+**UEFI ve grafik**
+
+- UEFI önyükleyici iskeleti (`boot/uefi/`): PE/COFF `x86_64` girişi, kendi
+  `entry.asm`/`linker.ld` düzeni ve COM1 üzerinden `ARCTIAN-UEFI-OK` test işareti.
+- GOP (Graphics Output Protocol) keşfi ve mod bilgisinin (genişlik, yükseklik,
+  stride, piksel biçimi) ortak bootinfo sözleşmesine yazılması; BIOS ve UEFI
+  yolları aynı ekran sözleşmesini paylaşıyor.
+- PE/COFF başlığında alt sistem `10` (EFI uygulaması) ve sabit image base
+  (`0x400000`) düzeltmesi; firmware imajı artık geçerli bir EFI uygulaması olarak
+  yükleyebiliyor.
+- `tests/uefi/run.sh`: `make efi` → MBR + FAT32 ESP imajı (mtools) → OVMF/QEMU →
+  COM1'de `ARCTIAN-UEFI-OK` doğrulaması. Yalnızca QEMU/OVMF üzerinde çalıştırıldı.
+
+**DPI ölçekleme**
+
+- Ölçekleme çekirdeği: 100/125/150 yüzdeleri için `px`/`unpx` ve font boyutu
+  dönüşümleri; sabit ekran boyutu varsayımı kaldırıldı, ayar `kv` üzerinden
+  `uiscale` olarak saklanıyor ve açılış öncesi `dpi_init` ile okunuyor.
+- Masaüstü metrikleri (pencere başlığı, düğme boyutu, varsayılan pencere ölçüsü,
+  snap mesafesi, sürükleme sınırları) ölçek çarpanına bağlandı; yoğunluk seçimi
+  arayüzü de ölçekleniyor.
+- Birim testleri host `gcc` ile geçti (round-trip dönüşümleri dahil).
+
+**SMP**
+
+- CPUID ve MADT ile topoloji keşfi (x2APIC kimlikleri MADT type 9'dan), LAPIC
+  etkinleştirme ve IPI temelleri; per-CPU veri, BSP kaydı, spinlock ve atomik
+  ilkelleri.
+- AP trampoline blob'u (16→32→64 bit geçişi) ve AP başlatma sürücüsü; AP'ler için
+  per-CPU GDT/TSS ve IDT devri. QEMU `-smp 4` altında 3/3 AP çevrimiçi.
+- `tests/smp/run.sh`: derleme, trampoline boyut/sembol kontrolü ve QEMU `-smp 4`
+  çalıştırmasında `AP online=` satırının doğrulanması.
+
 ## 0.9 — Açılış animasyonu ve AX201 ürün yazılımı
 
 **Açılış animasyonu**

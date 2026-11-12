@@ -102,17 +102,31 @@ docs/          mimari, derleme, uygulama geliştirme
 - [docs/uygulama-gelistirme.md](docs/uygulama-gelistirme.md) — C uygulama API'sinin tamamı
   (ASI, LVGL, fs/net/audio/güç/mağaza) ve tam örnekler
 - [CHANGELOG.md](CHANGELOG.md) — sürüm kayıtları
+- [docs/0.9-durum.md](docs/0.9-durum.md) — 0.9 dalgası hat bazında durum ve
+  test kapsamı
 
 ## Bilinen sınırlar
 
 - **Uygulamalar kabukla aynı adres alanında çalışır.** Yetenek kapıları, dosya/komut
   kapıları ve onay penceresi bir *politika* sınırıdır; donanımsal (ring 3 + ayrı sayfa
   tablosu) izolasyon henüz yok. Hedeflenen tasarım mimari belgesinde açıkça yazılı.
-- Tek çekirdekli çalışır; zamanlayıcı tik'iyle işleyen küçük bir planlayıcı vardır (en
-  fazla 8 görev).
-- Intel AX201 sürücüsü ürün yazılımını gerçek gen3 akışıyla yüklüyor; tarama ve
-  bağlantı adımları henüz iskelet ve gerçek donanımda doğrulanmadı. ath9k (AR928x)
-  uçtan uca çalışıyor.
+- **UEFI önyükleyici yalnızca QEMU/OVMF üzerinde test edildi.** Gerçek firmware ve
+  dizüstü donanımında denenmedi. Mevcut UEFI kodu bir iskelettir: COM1'e test işareti
+  basar ve GOP mod bilgisini ortak bootinfo sözleşmesine yazar; `ExitBootServices`
+  sonrası çekirdek yükleme henüz yok, açılış BIOS/MBR yoluyla yapılıyor.
+- **SMP desteği QEMU `-smp 4` ile test edildi**, gerçek çok çekirdekli bir makinede
+  denenmedi. MADT/LAPIC keşfi, AP trampoline, per-CPU GDT/TSS ve AP başlatma var
+  (QEMU'da 3/3 AP çevrimiçi); AP'ler henüz kullanıcı iş yükü almıyor, planlayıcı
+  BSP üzerinde çalışıyor. Tek çekirdekli yolda zamanlayıcı tik'iyle işleyen küçük bir
+  planlayıcı vardır (en fazla 8 görev).
+- **Ağ sürücüleri kısmi:** e1000, PCnet, RTL8139/RTL8169 gibi eski PCI adaptörleri
+  desteklenir; virtio-net yoktur. Kablosuz tarafta ath9k (AR928x) uçtan uca çalışıyor,
+  Intel AX201 ürün yazılımını gerçek gen3 akışıyla yüklüyor ancak tarama ve bağlantı
+  adımları iskelet ve gerçek donanımda doğrulanmadı. Wi-Fi kapsamı bu iki çipten
+  ibarettir; modern kartların çoğu desteklenmez.
+- **Canlı (RAM) masaüstü yok.** ISO'dan açılış kalıcı kurulum akışına gider; tam
+  masaüstü oturumu diske kurulduktan sonra açılır. Kurulum yapmadan denemek için
+  ayrı bir salt-okunur canlı oturum henüz yok.
 - Windows üzerinde yerel `.wlf` derlemesi yok (ELF bağlayıcısı gerekiyor); Linux/WSL
   tarafında `wf` ile derlenir.
 - Depodaki imza anahtarı `tools/keys/dev_rsa2048.txt` bir **geliştirme** anahtarıdır;
