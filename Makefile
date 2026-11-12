@@ -427,6 +427,19 @@ $(UEFI_EFI): $(UEFI_OBJS) $(UEFI_DIR)/linker.ld
 	@mkdir -p $(dir $@)
 	$(LD) -m i386pep -nostdlib -T $(UEFI_DIR)/linker.ld -o $@ $(UEFI_OBJS)
 
+# --- AP trampoline (S6, SMP) ----------------------------------------------
+# 16-bit gercek mod blob'u; apboot.c icine .incbin ile gomulur. Yol sabit
+# (build/obj-<hash> degil) cunku .incbin derleme aninda okunur.
+AP_TRAMP_BIN = build/ap_trampoline.bin
+
+$(AP_TRAMP_BIN): kernel_plus/system/ap_trampoline.asm
+	@mkdir -p $(dir $@)
+	$(NASM) -f bin -o $@ $<
+
+$(BUILD)/kernel_plus/system/apboot.o: $(AP_TRAMP_BIN) kernel_plus/system/apboot.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COMMON) $(INCLUDES) -c -o $@ kernel_plus/system/apboot.c
+
 # --- test hedefleri -------------------------------------------------------
 # Her hat kendi betigini yazar; Makefile yalnizca cagirir. Boylece test
 # betikleri cakismaz ve Makefile ortak dosyasi kilitlenmez.
