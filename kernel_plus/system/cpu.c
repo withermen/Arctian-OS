@@ -4,6 +4,7 @@
  * MADT yoksa CPUID sayilari raporlanir, madt_ok=false kalir (uydurma yok).
  */
 #include "cpu.h"
+#include "percpu.h"
 #include "serial.h"
 #include "mmio.h"
 
@@ -89,8 +90,8 @@ static const uint8_t *find_madt(void) {
         }
     }
     if (!sdt) {
-        uint32_t rsdt = rd32(rsdp + 16);
-        if (rsdt && rsdt <= 0xFFFFFFFFull) {
+        uint32_t rsdt = rd32(rsdp + 16);   /* RSDT her zaman 32-bit adres tasi */
+        if (rsdt) {
             const uint8_t *t = table_ptr(rsdt, 0x1000);
             if (mem_eq(t, "RSDT", 4)) {
                 uint32_t tl = rd32(t + 4);
@@ -186,7 +187,9 @@ const cpu_info_t *cpu_info(void) {
 }
 
 bool cpu_smp_ready(void) {
-    return false; /* AP boot bu pakette yok */
+    /* AP boot apboot_start_all() ile gerceklestiginde online sayisi 1'i gecer;
+     * init.c o cagriyi yapmadigi surece bu false kalir. */
+    return percpu_online_count() > 1;
 }
 
 void cpu_dump(void) {
