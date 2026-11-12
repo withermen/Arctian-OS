@@ -419,6 +419,26 @@ static void s_add_toggle(lv_obj_t *card, const char *label, const char *key, int
     lv_obj_add_event_cb(sw, s_toggle_cb, LV_EVENT_VALUE_CHANGED, (void *)key);
 }
 
+/* "Hareketi azalt": kv 'motion' ile TERS anlamli anahtar.
+ * Cekili = hareket az (motion=0). Bu yuzden s_toggle_cb kullanilamaz. */
+static void s_motion_cb(lv_event_t *e) {
+    lv_obj_t *sw = lv_event_get_target(e);
+    int on = lv_obj_has_state(sw, LV_STATE_CHECKED) ? 1 : 0;
+    if (arctian_settings && arctian_settings->set_int)
+        arctian_settings->set_int("motion", on ? 0 : 1);
+}
+
+static void s_add_motion_toggle(lv_obj_t *card, const char *label) {
+    lv_obj_t *r = srow(card, 40);
+    lv_obj_t *l = lv_label_create(r);
+    lv_label_set_text(l, label);
+    lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT), 0);
+    lv_obj_t *sw = lv_switch_create(r);
+    if (arctian_settings && arctian_settings->get_int &&
+        arctian_settings->get_int("motion", 1) == 0) lv_obj_add_state(sw, LV_STATE_CHECKED);
+    lv_obj_add_event_cb(sw, s_motion_cb, LV_EVENT_VALUE_CHANGED, 0);
+}
+
 /* 0.6: secenek dongusu (buton). Etiket "Kapali / 5 dk / 10 dk / 30 dk". */
 static void s_choice_text(char *out, int cap, const char *unit, int v) {
     int n = 0;
@@ -1014,6 +1034,7 @@ static void s_page_view(void) {
     s_add_toggle(c2, "Yüksek kontrast", "contrast", 0);
     s_add_toggle(c2, "Klavye odak halkası", "focusring", 1);
     s_add_toggle(c2, "Büyük simgeler", "bigicons", 0);
+    s_add_motion_toggle(c2, "Hareketi azalt");
 
     /* --- arka plan (eski Kisisellestirme sayfasindan katlandi) --- */
     lv_obj_t *c3 = scard(g_content);
