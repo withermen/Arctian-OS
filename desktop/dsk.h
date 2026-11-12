@@ -406,6 +406,8 @@ void win_min_cb(lv_event_t *e);
 void win_max_cb(lv_event_t *e);
 void title_drag_cb(lv_event_t *e);
 void title_dbl_cb(lv_event_t *e);
+/* Global snap kisayolu kancasi: 20=sol, 21=sag, 22=maks/geri, 23=geri */
+void win_snap_hotkey(int hk);
 /* boyut degisince icerigin yeniden yerlesmesi icin uygulama kaydi */
 void win_set_relayout(lv_obj_t *win, void (*cb)(lv_obj_t *));
 /* Pencere kaydini verilen LVGL nesnesinden bulur (wlf_host kullanir). */
