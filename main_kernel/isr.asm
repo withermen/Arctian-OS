@@ -143,6 +143,12 @@ ISR_NOERROR 47    ; IRQ15: Secondary ATA
 ISR_NOERROR 128
 
 ; ============================================
+; LAPIC timer (vektor 0x40) - PIC'ten bagimsiz,
+; EOI'sini surucunun kendisi gonderir.
+; ============================================
+ISR_NOERROR 64
+
+; ============================================
 ; Stub tablosu (C tarafindan erisilecek)
 ; 48 entry: [0-31] exceptions, [32-47] IRQs
 ; ============================================
