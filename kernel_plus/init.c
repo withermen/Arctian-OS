@@ -50,6 +50,7 @@
 #include "serial.h"
 #include "clock.h"
 #include "cpu.h"
+#include "percpu.h"
 #include "sched.h"
 #include "proc.h"
 #include "thread.h"
@@ -692,6 +693,7 @@ void kernel_plus_main(void *arg) {
     acpi_init();
     cpu_detect();
     cpu_dump();
+    percpu_init();
     if (gui) bootanim_advance(30);
     LOG("[kp] mouse...");
     mouse_init();
