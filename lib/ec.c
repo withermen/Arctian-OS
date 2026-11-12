@@ -330,6 +330,18 @@ bool ec_battery_present(void) {
     return ec_battery_percent(&pct);
 }
 
+void ec_dump(void) {
+    int pct = -1, celsius = -1, ac = -1, lid = -1;
+    bool on = false, closed = false;
+
+    if (ec_battery_percent(&pct)) { /* pct yazildi */ }
+    if (ec_ac_online(&on)) ac = on ? 1 : 0;
+    if (ec_thermal_c(&celsius)) { /* celsius yazildi */ }
+    if (ec_lid_closed(&closed)) lid = closed ? 1 : 0;
+
+    serial_printf("[ec] pil=%d ac=%d termal=%d kapak=%d\n", pct, ac, celsius, lid);
+}
+
 /* ------------------------------------------------------------------ */
 /* Parlaklik (yerlesim makineye ozel; desteklenmiyor)                 */
 /* ------------------------------------------------------------------ */

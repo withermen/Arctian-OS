@@ -61,6 +61,10 @@ bool ec_lid_closed(bool *closed);
 /* Pil takili mi (gecerli yuzde okunabiliyorsa true). */
 bool ec_battery_present(void);
 
+/* Seri porta tek satir teshis: "[ec] pil=.. ac=.. termal=.. kapak=.."
+ * Bilinmeyen alanlar -1 olarak basilir. Cagrilmasi zorunlu degil. */
+void ec_dump(void);
+
 /* Parlaklik: 0-100 arasi hedef yuzde; desteklenmiyorsa <0. */
 int  ec_brightness_set(int percent);
 int  ec_brightness_get(void);
