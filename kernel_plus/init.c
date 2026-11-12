@@ -49,6 +49,7 @@
 #include "printf.h"
 #include "serial.h"
 #include "clock.h"
+#include "cpu.h"
 #include "sched.h"
 #include "proc.h"
 #include "thread.h"
@@ -689,6 +690,8 @@ void kernel_plus_main(void *arg) {
     if (gui) bootanim_advance(45);
     LOG("[kp] acpi...");
     acpi_init();
+    cpu_detect();
+    cpu_dump();
     if (gui) bootanim_advance(30);
     LOG("[kp] mouse...");
     mouse_init();
