@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "dpi.h"
 
 
 /* ---------------------------------------------------------------- */
@@ -174,7 +175,7 @@ static void win_rel_defer(winrec_t *r) {
 /* pencere boyutu degince: baslik cubugu genislesin + icerik yeniden aksin.
  * launch.c'nin olusturdugu govde (USER2 isaretli) pencereyle birlikte
  * boyutlandirilir; uygulamalar icerigi govdeye cizdigi icin relayout da
- * govde nesnesini alir (pencereyi alsa 42px baslik payi kaydirirdi). */
+ * govde nesnesini alir (pencereyi alsa baslik payi kadar kaydirirdi). */
 static void win_size_cb(lv_event_t *e) {
     winrec_t *r = (winrec_t *)lv_event_get_user_data(e);
     if (!r || !r->win) return;
@@ -188,9 +189,10 @@ static void win_size_cb(lv_event_t *e) {
         return;
     }
     lv_obj_t *tb = lv_obj_get_child(r->win, 0);
-    if (tb) lv_obj_set_size(tb, W - 2, 36);
+    int tbh = dpi_px(36);            /* baslik cubugu tabani 36 px, dpi olcekli */
+    if (tb) lv_obj_set_size(tb, W - 2, tbh);
     lv_obj_t *body = win_body_of(r->win);
-    if (body) lv_obj_set_size(body, W - 4, H - 42);
+    if (body) lv_obj_set_size(body, W - 4, H - (tbh + 6));
     if (r->relayout) win_rel_defer(r);
 }
 
@@ -409,9 +411,11 @@ void win_max_cb(lv_event_t *e) {
             lv_obj_set_size(w, r->max_saved_w, r->max_saved_h);
             lv_obj_set_pos(w, r->max_saved_x, r->max_saved_y);
         } else {
-            lv_obj_set_size(w, 520, 340);
-            lv_obj_set_pos(w, (g_asi->gfx->width() - 520) / 2,
-                           (g_asi->gfx->height() - 340) / 2);
+            /* ortali varsayilan: taban 520x340, dpi olcekli */
+            int dw = dpi_px(520), dh = dpi_px(340);
+            lv_obj_set_size(w, dw, dh);
+            lv_obj_set_pos(w, (g_asi->gfx->width() - dw) / 2,
+                           (g_asi->gfx->height() - dh) / 2);
         }
         lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
     } else {
@@ -420,8 +424,11 @@ void win_max_cb(lv_event_t *e) {
         r->max_saved_h = lv_obj_get_height(w);
         r->max_saved_x = lv_obj_get_x(w);
         r->max_saved_y = lv_obj_get_y(w);
-        lv_obj_set_size(w, g_asi->gfx->width() - 40, g_asi->gfx->height() - 120);
-        lv_obj_set_pos(w, 20, 20);
+        /* kenar bosluklari taban 40/120 (genislik/yukseklik) ve 20/20,
+         * hepsi dpi olcekli; ekran boyutu sabit degil, gfx'ten gelir */
+        lv_obj_set_size(w, g_asi->gfx->width() - dpi_px(40),
+                        g_asi->gfx->height() - dpi_px(120));
+        lv_obj_set_pos(w, dpi_px(20), dpi_px(20));
         lv_obj_add_flag(w, LV_OBJ_FLAG_USER_1);
     }
     lv_obj_move_foreground(w);
@@ -472,13 +479,14 @@ void title_drag_cb(lv_event_t *e) {
         int bottom = sh - (TB_BH + TB_Y_OFF);
         if (bottom < 200) bottom = sh;
 
-        if (x <= 8) {
+        int snap = dpi_px(8);        /* kenere yapisma esigi de dpi olcekli */
+        if (x <= snap) {
             lv_obj_set_pos(win, 0, 0);
             lv_obj_set_size(win, sw / 2, bottom);
-        } else if (x + ww >= sw - 8) {
+        } else if (x + ww >= sw - snap) {
             lv_obj_set_pos(win, sw / 2, 0);
             lv_obj_set_size(win, sw - sw / 2, bottom);
-        } else if (y <= 8) {
+        } else if (y <= snap) {
             lv_obj_set_pos(win, 0, 0);
             lv_obj_set_size(win, sw, bottom);
         }
@@ -491,7 +499,7 @@ void title_drag_cb(lv_event_t *e) {
 void add_ctrl(lv_obj_t *tb, const char *svg, uint32_t bgcol,
                      lv_event_cb_t cb, void *ud, int xoff) {
     lv_obj_t *b = lv_button_create(tb);
-    lv_obj_set_size(b, 46, 36);
+    lv_obj_set_size(b, dpi_px(46), dpi_px(36));   /* taban 46x36, dpi olcekli */
     lv_obj_set_style_radius(b, 0, 0);
     /* Normalde seffaf; uzerine gelince renklenir (kapat = kirmizi). */
     lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
@@ -501,14 +509,16 @@ void add_ctrl(lv_obj_t *tb, const char *svg, uint32_t bgcol,
     lv_obj_set_style_pad_all(b, 0, 0);
     lv_obj_align(b, LV_ALIGN_TOP_RIGHT, xoff, 0);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
-    lv_obj_t *ic = make_icon(b, svg, 12);
+    lv_obj_t *ic = make_icon(b, svg, dpi_px(12));
     lv_obj_center(ic);
 }
 
 
 lv_obj_t *create_window(const char *title, int w, int h) {
+    int tbh = dpi_px(36);            /* baslik cubugu taban yuksekligi */
+    int bwd = dpi_px(46);            /* kontrol dugmesi genisligi */
     int wx = (g_asi->gfx->width() - w) / 2;
-    int wy = (g_asi->gfx->height() - h) / 2 - 10;
+    int wy = (g_asi->gfx->height() - h) / 2 - dpi_px(10);
 
     /* Uygulamada hatirlanan boyut/konum varsa uygula     */
     {
@@ -548,8 +558,8 @@ lv_obj_t *create_window(const char *title, int w, int h) {
     lv_obj_set_style_border_width(tb, 1, 0);
     lv_obj_set_style_border_side(tb, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_color(tb, lv_color_hex(ADL_BORDER), 0);
-    lv_obj_set_style_pad_left(tb, 12, 0);
-    lv_obj_set_size(tb, w - 2, 36);
+    lv_obj_set_style_pad_left(tb, dpi_px(12), 0);
+    lv_obj_set_size(tb, w - 2, tbh);
     lv_obj_align(tb, LV_ALIGN_TOP_MID, 0, 1);
     lv_obj_add_flag(tb, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(tb, LV_OBJ_FLAG_PRESS_LOCK); /* imlec basliktan ciksa da basili kalsin */
@@ -567,7 +577,7 @@ lv_obj_t *create_window(const char *title, int w, int h) {
             s_title_font = lv_tiny_ttf_create_data(font_ttf, font_ttf_len, 12);
         if (s_title_font) lv_obj_set_style_text_font(t, s_title_font, 0);
     }
-    lv_obj_align(t, LV_ALIGN_LEFT_MID, 12, 0);
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, dpi_px(12), 0);
 
     /* running kaydi: once serbest listeden dener, yoksa yeni ayirir */
     winrec_t *r = 0;
@@ -593,10 +603,11 @@ lv_obj_t *create_window(const char *title, int w, int h) {
     /* Yer yoksa mevcut kayit ezilmez; pencere kayitsiz calisir. */
     if (slot >= 0) g_recs[slot] = r;
 
-    /* kontrol butonlari (kucult / buyut / kapat) — 46 px'lik duz bloklar */
+    /* kontrol butonlari (kucult / buyut / kapat) - taban 46 px bloklar,
+     * aralik da ayni olcekle kayar */
     add_ctrl(tb, SVG_CLOSE, 0xC42B1C, win_close_cb, r, 0);
-    add_ctrl(tb, SVG_MAX,   0x262B35, win_max_cb,   r, -46);
-    add_ctrl(tb, SVG_MIN,   0x262B35, win_min_cb,   r, -92);
+    add_ctrl(tb, SVG_MAX,   0x262B35, win_max_cb,   r, -bwd);
+    add_ctrl(tb, SVG_MIN,   0x262B35, win_min_cb,   r, -2 * bwd);
 
     lv_obj_add_event_cb(win, win_size_cb, LV_EVENT_SIZE_CHANGED, r);
     lv_obj_add_event_cb(tb, title_dbl_cb, LV_EVENT_DOUBLE_CLICKED, r);
