@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "dpi.h"
 
 
 int kv_find(const char *k) {
@@ -46,6 +47,9 @@ void settings_apply_values(void) {
     /* Erisilebilirlik tercihleri: boot'ta da, canli degisiklikte de
      * ayni yerden uygulanir. */
     adl_set_font_scale(kv_get_int("fontscale", 100));
+    /* Arayuz olceği (dpi çekirdeği): kv 'uiscale' tek kaynak, varsayilan 100.
+     * ui_scale_refresh() ve dk_s() bu degeri cozunurluk olcegiyle carpar. */
+    dpi_set_percent(kv_get_int("uiscale", 100));
     adl_set_contrast(kv_get_int("contrast", 0));
     adl_set_light(kv_get_int("light", 0));
     adl_set_focus_ring(kv_get_int("focusring", 1));
