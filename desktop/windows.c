@@ -468,7 +468,7 @@ void title_drag_cb(lv_event_t *e) {
         if (nx < 0) nx = 0;
         if (ny < 0) ny = 0;
         if (nx + ww > sw) nx = sw - ww;
-        if (ny > sh - 120) ny = sh - 120;
+        if (ny > sh - dpi_px(120)) ny = sh - dpi_px(120);   /* altta gorunur kenar */
         lv_obj_set_pos(win, nx, ny);
     } else if (code == LV_EVENT_RELEASED) {
         int sw = g_asi->gfx->width();
@@ -530,7 +530,8 @@ lv_obj_t *create_window(const char *title, int w, int h) {
             w = gw; h = gh;
             wx = gx; wy = gy;
             if (wx + w > g_asi->gfx->width()) wx = g_asi->gfx->width() - w;
-            if (wy + h > g_asi->gfx->height() - 40) wy = g_asi->gfx->height() - 40 - h;
+            int mg = dpi_px(40);     /* geri yuklemede ust kenar payi */
+            if (wy + h > g_asi->gfx->height() - mg) wy = g_asi->gfx->height() - mg - h;
             if (wx < 0) wx = 0;
             if (wy < 0) wy = 0;
         }
