@@ -71,8 +71,9 @@ typedef struct {
     void *AllocatePages;               /* 02 */
     void *FreePages;                   /* 03 */
     void *GetMemoryMap;                /* 04 */
-    void *AllocatePool;                /* 05 */
-    void *FreePool;                    /* 06 */
+    EFI_STATUS (EFIAPI *AllocatePool)(UINT32 PoolType, UINTN Size,
+                                      void **Buffer);      /* 05 */
+    EFI_STATUS (EFIAPI *FreePool)(void *Buffer);           /* 06 */
     void *CreateEvent;                 /* 07 */
     void *SetTimer;                    /* 08 */
     void *WaitForEvent;                /* 09 */
@@ -82,7 +83,9 @@ typedef struct {
     void *InstallProtocolInterface;    /* 13 */
     void *ReinstallProtocolInterface;  /* 14 */
     void *UninstallProtocolInterface;  /* 15 */
-    void *HandleProtocol;              /* 16 */
+    EFI_STATUS (EFIAPI *HandleProtocol)(EFI_HANDLE Handle,
+                                        EFI_GUID *Protocol,
+                                        void **Interface); /* 16 */
     void *Reserved;                    /* 17 */
     void *RegisterProtocolNotify;      /* 18 */
     void *LocateHandle;                /* 19 */
@@ -131,6 +134,98 @@ _Static_assert(offsetof(EFI_SYSTEM_TABLE, ConOut) == 64,
                "SystemTable->ConOut ofset 64 olmali");
 _Static_assert(offsetof(EFI_SYSTEM_TABLE, BootServices) == 96,
                "SystemTable->BootServices ofset 96 olmali");
+
+/* EFI_CONFIGURATION_TABLE (UEFI 2.10, 4.6.1): SystemTable->ConfigurationTable
+ * dizisinin elemani; VendorGuid + ham tablo isaretcisi. */
+typedef struct {
+    EFI_GUID VendorGuid;
+    void *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
+struct EFI_FILE_PROTOCOL;  /* forward decl: asagida typedef ile tamamlanir */
+
+/* EFI_LOADED_IMAGE_PROTOCOL (UEFI 2.10, 12.6, rev 0x0902). LoadOptionsSize
+ * (UINT32) sonrasi 4 bayt dogal padding gelir; DeviceHandle 24'te kalir. */
+typedef struct {
+    UINT32 Revision;                                   /* 0 */
+    EFI_HANDLE ParentHandle;                           /* 8 */
+    void *SystemTable;                                 /* 16 */
+    EFI_HANDLE DeviceHandle;                           /* 24 */
+    void *FilePath;                                    /* 32 */
+    void *LoadOptions;                                 /* 40 */
+    UINT32 LoadOptionsSize;                            /* 44 */
+    void *ImageBase;                                   /* 48 */
+    UINT64 ImageSize;                                  /* 56 */
+    UINT32 ImageCodeType;                              /* 64 */
+    UINT32 ImageDataType;                              /* 68 */
+    void *Unload;                                      /* 72 */
+} EFI_LOADED_IMAGE;
+_Static_assert(offsetof(EFI_LOADED_IMAGE, DeviceHandle) == 24,
+               "LoadedImage->DeviceHandle ofset 24 olmali");
+
+/* EFI_SIMPLE_FILE_SYSTEM_PROTOCOL (UEFI 2.10, 13.3): Revision=0,
+ * OpenVolume=8. */
+typedef struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL EFI_SIMPLE_FILE_SYSTEM;
+struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
+    UINT64 Revision;                                       /* 0 */
+    EFI_STATUS (EFIAPI *OpenVolume)(
+        struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *This,
+        struct EFI_FILE_PROTOCOL **Root);                  /* 8 */
+};
+_Static_assert(offsetof(EFI_SIMPLE_FILE_SYSTEM, Revision) == 0,
+               "SFS->Revision ofset 0 olmali");
+_Static_assert(offsetof(EFI_SIMPLE_FILE_SYSTEM, OpenVolume) == 8,
+               "SFS->OpenVolume ofset 8 olmali");
+
+/* EFI_FILE_PROTOCOL (UEFI 2.10, 13.4; rev1 alanlari). Revision ALANI YOK:
+ * Open=0, Close=8, Delete=16, Read=24, Write=32, GetPosition=40,
+ * SetPosition=48, GetInfo=56, SetInfo=64, Flush=72. rev2 alanlari
+ * (OpenEx/ReadEx) bu pakette kullanilmiyor. */
+typedef struct EFI_FILE_PROTOCOL {
+    EFI_STATUS (EFIAPI *Open)(struct EFI_FILE_PROTOCOL *This,
+                              struct EFI_FILE_PROTOCOL **NewHandle,
+                              CHAR16 *FileName, UINT64 OpenMode,
+                              UINT64 Attributes);          /* 0 */
+    EFI_STATUS (EFIAPI *Close)(struct EFI_FILE_PROTOCOL *This); /* 8 */
+    void *Delete;                                          /* 16 */
+    EFI_STATUS (EFIAPI *Read)(struct EFI_FILE_PROTOCOL *This,
+                              UINTN *BufferSize,
+                              void *Buffer);               /* 24 */
+    void *Write;                                           /* 32 */
+    void *GetPosition;                                     /* 40 */
+    void *SetPosition;                                     /* 48 */
+    EFI_STATUS (EFIAPI *GetInfo)(struct EFI_FILE_PROTOCOL *This,
+                                 EFI_GUID *InformationType,
+                                 UINTN *BufferSize,
+                                 void *Buffer);            /* 56 */
+    void *SetInfo;                                         /* 64 */
+    void *Flush;                                           /* 72 */
+} EFI_FILE_PROTOCOL;
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, Open) == 0, "File->Open 0 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, Read) == 24, "File->Read 24 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, GetInfo) == 56,
+               "File->GetInfo 56 olmali");
+
+#define EFI_FILE_MODE_READ 0x0000000000000001ull
+
+/* EFI_FILE_INFO (UEFI 2.10, 13.4.6). Zaman alanlari burada UINT64 olarak
+ * tek parca tutuldu (EFI_TIME 8 bayttir); yalniz FileSize/Size okunuyor. */
+typedef struct {
+    UINT64 Size;                    /* 0  bu yapinin toplam boyu */
+    UINT64 ParentFileSize;          /* 8 */
+    UINT64 MaximumAllocationSize;   /* 16 */
+    UINT64 FileSize;                /* 24 dosya boyu (bayt) */
+    UINT64 FileAttribute;           /* 32 */
+    UINT64 LastAccessTime;          /* 40 */
+    UINT64 ModificationTime;        /* 48 */
+    UINT64 CreateTime;              /* 56 */
+    UINT64 IsReadOnly;              /* 64 */
+    CHAR16 FileName[1];             /* 72 */
+} EFI_FILE_INFO;
+_Static_assert(offsetof(EFI_FILE_INFO, FileSize) == 24,
+               "FileInfo->FileSize 24 olmali");
+_Static_assert(offsetof(EFI_FILE_INFO, FileName) == 72,
+               "FileInfo->FileName 72 olmali");
 
 /* --- EFI_GRAPHICS_OUTPUT_PROTOCOL (GOP) ----------------------------------
  * Tanimlar: UEFI 2.10, 12.9 Graphics Output Protocol. */
@@ -189,6 +284,11 @@ void serial_hex(UINT64 v);
 
 /* GOP mod bilgisini bootinfo sozlesmesine gore 0x7000'e yazar (gop.c). */
 void gop_report(EFI_SYSTEM_TABLE *st);
+
+/* Paket 2 modulleri (fs.c, memmap.c, rsdp.c). */
+void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st);
+void memmap_dump(EFI_SYSTEM_TABLE *st);
+void rsdp_find(EFI_SYSTEM_TABLE *st);
 
 /* Giris noktasi: entry.asm cagirir (loader.c). */
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST);

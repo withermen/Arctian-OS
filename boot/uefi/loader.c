@@ -12,6 +12,7 @@
  */
 #include "loader.h"
 #include "bootinfo.h"
+#include "uefi_info.h"
 
 /* --- COM1 (0x3F8) dogrudan seri cikis ------------------------------------*/
 #define COM1 0x3F8u
@@ -171,15 +172,27 @@ void gop_report(EFI_SYSTEM_TABLE *st) {
 /* --- firmware girisi ------------------------------------------------------*/
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST) {
     static CHAR16 banner[] = L"Arctian UEFI\n";
+    arctian_uefiinfo_t *ui;
+    UINT8 *u8;
+    UINTN i;
 
-    (void)ImageHandle;
     serial_init();
     serial_puts("ARCTIAN-UEFI: basladi\r\n");
 
     if (ST && ST->ConOut && ST->ConOut->OutputString)
         ST->ConOut->OutputString(ST->ConOut, banner);
 
+    /* 0x7100 yapisini modullerden ONCE sifirla; firmware'den cop gelmesin. */
+    ui = arctian_uefiinfo();
+    u8 = (UINT8 *)ui;
+    for (i = 0; i < sizeof(*ui); i++)
+        u8[i] = 0;
+
     gop_report(ST);
+    fs_load_kernel(ImageHandle, ST);
+
+    ui->magic = ARCTIAN_UEFIINFO_MAGIC;
+    ui->struct_size = (uint32_t)sizeof(*ui);
 
     serial_puts("ARCTIAN-UEFI-OK\r\n");  /* test isareti: ConOut'tan bagimsiz */
     return EFI_SUCCESS;
