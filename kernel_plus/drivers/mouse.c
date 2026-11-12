@@ -19,6 +19,7 @@
 #include "pic.h"
 #include "mouse.h"
 #include "serial.h"
+#include "clock.h"
 
 /* USB HID fare state (PS/2 donanimina bagli olmadan calisir) */
 static int usb_mouse_dx = 0;
@@ -84,6 +85,10 @@ static bool usb_mouse_ever = false;
 #define PACKET_3BYTE    3
 #define PACKET_4BYTE    4
 #define PACKET_6BYTE    6   /* x/y ust bitleri + Z basinc + tekerlek */
+
+/* Basinc esigi (0..255) ve tap icin ust sure siniri (ms) */
+#define MOUSE_TAP_PRESSURE  40
+#define MOUSE_TAP_MAX_MS    220
 
 /* Taninan cihaz ailesi */
 typedef enum {
@@ -437,6 +442,26 @@ static void mouse_track_left(bool left) {
 
 uint32_t mouse_left_press_seq(void) { return s_left_press_seq; }
 
+/* Kaydirma: son okumadan bu yana biriken miktar (mouse_scroll_delta()).
+ * USB ve PS/2 tekerlek yollarinin ikisi de buraya besler. */
+static volatile int s_scroll_delta = 0;
+
+/* Dokunma (tap): basinc esigini asan kisa basislar sayilir. */
+static volatile uint32_t s_tap_count = 0;
+static bool s_pressure_prev = false;
+static uint64_t s_pressure_down_ms = 0;
+
+static void mouse_track_pressure(int z) {
+    bool pressed = z >= MOUSE_TAP_PRESSURE;
+    if (pressed && !s_pressure_prev) {
+        s_pressure_down_ms = clock_ms();
+    } else if (!pressed && s_pressure_prev) {
+        if (clock_ms() - s_pressure_down_ms <= MOUSE_TAP_MAX_MS)
+            s_tap_count++;
+    }
+    s_pressure_prev = pressed;
+}
+
 static void mouse_process_usb(void) {
     if (!usb_mouse_ever) return;   /* USB fare yok: PS/2 durumunu bozma */
     if (usb_mouse_dx == 0 && usb_mouse_dy == 0 && usb_mouse_scroll == 0 &&
@@ -459,6 +484,7 @@ static void mouse_process_usb(void) {
     mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (usb_mouse_buttons & 0x04) != 0;
     mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
 
+    s_scroll_delta += usb_mouse_scroll;
     mouse_state.scroll += usb_mouse_scroll;
     usb_mouse_dx = 0;
     usb_mouse_dy = 0;
@@ -512,6 +538,15 @@ static void mouse_decode_packet6(void) {
     mouse_state.buttons[MOUSE_BUTTON_RIGHT]  = (status_byte & 0x02) != 0;
     mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
     mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
+
+    /* Z basinc: tap algilama. Tekerlek bayti kaydirma uretir. */
+    mouse_track_pressure((int)mouse_packet[4]);
+
+    int wheel = (int)(int8_t)mouse_packet[5];
+    if (wheel != 0) {
+        s_scroll_delta += wheel;
+        mouse_state.scroll += wheel;
+    }
 }
 
 /**
@@ -557,8 +592,11 @@ static void mouse_decode_packet(void) {
     mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
     mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
 
-    if (mouse_packet_size == PACKET_4BYTE)
-        mouse_state.scroll += (int)(int8_t)mouse_packet[3];
+    if (mouse_packet_size == PACKET_4BYTE) {
+        int wheel = (int)(int8_t)mouse_packet[3];
+        s_scroll_delta += wheel;
+        mouse_state.scroll += wheel;
+    }
 }
 
 /**
@@ -683,6 +721,9 @@ void mouse_init(void) {
     mouse_packet_cycle = 0;
     mouse_packet_size = PACKET_3BYTE;
     mouse_device = MOUSE_DEV_UNKNOWN;
+    s_scroll_delta = 0;
+    s_pressure_prev = false;
+    s_tap_count = 0;
 
     /*
      * Step 1: Flush any stale data from the PS/2 buffer.
@@ -824,5 +865,13 @@ void mouse_set_screen_size(int width, int height) {
     if (mouse_state.y >= mouse_screen_height) mouse_state.y = mouse_screen_height - 1;
     if (mouse_state.x < 0) mouse_state.x = 0;
     if (mouse_state.y < 0) mouse_state.y = 0;
+}
+
+int mouse_scroll_delta(void) {
+    return __atomic_exchange_n(&s_scroll_delta, 0, __ATOMIC_RELAXED);
+}
+
+int mouse_tap_count(void) {
+    return (int)__atomic_load_n(&s_tap_count, __ATOMIC_RELAXED);
 }
 
