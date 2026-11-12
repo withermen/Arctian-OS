@@ -6,11 +6,14 @@
  * AML yorumlayicisi olmadigi icin dogrudan port (0x62/0x66) erisimi
  * kullanilir ve makineye ozel ofsetler "best effort" kabul edilir.
  *
- * Uygulayan: S2 (kernel_plus/drivers/acpi.c veya lib/ec.c)
+ * Uygulayan: S2 (lib/ec.c)
  * Kullanan : S2 pil/termal, S3 parlaklik/pil arayuzu (dolayli)
  *
- * DURUSTLUK: bu API'nin her makinede calistigi iddia edilemez. `ec_read`
- * basarisiz olursa cagiran taraf "bilinmiyor" gostermeli, uydurmamali.
+ * DURUSTLUK: EC alan yerlesimleri makineden makineye degisir; bu API'nin
+ * her makinede calistigi iddia edilemez. Okunamayan veya akla yatkin
+ * araliga girmeyen alanlar icin fonksiyon false doner ve cikti
+ * parametresine DOKUNMAZ. Cagiran taraf "bilinmiyor" gostermeli,
+ * uydurmamali.
  */
 #ifndef ARCTIAN_EC_H
 #define ARCTIAN_EC_H
@@ -28,7 +31,7 @@
 #define EC_CMD_BURST_ENABLE 0x82
 #define EC_CMD_BURST_DISABLE 0x83
 
-/* EC bulundu mu? (ACPI ECDT veya AML'de EC aygiti) */
+/* EC bulundu mu? (port yoklamasi; ACPI ECDT/AML gerekmez) */
 bool ec_present(void);
 
 /* EC'yi kesfet ve hazirla. Basarili: 0, yok/hata: <0. */
@@ -38,12 +41,29 @@ int  ec_init(void);
 int  ec_read_byte(uint8_t offset, uint8_t *out);
 int  ec_write_byte(uint8_t offset, uint8_t value);
 
-/* Ardisik blok oku (EC burst modu; desteklenmiyorsa bayt bayt). */
+/* Ardisik blok oku (bayt bayt; burst modu kullanilmaz). */
 int  ec_read_block(uint8_t offset, uint8_t *buf, uint8_t len);
 
-/* Pil yuzdesi (0-100) veya bilinmiyorsa -1. EC yoksa SBS/ACPI yolu denenir. */
-int  ec_battery_percent(void);
-bool ec_ac_online(void);
+/* Pil yuzdesi (0-100). Basarili: true ve *pct yazilir.
+ * Okunamaz/saglamasiz: false ve *pct degismez. */
+bool ec_battery_percent(int *pct);
+
+/* AC adaptor takili mi. Basarili: true ve *on yazilir; bilinmiyorsa false. */
+bool ec_ac_online(bool *on);
+
+/* EC termal alani, santigrat. Basarili: true ve *celsius yazilir;
+ * alan yok veya aralik disi: false. */
+bool ec_thermal_c(int *celsius);
+
+/* Kapak kapali mi. Basarili: true ve *closed yazilir; bilinmiyorsa false. */
+bool ec_lid_closed(bool *closed);
+
+/* Pil takili mi (gecerli yuzde okunabiliyorsa true). */
+bool ec_battery_present(void);
+
+/* Seri porta tek satir teshis: "[ec] pil=.. ac=.. termal=.. kapak=.."
+ * Bilinmeyen alanlar -1 olarak basilir. Cagrilmasi zorunlu degil. */
+void ec_dump(void);
 
 /* Parlaklik: 0-100 arasi hedef yuzde; desteklenmiyorsa <0. */
 int  ec_brightness_set(int percent);
