@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "dpi.h"
 
 
 /* ---------------------------------------------------------------- */
@@ -52,12 +53,15 @@ static int s_ic_s = 1000;
 int ic_s(int v) { return (v * s_ic_s + 500) / 1000; }
 
 
-/* Dock olcek birimi: 1600x900 mantiksal referansa gore.
- * 1080p'de katsayi 1.2 olur (60 -> 72 px). */
+/* Dock olcek birimi: 1600x900 mantiksal referansa gore, kullanici arayuz
+ * olcegiyle (dpi 'uiscale') carpilerek. 1080p + %100'de katsayi 1.2
+ * (60 -> 72 px); ayni cozunurlukde %125 -> 1.5, %150 -> 1.8. */
 int dk_s(int v) {
     int h = (g_asi && g_asi->gfx && g_asi->gfx->height) ? g_asi->gfx->height() : DK_REF_H;
     if (h < 1) h = DK_REF_H;
-    return (v * h + DK_REF_H / 2) / DK_REF_H;
+    /* v * h * pct / (DK_REF_H * 100), yuvarlamali; gercek olcu araliginda
+     * (v ~60, h <= 4320, pct <= 150) int tasmasi yok. */
+    return (v * h * dpi_get_percent() + DK_REF_H * 50) / (DK_REF_H * 100);
 }
 
 
@@ -65,6 +69,9 @@ void ui_scale_refresh(void) {
     int h = (g_asi && g_asi->gfx && g_asi->gfx->height) ? g_asi->gfx->height() : UI_REF_H;
     if (h < 1) h = UI_REF_H;
     int s = (h * 1000) / UI_REF_H;
+    /* Kullanici arayuz olcegi (dpi 'uiscale', kv) cozunurluk olcegiyle
+     * carpilr; ekran boyutu sabiti yok, h hep gfx->height'tan gelir. */
+    s = s * dpi_get_percent() / 100;
     /* Taban 0.7: yazi tipi ui_s ile olceklenmiyor (sabit 15 px). 720p'de
      * saf oran 0.5 kaliyordu; baslat menusu gibi sabit satir yuksekligi
      * kullanan yerlerde etiketler ikonlara ve alt satirlara tasiyordu. */
@@ -73,6 +80,7 @@ void ui_scale_refresh(void) {
     g_ui_s = s;
     /* Masaustu simgeleri: saf orana yakin (720p'de 0.55 taban). */
     int is = (h * 1000) / UI_REF_H;
+    is = is * dpi_get_percent() / 100;
     if (is < 550) is = 550;
     if (is > 1700) is = 1700;
     s_ic_s = is;
