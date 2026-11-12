@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "dpi.h"
 #include <stdint.h>
 #include <string.h>
 /* Secim araligini gormek icin LVGL ozel basligi (Ctrl+C/X/A): altyapi
@@ -340,6 +341,7 @@ void desktop_main(void *arg) {
 
     lv_port_init(g_asi);
     disk_unlock_run(g_asi);   /* disk kilitliyse ac; ayarlar disktan okunur */
+    dpi_init();               /* kv yuklenmeden once varsayilan 100 */
     settings_load();          /* fontscale/contrast/focusring tercihleri */
     /* 0.7 (H3): RTC/NTP UTC tutar; gosterilen saat yerel olmali.
      * Ayar yoksa Europe/Istanbul (UTC+3) varsayilir. */
