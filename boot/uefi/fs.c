@@ -1,14 +1,15 @@
 /*
  * Arctian UEFI onyukleyici - ESP'den cekirdek dosyasi okuma (paket 2).
  *
- * Akis: LocateProtocol(SimpleFileSystem) -> OpenVolume -> Open(yol, READ)
- * -> GetInfo(EFI_FILE_INFO) ile boy -> AllocatePool -> Read dongusu
- * (Read tam istedigimizi vermezse kalan icin tekrar) -> boy + ilk 8 bayt
- * seri porta. Yedek yol: \EFI\BOOT\KERNEL.ELF. Hata durumu cokmez; STATUS
- * kodu seri porta yazilir ve devam edilir.
+ * Akis: HandleProtocol(ImageHandle, LoadedImage) -> DeviceHandle uzerindeki
+ * SimpleFileSystem -> OpenVolume -> Open(yol, READ) -> GetInfo(EFI_FILE_INFO)
+ * ile boy -> AllocatePool -> Read dongusu (Read tam istedigimizi vermezse
+ * kalan icin tekrar) -> boy + ilk 8 bayt seri porta. SFS bulunamazsa
+ * LocateProtocol ile sistem geneli aranir. Yedek yol: \EFI\BOOT\KERNEL.ELF.
+ * Hata durumu cokmez; STATUS kodu yazilir ve devam edilir.
  *
  * Tampon EfiLoaderData havuzundan ayrilir ve SERBEST BIRAKILMAZ: cekirdek
- * baglamina tasima paket 3'in isi. Bu yuzden uefi_info.kernel_base/size
+ * baglamina tasima paket 3'un isi. Bu yuzden uefi_info.kernel_base/size
  * doldurulur.
  */
 #include "loader.h"
@@ -19,12 +20,13 @@ static const EFI_GUID g_loadedimage_guid = {
     0x5B1B31A1, 0x9562, 0x11D2,
     { 0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
 };
-/* EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID {0964e5b2-6459-11d2-8e39-00a0c969723b} */
+/* EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID {964e5b22-6459-11d2-8e39-00a0c969723b}
+ * Dikkat: Data1 = 0x964E5B22; 0x0964E5B2 DEGIL (BlockIo 0x964E5B21'dir). */
 static const EFI_GUID g_sfs_guid = {
-    0x0964E5B2, 0x6459, 0x11D2,
+    0x964E5B22, 0x6459, 0x11D2,
     { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
 };
-/* EFI_FILE_INFO_GUID {09576e92-6d3f-11d2-8e39-00a0c969723b} */
+/* EFI_FILE_INFO_ID {09576e92-6d3f-11d2-8e39-00a0c969723b} */
 static const EFI_GUID g_fileinfo_guid = {
     0x09576E92, 0x6D3F, 0x11D2,
     { 0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
@@ -62,47 +64,50 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
     }
     bs = st->BootServices;
 
-    /* EDK2 yalnizca acilis bolmesinin FS surucusunu yukler; LocateProtocol
-     * baska ESP goremez. Dogru yol: LoadedImage->DeviceHandle uzerindeki
-     * SFS. HandleProtocol olmazsa LocateProtocol'a dus (tek bolmeli
-     * imajlarda hep ayni yeri gosterir). */
+    /* Dogru yol: kendi yuklendigimiz aygitin (LoadedImage->DeviceHandle)
+     * SFS'i. Tek bolmeli imajda LocateProtocol ayni yeri gosterir; yine de
+     * Once DeviceHandle denenir, olmazsa LocateProtocol'a dusulur. */
     s1 = bs->HandleProtocol(ImageHandle, (EFI_GUID *)&g_loadedimage_guid,
                             (void **)&li);
-    sfs = 0;
-    s2 = 0x0FFFFFFFFFFFFFFFull;  /* DeviceHandle adimi atlandi isareti */
-    if (s1 == EFI_SUCCESS && li && li->DeviceHandle) {
+    s2 = 0x8000000000000003ull;  /* EFI_UNSUPPORTED: adim atlandi isareti */
+    if (s1 == EFI_SUCCESS && li && li->DeviceHandle)
         s2 = bs->HandleProtocol(li->DeviceHandle, (EFI_GUID *)&g_sfs_guid,
                                 (void **)&sfs);
-        s = s2;
-    } else {
-        s = s1;
-    }
+    s = s2;
     if (!sfs) {
         s = bs->LocateProtocol((EFI_GUID *)&g_sfs_guid, 0, (void **)&sfs);
         if (!sfs) {
-            UINT64 *q = (UINT64 *)(void *)li;
             serial_puts("hata SFS li=");
             serial_hex(s1);
             serial_puts(" dev=");
             serial_hex(s2);
             serial_puts(" loc=");
             serial_hex(s);
-            serial_puts(" lst=");
-            serial_hex((UINT64)(uintptr_t)st);
-            /* GECICI TESHIS: rev|parent|systab|devehandle */
-            serial_puts(" LQ0=");
-            serial_hex(q[0]);
-            serial_puts(" LQ1=");
-            serial_hex(q[1]);
-            serial_puts(" LQ2=");
-            serial_hex(q[2]);
-            serial_puts(" LQ3=");
-            serial_hex(q[3]);
             serial_puts("\r\n");
             return;
         }
     }
+
+    /* GECICI TESHIS: arayuz sozlesmesini dogrula. */
+    serial_puts("GECICI sfs=");
+    serial_hex((UINT64)(uintptr_t)sfs);
+    serial_puts(" +0=");
+    serial_hex(((UINT64 *)sfs)[0]);
+    serial_puts(" +8=");
+    serial_hex(((UINT64 *)sfs)[1]);
+    serial_puts("\r\n");
     s = sfs->OpenVolume(sfs, &root);
+    serial_puts("GECICI ov_st=");
+    serial_hex(s);
+    serial_puts(" root=");
+    serial_hex((UINT64)(uintptr_t)root);
+    if (s == EFI_SUCCESS && root) {
+        serial_puts(" r+0=");
+        serial_hex(((UINT64 *)root)[0]);
+        serial_puts(" r+8=");
+        serial_hex(((UINT64 *)root)[1]);
+    }
+    serial_puts("\r\n");
     if (s != EFI_SUCCESS || !root) {
         serial_puts("hata OpenVolume st=");
         serial_hex(s);
@@ -157,14 +162,11 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
         return;
     }
 
-    /* Read istenen boydan az donebilir; kalan icin dongu. */
+    /* Read istenen boydan az donebilir; kalan icin dongu (1 MB dilimler). */
     got = 0;
     kalan = (UINTN)fi->FileSize;
     for (;;) {
-        UINTN istenen = kalan;
-        if (istenen > (1u << 20))   /* 1 MB'lik dilimler */
-            istenen = 1u << 20;
-        bu = istenen;
+        bu = kalan > (1u << 20) ? (1u << 20) : kalan;
         s = file->Read(file, &bu, buf + got);
         if (s != EFI_SUCCESS || bu == 0)
             break;
@@ -197,5 +199,4 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
 
     arctian_uefiinfo()->kernel_base = (uint64_t)(uintptr_t)buf;
     arctian_uefiinfo()->kernel_size = (uint64_t)got;
-    (void)s1;
 }
