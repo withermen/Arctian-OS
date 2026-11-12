@@ -60,6 +60,10 @@ bool lapic_init(void) {
     uint64_t apic_base = rdmsr(MSR_APIC_BASE);
     s_base = apic_base & APIC_BASE_MASK;
 
+    /* Enable (bit 11) kapaliysa LAPIC calismiyor demektir; uydurma mod
+     * raporlamak yerine basarisiz say. */
+    if (!(apic_base & APIC_BASE_EN)) return false;
+
     if (apic_base & APIC_BASE_X2) {
         /* x2APIC: MMIO'ya dokunmadan MSR'den kimlik. */
         s_mode = LAPIC_MODE_X2APIC;
@@ -94,9 +98,18 @@ static bool icr_wait_idle(void) {
     return false;
 }
 
+/* x2APIC'te ayni kural MSR 0x830 bit 12 icin gecerli. */
+static bool icr_wait_idle_x2apic(void) {
+    for (uint32_t i = 0; i < ICR_WAIT_SPINS; i++) {
+        if (!(rdmsr(MSR_APIC_ICR) & ICR_DELIVERY_STATUS)) return true;
+    }
+    return false;
+}
+
 bool lapic_send_ipi(uint32_t dest_apic_id, uint8_t vector) {
     if (!vector) return false;
     if (s_mode == LAPIC_MODE_X2APIC) {
+        if (!icr_wait_idle_x2apic()) return false;
         uint64_t icr = ((uint64_t)(dest_apic_id & 0xFFFFFFFFu) << 32) | vector;
         wrmsr(MSR_APIC_ICR, icr);
         return true;
@@ -111,11 +124,53 @@ bool lapic_send_ipi(uint32_t dest_apic_id, uint8_t vector) {
 bool lapic_send_ipi_all_excl_self(uint8_t vector) {
     if (!vector) return false;
     if (s_mode == LAPIC_MODE_X2APIC) {
+        if (!icr_wait_idle_x2apic()) return false;
         wrmsr(MSR_APIC_ICR, ICR_SHORTHAND_ALL_EXCL_SELF | vector);
         return true;
     }
     if (s_mode != LAPIC_MODE_XAPIC) return false;
     if (!icr_wait_idle()) return false;
     mmio_wr(XAPIC_ICR_LO, ICR_SHORTHAND_ALL_EXCL_SELF | vector);
+    return true;
+}
+
+/* ---- INIT / SIPI (AP boot) ----
+ * Delivery mode: INIT = 5, SIPI = 6. Level-assert biti 14 (0x4000) set
+ * kalmali; xAPIC'te INIT ayrica trigger-level (bit 15) ile assert edilip
+ * deassert edilir, yoksa AP'ye INIT düzegi tam ulasmaz. x2APIC'te level
+ * biti yok sayilir; tek yazim yeter. */
+
+#define ICR_DM_INIT   (5u << 8)
+#define ICR_DM_SIPI   (6u << 8)
+#define ICR_ASSERT    0x4000u
+#define ICR_LEVEL     0x8000u
+
+bool lapic_send_init(uint32_t dest_apic_id) {
+    if (s_mode == LAPIC_MODE_X2APIC) {
+        if (!icr_wait_idle_x2apic()) return false;
+        wrmsr(MSR_APIC_ICR, ((uint64_t)dest_apic_id << 32) | ICR_DM_INIT | ICR_ASSERT);
+        return true;
+    }
+    if (s_mode != LAPIC_MODE_XAPIC) return false;
+    mmio_wr(XAPIC_ICR_HI, (dest_apic_id & 0xFFu) << 24);
+    if (!icr_wait_idle()) return false;
+    mmio_wr(XAPIC_ICR_LO, ICR_DM_INIT | ICR_ASSERT | ICR_LEVEL);   /* assert */
+    if (!icr_wait_idle()) return false;
+    mmio_wr(XAPIC_ICR_LO, ICR_DM_INIT | ICR_ASSERT);               /* deassert */
+    return true;
+}
+
+bool lapic_send_sipi(uint32_t dest_apic_id, uint8_t vector) {
+    if (!vector) return false;
+    if (s_mode == LAPIC_MODE_X2APIC) {
+        if (!icr_wait_idle_x2apic()) return false;
+        wrmsr(MSR_APIC_ICR, ((uint64_t)dest_apic_id << 32) | ICR_DM_SIPI |
+                            ICR_ASSERT | vector);
+        return true;
+    }
+    if (s_mode != LAPIC_MODE_XAPIC) return false;
+    mmio_wr(XAPIC_ICR_HI, (dest_apic_id & 0xFFu) << 24);
+    if (!icr_wait_idle()) return false;
+    mmio_wr(XAPIC_ICR_LO, ICR_DM_SIPI | ICR_ASSERT | vector);      /* assert */
     return true;
 }

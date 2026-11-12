@@ -28,5 +28,7 @@ uint32_t     lapic_id(void);
 void lapic_eoi(void);
 bool lapic_send_ipi(uint32_t dest_apic_id, uint8_t vector);
 bool lapic_send_ipi_all_excl_self(uint8_t vector);
+bool lapic_send_init(uint32_t dest_apic_id);          /* INIT deassert dahil */
+bool lapic_send_sipi(uint32_t dest_apic_id, uint8_t vector);
 
 #endif /* ARCTIAN_SYSTEM_LAPIC_H */
