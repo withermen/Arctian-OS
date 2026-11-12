@@ -10,6 +10,8 @@
  *
  * UI tek is parcacigi: global tek ornek, kilit yok. */
 
+#include <stdbool.h>
+
 void dpi_init(void);              /* varsayilan 100 */
 int  dpi_set_percent(int pct);    /* yalniz 100/125/150; digeri en yakina
                                    * cekilir; etkin degeri dondurur */
@@ -22,5 +24,10 @@ int  dpi_unpx(int scaled);        /* olcekli piksel -> taban olcu;
                                    * dpi_px'in tersi (round-trip) */
 int  dpi_font_px(int base_pt);    /* punto -> px; kucuk degerlerde en az
                                    * 9 px korunur (okunabilirlik) */
+
+/* Birim testleri: bilinen degerler, en yakin deger cekmesi, ters cevirme
+ * tutarliligi, tasma/negatif korumasi. Cagrilmazsa derlemeye zarari yok;
+ * ilerideki test hedefi cagracak. Girdigi olcek degerini geri yukariler. */
+bool dpi_selftest(void);
 
 #endif /* ARCTIAN_DPI_H */
