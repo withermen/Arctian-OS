@@ -51,6 +51,7 @@
 #include "clock.h"
 #include "cpu.h"
 #include "percpu.h"
+#include "apboot.h"
 #include "sched.h"
 #include "proc.h"
 #include "thread.h"
@@ -694,6 +695,9 @@ void kernel_plus_main(void *arg) {
     cpu_detect();
     cpu_dump();
     percpu_init();
+    uint32_t ap_ok = apboot_start_all();
+    serial_printf("[smp] AP online=%u/%u\n", ap_ok,
+                  cpu_info()->apic_count > 0 ? cpu_info()->apic_count - 1 : 0);
     if (gui) bootanim_advance(30);
     LOG("[kp] mouse...");
     mouse_init();
