@@ -31,4 +31,19 @@ bool lapic_send_ipi_all_excl_self(uint8_t vector);
 bool lapic_send_init(uint32_t dest_apic_id);          /* INIT deassert dahil */
 bool lapic_send_sipi(uint32_t dest_apic_id, uint8_t vector);
 
+/* ---- Yerel timer (paket 7) ----
+ * Periyodik, bolme /16, vektor 0x40. lapic_timer_init() yalniz BSP
+ * tarfindan cagrilir; AP'ler timer baslatmaz. DIKKAT: vektor 0x40 icin
+ * IDT kapisi + stub (lapic_timer_irq cagiran) takilmadan init cagrilmamali;
+ * kapisi olmayan vektor #GP -> triple fault. lapic_timer_irq() once EOI
+ * sonra kayitli handler'i (sched_tick_local) cagirir. */
+
+#define LAPIC_TIMER_VECTOR 0x40u
+
+bool     lapic_timer_init(uint32_t hz);     /* 1 = basarili; hz=0 -> 1000 */
+void     lapic_timer_irq(void);             /* 0x40 IDT stub'unun kancasi */
+void     lapic_timer_set_handler(void (*fn)(void));
+bool     lapic_timer_running(void);
+uint32_t lapic_timer_hz(void);
+
 #endif /* ARCTIAN_SYSTEM_LAPIC_H */
