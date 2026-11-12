@@ -83,6 +83,7 @@ static bool usb_mouse_ever = false;
 
 #define PACKET_3BYTE    3
 #define PACKET_4BYTE    4
+#define PACKET_6BYTE    6   /* x/y ust bitleri + Z basinc + tekerlek */
 
 /* Taninan cihaz ailesi */
 typedef enum {
@@ -108,7 +109,7 @@ typedef enum {
 static mouse_state_t mouse_state;
 static int mouse_packet_size = PACKET_3BYTE;
 static int mouse_packet_cycle = 0;
-static uint8_t mouse_packet[4];     /* max 4-byte packet */
+static uint8_t mouse_packet[6];     /* en fazla 6-bayt gelismis paket */
 static mouse_device_t mouse_device = MOUSE_DEV_UNKNOWN;
 
 /*
@@ -340,19 +341,46 @@ static bool mouse_prob_elantech(void) {
 }
 
 /**
+ * Synaptics'i mutlak (absolute) 6-bayt moduna alir.
+ * Magic knock sonrasinda 200/100/80 hizi gonderilir ve cihaz 3 yetenek
+ * bayti dondurur. Herhangi bir adim basarisiz olursa cihaz eski
+ * 3/4-bayt akisina geri birakilir (cagiran taraf SET_DEFAULTS yapar).
+ */
+static bool mouse_synaptics_absolute(void) {
+    if (mouse_set_rate(0xC8) != 0) return false;
+    if (mouse_set_rate(0x64) != 0) return false;
+    if (mouse_set_rate(0x50) != 0) return false;
+
+    /* Yetenek/model baytlari: icerigi kullanilmiyor, senkron icin okunur. */
+    uint8_t caps[3];
+    for (int i = 0; i < 3; i++) {
+        if (ps2_read_data(&caps[i]) != 0)
+            return false;
+    }
+    return true;
+}
+
+/**
  * Cihaz ailesini tespit eder ve seri porta raporlar.
  *
  * Sirayla Synaptics knock, ALPS ve Elantech yoklamalari denenir; hicbiri
  * tutmazsa cihaz standart/IntelliMouse kabul edilir. Yoklamalar ornekleme
- * hizini degistirdigi icin sonunda SET_DEFAULTS ile temiz duruma donulur.
+ * hizini degistirdigi icin sonunda SET_DEFAULTS ile temiz duruma donulur
+ * (Synaptics mutlak modu basariyla kurulduysa bu adim atlanir).
  */
 static void mouse_identify_device(void) {
     ps2_flush_buffer();
 
     if (mouse_prob_synaptics()) {
         mouse_device = MOUSE_DEV_SYNAPTICS;
+        if (mouse_synaptics_absolute()) {
+            mouse_packet_size = PACKET_6BYTE;
+            serial_printf("[ps2] synaptics dokunmatik yuzey (id=0x%x), "
+                          "6-bayt mutlak mod\n", MOUSE_ID_SYNAPTICS);
+            return;     /* SET_DEFAULTS mutlak modu bozar: dokunma */
+        }
         serial_printf("[ps2] synaptics dokunmatik yuzey (id=0x%x), "
-                      "3/4-bayt\n", MOUSE_ID_SYNAPTICS);
+                      "mutlak mod yok: 3/4-bayt\n", MOUSE_ID_SYNAPTICS);
         mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
         ps2_flush_buffer();
         return;
@@ -442,10 +470,60 @@ static void mouse_process_usb(void) {
 /* ================================================================== */
 
 /**
+ * Gelismis 6-bayt paketi cozer (Synaptics mutlak modu).
+ *
+ *   p[0] : durum bayti (3-bayt ile ayni: butonlar + tasma bitleri)
+ *   p[1] : x alt 8 bit
+ *   p[2] : y alt 8 bit
+ *   p[3] : bit 0-1 = x ust 2 bit, bit 2-3 = y ust 2 bit
+ *   p[4] : Z basinc (0..255)
+ *   p[5] : tekerlek/kaydirma (isaretli 8 bit)
+ *
+ * x/y 10-bit isaretli degerdir. 3-bayt yoluna dokunulmaz: bu islev
+ * yalnizca mouse_packet_size == PACKET_6BYTE iken cagrilir.
+ */
+static void mouse_decode_packet6(void) {
+    uint8_t status_byte = mouse_packet[0];
+    int dx, dy;
+
+    dx = (int)mouse_packet[1] | ((int)(mouse_packet[3] & 0x03) << 8);
+    dy = (int)mouse_packet[2] | ((int)(mouse_packet[3] & 0x0C) << 6);
+    if (dx & 0x200) dx -= 0x400;    /* 10-bit isaret uzatma */
+    if (dy & 0x200) dy -= 0x400;
+
+    /* Tasma bitleri ust bitlerden daha guvenilir */
+    if (status_byte & 0x40) dx = (dx > 0) ? 511 : -512;
+    if (status_byte & 0x80) dy = (dy > 0) ? 511 : -512;
+
+    mouse_state.dx = dx;
+    mouse_state.dy = dy;
+
+    mouse_state.x += dx;
+    mouse_state.y -= dy;
+
+    if (mouse_state.x < 0) mouse_state.x = 0;
+    if (mouse_state.x >= mouse_screen_width)
+        mouse_state.x = mouse_screen_width - 1;
+    if (mouse_state.y < 0) mouse_state.y = 0;
+    if (mouse_state.y >= mouse_screen_height)
+        mouse_state.y = mouse_screen_height - 1;
+
+    mouse_state.buttons[MOUSE_BUTTON_LEFT]   = (status_byte & 0x01) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_RIGHT]  = (status_byte & 0x02) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
+    mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
+}
+
+/**
  * Decode and process a completed 3-byte or 4-byte mouse packet.
  * Called at the end of packet assembly.
  */
 static void mouse_decode_packet(void) {
+    if (mouse_packet_size == PACKET_6BYTE) {
+        mouse_decode_packet6();
+        return;
+    }
+
     uint8_t status_byte = mouse_packet[0];
     int dx, dy;
 
@@ -526,19 +604,23 @@ void mouse_feed_byte(uint8_t data) {
         case 2:
             mouse_packet[2] = data;
 
-            if (mouse_packet_size == PACKET_4BYTE) {
-                mouse_packet_cycle = 3;  /* need one more byte */
+            if (mouse_packet_size > PACKET_3BYTE) {
+                mouse_packet_cycle = 3;  /* 4. ya da 6. bayta kadar devam */
             } else {
                 mouse_packet_cycle = 0;
                 mouse_decode_packet();
             }
             break;
 
-        case 3:
-            /* 4th byte: scroll wheel data (IntelliMouse) */
-            mouse_packet[3] = data;
-            mouse_packet_cycle = 0;
-            mouse_decode_packet();
+        case 3:     /* 4. bayt (tekerlek) veya 6-baytlik paketin 4. bayti */
+        case 4:     /* 5. bayt: Z basinc (6-bayt) */
+        case 5:     /* 6. bayt: kaydirma (6-bayt) */
+            mouse_packet[mouse_packet_cycle] = data;
+            mouse_packet_cycle++;
+            if (mouse_packet_cycle >= mouse_packet_size) {
+                mouse_packet_cycle = 0;
+                mouse_decode_packet();
+            }
             break;
 
         default:
@@ -672,11 +754,16 @@ void mouse_init(void) {
 
     /*
      * Step 5b: Gelismis cihaz kimligi (Synaptics/ALPS/Elantech).
+     * Basarili bir Synaptics mutlak modu PACKET_6BYTE'a gecirir ve
+     * ardindan gelen IntelliMouse yoklamasi atlanir.
      */
     mouse_identify_device();
 
-    /* Step 6: Detect IntelliMouse scroll wheel */
-    if (mouse_detect_intellimouse()) {
+    /* Step 6: Detect IntelliMouse scroll wheel (6-bayt modda gerekmez) */
+    if (mouse_packet_size == PACKET_6BYTE) {
+        mouse_state.scroll_wheel = true;
+        kernel_debug("PS/2 mouse: 6-bayt gelismis paket modu");
+    } else if (mouse_detect_intellimouse()) {
         mouse_packet_size = PACKET_4BYTE;
         mouse_state.scroll_wheel = true;
         mouse_device = MOUSE_DEV_INTELLI;
@@ -694,11 +781,13 @@ void mouse_init(void) {
      * IMPORTANT: The sample rate must be set AFTER detection,
      * because the detection sequence changes the sample rate.
      */
-    mouse_send_cmd(MOUSE_CMD_SET_SAMPLE);
-    mouse_send_cmd(100);        /* 100 Hz sample rate */
+    if (mouse_packet_size != PACKET_6BYTE) {
+        mouse_send_cmd(MOUSE_CMD_SET_SAMPLE);
+        mouse_send_cmd(100);        /* 100 Hz sample rate */
 
-    mouse_send_cmd(MOUSE_CMD_SET_RES);
-    mouse_send_cmd(2);          /* 4 counts/mm */
+        mouse_send_cmd(MOUSE_CMD_SET_RES);
+        mouse_send_cmd(2);          /* 4 counts/mm */
+    }
 
     /* Step 8: Enable data reporting (stream mode) */
     if (mouse_send_cmd(MOUSE_CMD_ENABLE) != 0) {
