@@ -380,19 +380,25 @@ static void s_scale_slider_cb(lv_event_t *e) {
     if (i < 0) i = 0;
     if (i > 2) i = 2;
     if (opts[i] == s_fontscale()) return;
-    if (arctian_settings && arctian_settings->set_int)
+    if (arctian_settings && arctian_settings->set_int) {
+        /* Tek kaynak iki anahtar: fontscale yazi tarafi, uiscale dpi
+         * cekirdegi (ui_s/ic_s/dk_s). Ikisi birlikte yazilir. */
         arctian_settings->set_int("fontscale", opts[i]);   /* kabuk yeniden kurulur */
+        arctian_settings->set_int("uiscale", opts[i]);
+    }
 }
 
-/* Yogunluk acilir listesi: ayni "fontscale" ayarini dolasir
- * (Rahat=%100, Orta=%125, Siki=%150) - ayri bir uydurma ayar yoktur */
+/* Yogunluk acilir listesi: ayni olcegi dolasir (Rahat=%100, Orta=%125,
+ * Siki=%150); fontscale + uiscale birlikte yazilir, ayri uydurma ayar yok */
 static void s_density_cb(lv_event_t *e) {
     static const int opts[3] = { 100, 125, 150 };
     int cur = s_fontscale();
     int idx = (cur == 150) ? 2 : (cur == 125 ? 1 : 0);
     idx = (idx + 1) % 3;
-    if (arctian_settings && arctian_settings->set_int)
+    if (arctian_settings && arctian_settings->set_int) {
         arctian_settings->set_int("fontscale", opts[idx]);
+        arctian_settings->set_int("uiscale", opts[idx]);
+    }
 }
 
 static void s_toggle_cb(lv_event_t *e) {
