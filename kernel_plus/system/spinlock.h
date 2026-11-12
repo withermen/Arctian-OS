@@ -38,15 +38,14 @@ static inline void spin_unlock(spinlock_t *l) {
     __atomic_fetch_add(&l->owner, 1u, __ATOMIC_RELEASE);
 }
 
-/* Bilet almadan dener: yalnizca kilit bossa (owner == next) girer. */
+/* Bilet almadan dener: yalnizca kilit bossa (owner == next) girer.
+ * Basarili CAS next'i t -> t+1 yapar; owner t kalir, yani kilit tutulurken
+ * owner == t ve bos iken owner == next olur. Ekstra owner store'u yok. */
 static inline bool spin_trylock(spinlock_t *l) {
     uint32_t t = __atomic_load_n(&l->next, __ATOMIC_RELAXED);
     if (__atomic_load_n(&l->owner, __ATOMIC_ACQUIRE) != t) return false;
-    if (!__atomic_compare_exchange_n(&l->next, &t, t + 1u, false,
-                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
-        return false;
-    __atomic_store_n(&l->owner, t + 1u, __ATOMIC_RELEASE);
-    return true;
+    return __atomic_compare_exchange_n(&l->next, &t, t + 1u, false,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
 /* ---- kesme durumu ---- */

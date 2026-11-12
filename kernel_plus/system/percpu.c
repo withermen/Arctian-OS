@@ -7,19 +7,28 @@ _Static_assert(CPU_MAX_APICS > 0, "CPU_MAX_APICS sifir olamaz");
 static percpu_t s_cpu[CPU_MAX_APICS];
 static uint32_t  s_count;
 
-static uint32_t current_apic_id(void) {
-    const cpu_info_t *ci = cpu_info();
-    uint32_t r[4];
-    if (ci->x2apic) {
-        /* CPUID 0x0B, alt yaprak 1: EDX = x2APIC ID */
-        __asm__ volatile ("cpuid"
-                          : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3])
-                          : "a"(0x0Bu), "c"(1u));
-        if (r[3]) return r[3];
-    }
+static inline void cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
     __asm__ volatile ("cpuid"
                       : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3])
-                      : "a"(1u), "c"(0u));
+                      : "a"(leaf), "c"(sub));
+}
+
+static uint32_t current_apic_id(void) {
+    uint32_t r[4];
+    cpuid(0, 0, r);
+    uint32_t max_leaf = r[0];
+
+    /* x2APIC kimligi: once 0x1F, sonra 0x0B (ikisinde de subleaf 1 EDX).
+     * EDX sifirsa gecerli bir numara yok demektir, siradaki yola dus. */
+    if (max_leaf >= 0x1F) {
+        cpuid(0x1F, 1, r);
+        if (r[3]) return r[3];
+    }
+    if (max_leaf >= 0x0B) {
+        cpuid(0x0B, 1, r);
+        if (r[3]) return r[3];
+    }
+    cpuid(1, 0, r);
     return (r[1] >> 24) & 0xFFu;
 }
 
@@ -72,12 +81,15 @@ percpu_t *percpu_by_index(uint32_t index) {
 }
 
 percpu_t *percpu_self(void) {
-    percpu_t *p = percpu_by_apic(current_apic_id());
-    return p ? p : &s_cpu[0];   /* BSP'de daima 0 */
+    /* Bilinmeyen APIC ID'de BSP'ye dusmuyoruz: cagiran acikca karar versin.
+     * Sessiz dusme, yeni bir AP'nin BSP verisini ezmesine yol acabilir. */
+    return percpu_by_apic(current_apic_id());
 }
 
 uint32_t percpu_self_index(void) {
-    return percpu_self()->index;
+    percpu_t *p = percpu_self();
+    /* NULL'da 0 dondurmek BSP ile karisir; UINT32_MAX "bilinmiyor". */
+    return p ? p->index : UINT32_MAX;
 }
 
 uint32_t percpu_online_count(void) {

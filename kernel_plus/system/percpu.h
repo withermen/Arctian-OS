@@ -25,8 +25,8 @@ typedef struct {
 void      percpu_init(void);                    /* BSP'yi kaydeder */
 percpu_t *percpu_by_apic(uint32_t apic_id);
 percpu_t *percpu_by_index(uint32_t index);
-percpu_t *percpu_self(void);
-uint32_t  percpu_self_index(void);              /* BSP'de 0 */
+percpu_t *percpu_self(void);                    /* bilinmiyorsa NULL */
+uint32_t  percpu_self_index(void);              /* BSP'de 0, bilinmiyorsa UINT32_MAX */
 uint32_t  percpu_online_count(void);
 uint32_t  percpu_count(void);                   /* kayitli girdi sayisi */
 
