@@ -114,8 +114,41 @@ void win_close_rec(winrec_t *r) {
 }
 
 
+/* Acilis/kapanma solmasi: yalnizca opa oynatilir; boyut/konum degismez.
+ * g_reduce_motion kapaliysa hic animasyon kurulmaz, opa aninda ayarlanir. */
+static void win_fade_exec_cb(void * var, int32_t v) {
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
+}
+
+/* Solma bitti: mevcut silme yolunu cagrir. Pencere yol ustunde
+ * shell_rebuild gibi bir yoldan erken silindiyse LVGL animasyonu da
+ * siler ve bu callback calismaz; yine de kayit yeniden kullanilmis olabilecegi
+ * icin winrec_alive + USER_2 (solma isareti) kontrol edilir. */
+static void win_close_done_cb(lv_anim_t * a) {
+    winrec_t * r = (winrec_t *)lv_anim_get_user_data(a);
+    if (!r || !winrec_alive(r) || !r->win) return;
+    if (!lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_2)) return;
+    win_close_rec(r);
+}
+
 void win_close_cb(lv_event_t *e) {
-    win_close_rec((winrec_t *)lv_event_get_user_data(e));
+    winrec_t * r = (winrec_t *)lv_event_get_user_data(e);
+    if (!r || !r->win) return;
+    if (g_reduce_motion) { win_close_rec(r); return; }
+    /* cift cagri korumasi: solma suruyor, ikinci cagri no-op */
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_2)) return;
+    lv_obj_add_flag(r->win, LV_OBJ_FLAG_USER_2);
+    lv_anim_delete(r->win, win_fade_exec_cb);   /* ortada acilis solmasi varsa */
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, r->win);
+    lv_anim_set_values(&a, 255, 0);
+    lv_anim_set_duration(&a, 110);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
+    lv_anim_set_exec_cb(&a, win_fade_exec_cb);
+    lv_anim_set_completed_cb(&a, win_close_done_cb);
+    lv_anim_set_user_data(&a, r);
+    lv_anim_start(&a);
 }
 
 
@@ -612,6 +645,18 @@ lv_obj_t *create_window(const char *title, int w, int h) {
 
     lv_obj_add_event_cb(win, win_size_cb, LV_EVENT_SIZE_CHANGED, r);
     lv_obj_add_event_cb(tb, title_dbl_cb, LV_EVENT_DOUBLE_CLICKED, r);
+    }
+    /* acilis solmasi: opa 0 -> 255, ~140 ms ease-out; boyut/konum degmez */
+    if (!g_reduce_motion) {
+        lv_obj_set_style_opa(win, LV_OPA_TRANSP, 0);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, win);
+        lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+        lv_anim_set_duration(&a, 140);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&a, win_fade_exec_cb);
+        lv_anim_start(&a);
     }
     update_app_indicators();
     lv_obj_move_foreground(win);
