@@ -64,6 +64,7 @@ bool apboot_start(uint32_t cpu_index, uint32_t apic_id) {
     volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)AP_TRAMP_ADDR;
     for (size_t i = 0; i < blob; i++) dst[i] = ap_trampoline_bin[i];
     for (size_t i = blob; i < AP_TRAMP_MAX; i++) dst[i] = 0;   /* eski kalinti */
+    __asm__ volatile ("wbinvd" ::: "memory");   /* AP cache'ten eski satir okumasun */
 
     s_params->cr3 = read_cr3();
     s_params->entry = (uint64_t)(uintptr_t)&ap_entry;
@@ -78,11 +79,17 @@ bool apboot_start(uint32_t cpu_index, uint32_t apic_id) {
     ap_delay_ms(1);
     if (!lapic_send_sipi(apic_id, AP_SIPI_VECTOR)) return false;
 
-    for (int i = 0; i < 100; i++) {
+    /* Butce: clock ilerlerse ~100 ms, ilerlemezse 20M pause'ta bir kontrol.
+     * Toplam 200M spin asilmaz; boylece kesmeler kapaliyken de doner. */
+    uint64_t t0 = clock_ms();
+    uint64_t spins = 0;
+    for (;;) {
         if (s_params->status == AP_STATUS_APOK) return true;
-        ap_delay_ms(1);
+        if ((uint64_t)(clock_ms() - t0) >= 100u) break;
+        if (++spins > 200000000ull) break;
+        __asm__ volatile ("pause");
     }
-    return false;
+    return s_params->status == AP_STATUS_APOK;
 }
 
 void ap_entry(uint32_t cpu_index) {
@@ -94,6 +101,8 @@ void ap_entry(uint32_t cpu_index) {
         p->spin_locks_held = 0;
         p->current_task = 0;
         serial_printf("AP online index=%u apic=0x%X\n", cpu_index, p->apic_id);
+        /* Kayit tamamlanmadan APOK yazmak BSP'yi yaniltir; burada yazilir. */
+        s_params->status = AP_STATUS_APOK;
     } else {
         serial_printf("AP bilinmeyen index=%u\n", cpu_index);
     }
@@ -106,7 +115,7 @@ uint32_t apboot_start_all(void) {
     const cpu_info_t *ci = cpu_info();
     if (!ci->madt_ok) return 0;
     if (lapic_init() && ci->bsp_apic_id != lapic_id()) {
-        serial_printf("[apboot] uyarı: BSP APIC ID farkli cpuid=%u lapic=0x%X\n",
+        serial_printf("[apboot] uyari: BSP APIC ID farkli cpuid=%u lapic=0x%X\n",
                       ci->bsp_apic_id, lapic_id());
     }
     uint32_t ok = 0;

@@ -135,28 +135,33 @@ bool lapic_send_ipi_all_excl_self(uint8_t vector) {
 }
 
 /* ---- INIT / SIPI (AP boot) ----
- * Delivery mode: INIT = 5, SIPI = 6. Level-assert biti 14 (0x4000) set
- * kalmali; xAPIC'te INIT ayrica trigger-level (bit 15) ile assert edilip
- * deassert edilir, yoksa AP'ye INIT düzegi tam ulasmaz. x2APIC'te level
- * biti yok sayilir; tek yazim yeter. */
+ * Delivery mode: INIT = 5, SIPI = 6. Linux ile ayni siralama:
+ *   INIT assert   = DM_INIT | 0x4000 (bit 14)    -> 0x4500
+ *   INIT deassert = DM_INIT            (bit 14/15 temiz) -> 0x0500
+ * x2APIC'te level biti yok sayilir ama ayni iki yazim yapilir; AI yazim
+ * atlanirsa bazi AP'ler INIT'i almaz. SIPI yalnız assert gonderir. */
 
 #define ICR_DM_INIT   (5u << 8)
 #define ICR_DM_SIPI   (6u << 8)
 #define ICR_ASSERT    0x4000u
-#define ICR_LEVEL     0x8000u
 
 bool lapic_send_init(uint32_t dest_apic_id) {
+    uint32_t assert_v  = ICR_DM_INIT | ICR_ASSERT;   /* 0x4500 */
+    uint32_t deassert_v = ICR_DM_INIT;               /* 0x0500 */
+
     if (s_mode == LAPIC_MODE_X2APIC) {
         if (!icr_wait_idle_x2apic()) return false;
-        wrmsr(MSR_APIC_ICR, ((uint64_t)dest_apic_id << 32) | ICR_DM_INIT | ICR_ASSERT);
+        wrmsr(MSR_APIC_ICR, ((uint64_t)dest_apic_id << 32) | assert_v);
+        if (!icr_wait_idle_x2apic()) return false;
+        wrmsr(MSR_APIC_ICR, ((uint64_t)dest_apic_id << 32) | deassert_v);
         return true;
     }
     if (s_mode != LAPIC_MODE_XAPIC) return false;
     mmio_wr(XAPIC_ICR_HI, (dest_apic_id & 0xFFu) << 24);
     if (!icr_wait_idle()) return false;
-    mmio_wr(XAPIC_ICR_LO, ICR_DM_INIT | ICR_ASSERT | ICR_LEVEL);   /* assert */
+    mmio_wr(XAPIC_ICR_LO, assert_v);                 /* assert */
     if (!icr_wait_idle()) return false;
-    mmio_wr(XAPIC_ICR_LO, ICR_DM_INIT | ICR_ASSERT);               /* deassert */
+    mmio_wr(XAPIC_ICR_LO, deassert_v);               /* deassert */
     return true;
 }
 

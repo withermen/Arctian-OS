@@ -8,7 +8,7 @@
 ;   8F10 stack_top  u64
 ;   8F18 cpu_index  u32
 ;   8F1C apic_id    u32
-;   8F20 status     u32  ; AP basariyla gecince 'APOK' yazar
+;   8F20 status     u32  ; trampoline 'AP64' yazar; 'APOK'u ap_entry yazar
 ;
 ; Iki GDT: PE acikken L=1/D=0 tanimla 32-bit asama adimlanamaz, bu yuzden
 ; once 32-bit GDT (0x08 kod D=1), sonra 64-bit GDT (0x08 kod L=1) yuklenir.
@@ -25,8 +25,7 @@ PARAM_ENTRY    equ 0x8F08
 PARAM_STACK    equ 0x8F10
 PARAM_CPUIDX   equ 0x8F18
 PARAM_STATUS   equ 0x8F20
-STATUS_APOK    equ 0x4B4F5041          ; 'APOK' kucuk sonlu
-
+STATUS_AP64    equ 0x34365041          ; 'AP64' kucuk sonlu (gecis tamam)
 ap_start:
     cli
     cld
@@ -77,7 +76,7 @@ ap64:
     mov rbp, 0
 
     mov rax, PARAM_STATUS
-    mov dword [rax], STATUS_APOK        ; BSP'ye "gecis tamam"
+    mov dword [rax], STATUS_AP64        ; yalniz mod gecisi; APOK'u C yazar
     mov rax, PARAM_CPUIDX
     mov edi, [rax]                      ; ap_entry(uint32_t cpu_index)
     mov rax, PARAM_ENTRY
@@ -88,17 +87,20 @@ ap64:
     hlt
     jmp .hang
 
-; ---- gecici GDT'ler (duz, base 0) ----
+; ---- gecici GDT'ler (duz, base = 0) ----
+; Kucuk sonlu dizilim: limit[15:0] base[23:0] erisim limit[19:16]+bayraklar base[31:24].
+; Limitin ust 4 biti 6. bayragin alt yarisi oldugu icin base baytlari sifir
+; kalmali (0x00CF9A00000FFFFF yanlis; base 0x000F0000 yapardi).
 gdt32:
     dq 0                                ; 0x00 bos
-    dq 0x00CF9A00000FFFFF               ; 0x08 32-bit kod (D=1, L=0)
-    dq 0x00CF9200000FFFFF               ; 0x10 veri
+    dq 0x00CF9A000000FFFF               ; 0x08 32-bit kod (D=1, L=0)
+    dq 0x00CF92000000FFFF               ; 0x10 veri
 gdt32_end:
 
 gdt64:
     dq 0                                ; 0x00 bos
-    dq 0x00AF9A00000FFFFF               ; 0x08 64-bit kod (L=1, D=0)
-    dq 0x00CF9200000FFFFF               ; 0x10 veri
+    dq 0x00AF9A000000FFFF               ; 0x08 64-bit kod (L=1, D=0)
+    dq 0x00CF92000000FFFF               ; 0x10 veri
 gdt64_end:
 
 gdt32_ptr:
