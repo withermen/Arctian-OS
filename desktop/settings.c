@@ -1,6 +1,8 @@
 #include "dsk.h"
 #include "dpi.h"
 
+int g_reduce_motion;   /* tanim: kv 'motion' tersi; settings_apply_values yazar */
+
 
 int kv_find(const char *k) {
     for (int i = 0; i < s_kv_n; i++) if (s_eq(s_kv[i].k, k)) return i;
@@ -50,6 +52,9 @@ void settings_apply_values(void) {
     /* Arayuz olceği (dpi çekirdeği): kv 'uiscale' tek kaynak, varsayilan 100.
      * ui_scale_refresh() ve dk_s() bu degeri cozunurluk olcegiyle carpar. */
     dpi_set_percent(kv_get_int("uiscale", 100));
+    /* Hareketi azalt: kv 'motion' varsayilan 1 (acik); 0 ise animasyonsuz.
+     * Buradan okundugu icin boot'ta da canli degisimde de gecerlidir. */
+    g_reduce_motion = (kv_get_int("motion", 1) == 0);
     adl_set_contrast(kv_get_int("contrast", 0));
     adl_set_light(kv_get_int("light", 0));
     adl_set_focus_ring(kv_get_int("focusring", 1));

@@ -397,6 +397,10 @@ lv_obj_t *make_icon_png(lv_obj_t *parent, const unsigned char *data, unsigned le
 lv_obj_t *make_app_icon(lv_obj_t *parent, const arctian_app_t *a, int size);
 void update_app_indicators(void);
 void win_close_rec(winrec_t *r);
+
+/* Hareketi azalt (kv 'motion' tersi): 1 ise acilis/kapanma animasyonlari
+ * atlanip son deger aninda uygulanir. settings.c tarafindan tanimlanir. */
+extern int g_reduce_motion;
 void win_close_cb(lv_event_t *e);
 void win_min_cb(lv_event_t *e);
 void win_max_cb(lv_event_t *e);
