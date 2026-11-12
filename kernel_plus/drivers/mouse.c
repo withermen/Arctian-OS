@@ -71,12 +71,28 @@ static bool usb_mouse_ever = false;
 #define MOUSE_ID_INTELLI    0x03
 #define MOUSE_ID_INTELLI_5B 0x04
 
+/* Gelismis (dokunmatik yuzey) cihaz kimlikleri */
+#define MOUSE_ID_SYNAPTICS  0x47
+#define MOUSE_ID_ALPS       0x73
+#define MOUSE_ID_ELANTECH   0x04
+#define MOUSE_ID_ELANTECH2  0x0E
+
 /* ================================================================== */
 /* Packet Types                                                        */
 /* ================================================================== */
 
 #define PACKET_3BYTE    3
 #define PACKET_4BYTE    4
+
+/* Taninan cihaz ailesi */
+typedef enum {
+    MOUSE_DEV_UNKNOWN = 0,
+    MOUSE_DEV_STANDARD,
+    MOUSE_DEV_INTELLI,
+    MOUSE_DEV_SYNAPTICS,
+    MOUSE_DEV_ALPS,
+    MOUSE_DEV_ELANTECH
+} mouse_device_t;
 
 /* ================================================================== */
 /* Timeouts & Delays                                                  */
@@ -93,6 +109,7 @@ static mouse_state_t mouse_state;
 static int mouse_packet_size = PACKET_3BYTE;
 static int mouse_packet_cycle = 0;
 static uint8_t mouse_packet[4];     /* max 4-byte packet */
+static mouse_device_t mouse_device = MOUSE_DEV_UNKNOWN;
 
 /*
  * Screen dimensions (default VESA 1024x768, updated by vesa_init)
@@ -262,6 +279,110 @@ static bool mouse_detect_intellimouse(void) {
 
     /* 0x03 = standard IntelliMouse, 0x04 = 5-button IntelliMouse */
     return (id == MOUSE_ID_INTELLI || id == MOUSE_ID_INTELLI_5B);
+}
+
+/* ================================================================== */
+/* Device Identification: Synaptics / ALPS / Elantech                 */
+/* ================================================================== */
+
+/**
+ * Get_ID komutunu gonderip cihazin kimlik baytini okur.
+ * Basarisizlikta 0xFF doner (gecerli bir kimlik degil).
+ */
+static uint8_t mouse_read_device_id(void) {
+    uint8_t id;
+    if (mouse_send_cmd(MOUSE_CMD_GET_ID) != 0)
+        return 0xFF;
+    if (ps2_read_data(&id) != 0)
+        return 0xFF;
+    return id;
+}
+
+/**
+ * Ornekleme hizini ayarlar; ACK disinda bir sey beklenmez.
+ * Basarili olursa 0 doner.
+ */
+static int mouse_set_rate(uint8_t rate) {
+    if (mouse_send_cmd(MOUSE_CMD_SET_RATE) != 0)
+        return -1;
+    return mouse_send_cmd(rate);
+}
+
+/**
+ * Synaptics "magic knock": arka arkaya 4 kez 20 Hz ornekleme hizi,
+ * ardindan Get_ID. Dokunmatik yuzeyler 0x47 ile kimlik verir.
+ */
+static bool mouse_prob_synaptics(void) {
+    for (int i = 0; i < 4; i++) {
+        if (mouse_set_rate(20) != 0)
+            return false;
+    }
+    return mouse_read_device_id() == MOUSE_ID_SYNAPTICS;
+}
+
+/**
+ * ALPS: 200 Hz (0xC8) ornekleme hizindan sonra Get_ID -> 0x73.
+ */
+static bool mouse_prob_alps(void) {
+    if (mouse_set_rate(0xC8) != 0)
+        return false;
+    return mouse_read_device_id() == MOUSE_ID_ALPS;
+}
+
+/**
+ * Elantech: 10 Hz (0x0A) ornekleme hizindan sonra Get_ID -> 0x04/0x0E.
+ */
+static bool mouse_prob_elantech(void) {
+    if (mouse_set_rate(0x0A) != 0)
+        return false;
+    uint8_t id = mouse_read_device_id();
+    return id == MOUSE_ID_ELANTECH || id == MOUSE_ID_ELANTECH2;
+}
+
+/**
+ * Cihaz ailesini tespit eder ve seri porta raporlar.
+ *
+ * Sirayla Synaptics knock, ALPS ve Elantech yoklamalari denenir; hicbiri
+ * tutmazsa cihaz standart/IntelliMouse kabul edilir. Yoklamalar ornekleme
+ * hizini degistirdigi icin sonunda SET_DEFAULTS ile temiz duruma donulur.
+ */
+static void mouse_identify_device(void) {
+    ps2_flush_buffer();
+
+    if (mouse_prob_synaptics()) {
+        mouse_device = MOUSE_DEV_SYNAPTICS;
+        serial_printf("[ps2] synaptics dokunmatik yuzey (id=0x%x), "
+                      "3/4-bayt\n", MOUSE_ID_SYNAPTICS);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    ps2_flush_buffer();
+    if (mouse_prob_alps()) {
+        mouse_device = MOUSE_DEV_ALPS;
+        serial_printf("[ps2] alps dokunmatik yuzey (id=0x%x), 3/4-bayt\n",
+                      MOUSE_ID_ALPS);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    ps2_flush_buffer();
+    if (mouse_prob_elantech()) {
+        mouse_device = MOUSE_DEV_ELANTECH;
+        serial_printf("[ps2] elantech dokunmatik yuzey (id=0x%x/0x%x), "
+                      "3/4-bayt\n", MOUSE_ID_ELANTECH, MOUSE_ID_ELANTECH2);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    mouse_device = MOUSE_DEV_STANDARD;
+    serial_printf("[ps2] gelismis kimlik yok: standart PS/2 fare, "
+                  "3/4-bayt yol\n");
+    mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+    ps2_flush_buffer();
 }
 
 /* ================================================================== */
@@ -479,6 +600,7 @@ void mouse_init(void) {
     mouse_state.scroll_wheel = false;
     mouse_packet_cycle = 0;
     mouse_packet_size = PACKET_3BYTE;
+    mouse_device = MOUSE_DEV_UNKNOWN;
 
     /*
      * Step 1: Flush any stale data from the PS/2 buffer.
@@ -548,10 +670,16 @@ void mouse_init(void) {
     /* Step 5: Set default settings (disable, 1:1 scaling, 4 counts/mm) */
     mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
 
+    /*
+     * Step 5b: Gelismis cihaz kimligi (Synaptics/ALPS/Elantech).
+     */
+    mouse_identify_device();
+
     /* Step 6: Detect IntelliMouse scroll wheel */
     if (mouse_detect_intellimouse()) {
         mouse_packet_size = PACKET_4BYTE;
         mouse_state.scroll_wheel = true;
+        mouse_device = MOUSE_DEV_INTELLI;
         kernel_debug("PS/2 mouse: IntelliMouse scroll wheel detected");
     } else {
         mouse_packet_size = PACKET_3BYTE;
