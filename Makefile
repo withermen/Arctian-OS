@@ -425,7 +425,8 @@ $(UEFI_EFI): $(UEFI_OBJS) $(UEFI_DIR)/linker.ld
 	    exit 1; \
 	fi
 	@mkdir -p $(dir $@)
-	$(LD) -m i386pep -nostdlib -T $(UEFI_DIR)/linker.ld -o $@ $(UEFI_OBJS)
+	$(LD) -m i386pep -nostdlib --image-base=0x400000 --subsystem 10 \
+	    -T $(UEFI_DIR)/linker.ld -o $@ $(UEFI_OBJS)
 
 # --- AP trampoline (S6, SMP) ----------------------------------------------
 # 16-bit gercek mod blob'u; apboot.c icine .incbin ile gomulur. Yol sabit
