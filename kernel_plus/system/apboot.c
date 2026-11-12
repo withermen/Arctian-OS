@@ -5,6 +5,7 @@
 #include "cpu.h"
 #include "percpu.h"
 #include "lapic.h"
+#include "percpu_gdt.h"
 #include "clock.h"
 #include "serial.h"
 
@@ -93,6 +94,10 @@ bool apboot_start(uint32_t cpu_index, uint32_t apic_id) {
 }
 
 void ap_entry(uint32_t cpu_index) {
+    /* Kendi GDT/TSS/IDT devri: kesmeler acilmaz, IDT icerigi degismez. */
+    gdt_init_cpu(cpu_index,
+                 (uint64_t)(uintptr_t)(&s_ap_stacks[cpu_index][AP_STACK_SIZE]));
+
     percpu_t *p = percpu_by_index(cpu_index);
     if (p) {
         p->online = true;

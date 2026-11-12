@@ -44,8 +44,15 @@ ap32:
     mov fs, ax
     mov gs, ax
 
+    ; SSE/SSE2: GCC -O2 cekirdek kodunda movdqa/movups kullaniyor; bu bitler
+    ; olmadan AP ilk SSE komutunda #UD alir (QEMU -d int ile goruldu).
+    mov eax, cr0
+    and eax, 0xFFFFFFF3                   ; EM(bit2) ve TS(bit3) temizle
+    or eax, 1 << 1                        ; MP(bit1) kur; CD/NW'ye dokunma
+    mov cr0, eax
+
     mov eax, cr4
-    or eax, 1 << 5                      ; CR4.PAE
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)   ; PAE | OSFXSR | OSXMMEXCPT
     mov cr4, eax
 
     mov ecx, 0xC0000080                 ; EFER
