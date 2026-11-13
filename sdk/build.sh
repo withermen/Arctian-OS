@@ -81,13 +81,13 @@ $OBJCOPY -O binary app.elf app.bin
 echo "[4/4] .wlf paketleniyor..."
 NAME=$($PY -c "import json;print(json.load(open('wolf.json'))['name'])")
 
-# Giris islevi: wolf_main ya da main. entry_off = adres - 0x03000000
+# Giris islevi: wolf_main ya da main. entry_off = adres - 0x06800000
 ENTRY_SYM=$($NM app.elf | grep -E ' T (wolf_main|main)$' | head -1 | cut -d' ' -f1)
 if [ -z "$ENTRY_SYM" ]; then
     echo "[hata] wolf_main/main sembolu bulunamadi" >&2
     exit 1
 fi
-ENTRY_OFF=$($PY -c "print(int('$ENTRY_SYM',16) - 0x03000000)")
+ENTRY_OFF=$($PY -c "print(int('$ENTRY_SYM',16) - 0x06800000)")
 
 BSS=$($PY - "$READELF" <<'PY'
 import subprocess, sys

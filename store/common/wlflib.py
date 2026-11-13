@@ -49,7 +49,7 @@ WLF_FLAG_RESIZE = 0x0100
 WLF_FLAG_KNOWN = WLF_FLAG_FS | WLF_FLAG_NET | WLF_FLAG_EXEC | WLF_FLAG_RESIZE
 
 # include/arctian/memory_map.h
-WLF_BASE = 0x03000000
+WLF_BASE = 0x06800000
 WLF_MAX = 8 * 1024 * 1024
 
 # include/arctian/sig.h

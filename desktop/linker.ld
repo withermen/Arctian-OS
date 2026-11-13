@@ -3,7 +3,7 @@ ENTRY(desktop_main)
 
 SECTIONS
 {
-    . = 0x00C00000;
+    . = 0x01000000;
 
     .text : ALIGN(4K) { *(.text.entry) *(.text) *(.text.*) }
     .rodata : ALIGN(4K) { *(.rodata) *(.rodata.*) }

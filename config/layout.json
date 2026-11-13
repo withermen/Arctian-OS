@@ -14,7 +14,7 @@
   "modules": [
     { "name": "install",     "iso_name": "install.bin", "type": 2, "bin": "build/obj/install/install.bin",         "elf": "build/obj/install/install.elf",             "load_addr": "0x00200000", "flags": 0 },
     { "name": "kernel_plus", "iso_name": "kplus.bin",   "type": 3, "bin": "build/obj/kernel_plus/kernel_plus.bin", "elf": "build/obj/kernel_plus/kernel_plus.elf",     "load_addr": "0x00300000", "flags": 1 },
-    { "name": "desktop",     "iso_name": "desktop.bin", "type": 4, "bin": "build/obj/desktop/desktop.bin",         "elf": "build/obj/desktop/desktop.elf",             "load_addr": "0x00C00000", "flags": 1 }
+    { "name": "desktop",     "iso_name": "desktop.bin", "type": 4, "bin": "build/obj/desktop/desktop.bin",         "elf": "build/obj/desktop/desktop.elf",             "load_addr": "0x01000000", "flags": 1 }
   ],
   "output": {
     "img": "build/arctian.img",

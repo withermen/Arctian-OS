@@ -343,7 +343,7 @@ def main():
     ap.add_argument("--bytecode", help="Wolf bytecode (.wlfb)")
     ap.add_argument("--json", default="wolf.json")
     ap.add_argument("--entry", type=int, default=0, help="entry_off")
-    ap.add_argument("--load", type=lambda v: int(v, 0), default=0x03000000)
+    ap.add_argument("--load", type=lambda v: int(v, 0), default=0x06800000)
     ap.add_argument("--bss", type=int, default=0)
     ap.add_argument("-o", "--out")
     ap.add_argument("--inspect")

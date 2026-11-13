@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "memory_map.h"
 
 static inline void dst_outb(uint16_t p, uint8_t v) {
     __asm__ volatile("outb %0,%1" :: "a"(v), "Nd"(p));
@@ -71,7 +72,7 @@ void duckstore_selftest(void) {
     dst_puts("[ds] preload rc="); dst_putx((uint32_t)r2);
     dst_puts(" err="); dst_puts(e2); dst_puts("\n");
 
-    uint8_t *code = (uint8_t *)(uintptr_t)0x01800000u;
+    uint8_t *code = (uint8_t *)(uintptr_t)APP_BASE;
     uint32_t sig = 0;
     for (int i = 0; i < 16; i++) sig = (sig << 1) ^ code[i];
     dst_puts("[ds] code_sig="); dst_putx(sig); dst_puts("\n");

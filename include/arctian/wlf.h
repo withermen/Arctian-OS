@@ -83,7 +83,7 @@
 #define WLF_FLAG_RESIZE     0x0100u
 #define WLF_FLAG_FULLSCREEN 0x0200u   /* cercevesiz tam ekran basla (ofis) */
 
-#define WLF_DEFAULT_LOAD 0x03000000u   /* varsayilan native yukleme adresi */
+#define WLF_DEFAULT_LOAD 0x06800000u   /* varsayilan native yukleme adresi (WLF_BASE) */
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;          /* WLF_MAGIC */

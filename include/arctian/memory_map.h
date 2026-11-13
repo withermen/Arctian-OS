@@ -22,34 +22,36 @@
 #define INSTALL_BASE            0x00200000u
 #define INSTALL_MAX             (1u * 1024u * 1024u)
 
+/* 0.9: kernel_plus bss 0xCC4000'e, desktop image+bss ~0x2AC0000'e ulasti;
+ * eski 7/8 MB sinirlari asildigi icin bolgeler genisletildi/tasindi. */
 #define KERNEL_PLUS_BASE        0x00300000u
-#define KERNEL_PLUS_MAX         (7u * 1024u * 1024u)
+#define KERNEL_PLUS_MAX         (13u * 1024u * 1024u)
 
-#define DESKTOP_BASE            0x00C00000u
-#define DESKTOP_MAX             (8u * 1024u * 1024u)
+#define DESKTOP_BASE            0x01000000u
+#define DESKTOP_MAX             (48u * 1024u * 1024u)
 
-/* Dinamik (DuckStore) uygulama bolgesi. Desktop modulu (image+bss) 0x010B0000
- * civarina kadar uzandigi icin bu bolge 0x01800000'den baslar. */
-#define APP_BASE                0x01800000u
+/* Dinamik (DuckStore) uygulama bolgesi. Desktop modulu (image+bss) 0x02AC0000
+ * civarina kadar uzandigi icin bu bolge 0x04000000'den baslar. */
+#define APP_BASE                0x04000000u
 #define APP_MAX                 (40u * 1024u * 1024u)
 
 /* 0.6: .wlf native uygulamalari icin AYRI bolge. DPK'lar APP_BASE'den
- * baslar ve 2 MB'luk dilimler kullanir (0x01800000, 0x01A00000, ...);
+ * baslar ve 2 MB'luk dilimler kullanir (0x04000000, 0x04200000, ...);
  * onceki surumde .wlf de 0x01C00000 kullaniyordu ve 3. DPK ile CAKISIYORDU
  * (ikisi de ayni adrese yuklenip birbirini bozuyordu). */
-#define WLF_BASE                0x03000000u
+#define WLF_BASE                0x06800000u
 #define WLF_MAX                 (8u * 1024u * 1024u)
 
-#define DISK_BUF_BASE           0x04000000u
+#define DISK_BUF_BASE           0x07000000u
 #define DISK_BUF_SIZE           (16u * 1024u * 1024u)
 
 /* Blok onbellegi + ATA DMA tamponu icin ayrilmis bolge. Modul BSS'ine
  * konursa main_kernel'in 512KB'lik yiginini modul bolgesine tasirir; bu
  * yuzden sabit, kimlik-eslemeli bir alanda tutulur. */
-#define BLK_SCRATCH_BASE        0x05000000u
+#define BLK_SCRATCH_BASE        0x08000000u
 #define BLK_SCRATCH_SIZE        (1u * 1024u * 1024u)
 
-#define BACKBUFFER_BASE         0x08000000u
+#define BACKBUFFER_BASE         0x09000000u
 #define BACKBUFFER_MAX          (16u * 1024u * 1024u)
 
 #define HEAP_BASE               0x10000000u
@@ -64,9 +66,9 @@
 #define VMM_HIGHER_PML4_INDEX   256u
 #define VMM_USER_BASE           0x0000008000000000ull
 #define VMM_USER_PML4_INDEX     1u
-#define VMM_POOL_BASE           0x0C000000u
+#define VMM_POOL_BASE           0x0A000000u
 #define VMM_POOL_SIZE           (64u * 1024u * 1024u)
-#define VMM_STATE_ADDR          0x0C000000u
-#define VMM_FRAMES_BASE         0x0C001000u
+#define VMM_STATE_ADDR          0x0A000000u
+#define VMM_FRAMES_BASE         0x0A001000u
 
 #endif /* ARCTIAN_MEMORY_MAP_H */
