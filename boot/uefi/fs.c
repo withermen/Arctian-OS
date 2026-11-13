@@ -88,26 +88,7 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
         }
     }
 
-    /* GECICI TESHIS: arayuz sozlesmesini dogrula. */
-    serial_puts("GECICI sfs=");
-    serial_hex((UINT64)(uintptr_t)sfs);
-    serial_puts(" +0=");
-    serial_hex(((UINT64 *)sfs)[0]);
-    serial_puts(" +8=");
-    serial_hex(((UINT64 *)sfs)[1]);
-    serial_puts("\r\n");
     s = sfs->OpenVolume(sfs, &root);
-    serial_puts("GECICI ov_st=");
-    serial_hex(s);
-    serial_puts(" root=");
-    serial_hex((UINT64)(uintptr_t)root);
-    if (s == EFI_SUCCESS && root) {
-        serial_puts(" r+0=");
-        serial_hex(((UINT64 *)root)[0]);
-        serial_puts(" r+8=");
-        serial_hex(((UINT64 *)root)[1]);
-    }
-    serial_puts("\r\n");
     if (s != EFI_SUCCESS || !root) {
         serial_puts("hata OpenVolume st=");
         serial_hex(s);
