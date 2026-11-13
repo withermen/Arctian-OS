@@ -177,55 +177,56 @@ _Static_assert(offsetof(EFI_SIMPLE_FILE_SYSTEM, Revision) == 0,
 _Static_assert(offsetof(EFI_SIMPLE_FILE_SYSTEM, OpenVolume) == 8,
                "SFS->OpenVolume ofset 8 olmali");
 
-/* EFI_FILE_PROTOCOL (UEFI 2.10, 13.4; rev1 alanlari). Revision ALANI YOK:
- * Open=0, Close=8, Delete=16, Read=24, Write=32, GetPosition=40,
- * SetPosition=48, GetInfo=56, SetInfo=64, Flush=72. rev2 alanlari
+/* EFI_FILE_PROTOCOL (UEFI 2.10, 13.4; rev1 alanlari). Revision=0,
+ * Open=8, Close=16, Delete=24, Read=32, Write=40, GetPosition=48,
+ * SetPosition=56, GetInfo=64, SetInfo=72, Flush=80. rev2 alanlari
  * (OpenEx/ReadEx) bu pakette kullanilmiyor. */
 typedef struct EFI_FILE_PROTOCOL {
+    UINT64 Revision;                                       /* 0 */
     EFI_STATUS (EFIAPI *Open)(struct EFI_FILE_PROTOCOL *This,
                               struct EFI_FILE_PROTOCOL **NewHandle,
                               CHAR16 *FileName, UINT64 OpenMode,
-                              UINT64 Attributes);          /* 0 */
-    EFI_STATUS (EFIAPI *Close)(struct EFI_FILE_PROTOCOL *This); /* 8 */
-    void *Delete;                                          /* 16 */
+                              UINT64 Attributes);          /* 8 */
+    EFI_STATUS (EFIAPI *Close)(struct EFI_FILE_PROTOCOL *This); /* 16 */
+    void *Delete;                                          /* 24 */
     EFI_STATUS (EFIAPI *Read)(struct EFI_FILE_PROTOCOL *This,
                               UINTN *BufferSize,
-                              void *Buffer);               /* 24 */
-    void *Write;                                           /* 32 */
-    void *GetPosition;                                     /* 40 */
-    void *SetPosition;                                     /* 48 */
+                              void *Buffer);               /* 32 */
+    void *Write;                                           /* 40 */
+    void *GetPosition;                                     /* 48 */
+    void *SetPosition;                                     /* 56 */
     EFI_STATUS (EFIAPI *GetInfo)(struct EFI_FILE_PROTOCOL *This,
                                  EFI_GUID *InformationType,
                                  UINTN *BufferSize,
-                                 void *Buffer);            /* 56 */
-    void *SetInfo;                                         /* 64 */
-    void *Flush;                                           /* 72 */
+                                 void *Buffer);            /* 64 */
+    void *SetInfo;                                         /* 72 */
+    void *Flush;                                           /* 80 */
 } EFI_FILE_PROTOCOL;
-_Static_assert(offsetof(EFI_FILE_PROTOCOL, Open) == 0, "File->Open 0 olmali");
-_Static_assert(offsetof(EFI_FILE_PROTOCOL, Read) == 24, "File->Read 24 olmali");
-_Static_assert(offsetof(EFI_FILE_PROTOCOL, GetInfo) == 56,
-               "File->GetInfo 56 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, Revision) == 0,
+               "File->Revision 0 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, Open) == 8, "File->Open 8 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, Read) == 32, "File->Read 32 olmali");
+_Static_assert(offsetof(EFI_FILE_PROTOCOL, GetInfo) == 64,
+               "File->GetInfo 64 olmali");
 
 #define EFI_FILE_MODE_READ 0x0000000000000001ull
 
-/* EFI_FILE_INFO (UEFI 2.10, 13.4.6). Zaman alanlari burada UINT64 olarak
- * tek parca tutuldu (EFI_TIME 8 bayttir); yalniz FileSize/Size okunuyor. */
+/* EFI_FILE_INFO (UEFI 2.10, 13.4.6). EFI_TIME 16 bayttir; zaman alanlari
+ * ham bayt dizisi olarak tutuldu, yalniz FileSize/Size okunuyor. */
 typedef struct {
     UINT64 Size;                    /* 0  bu yapinin toplam boyu */
-    UINT64 ParentFileSize;          /* 8 */
-    UINT64 MaximumAllocationSize;   /* 16 */
-    UINT64 FileSize;                /* 24 dosya boyu (bayt) */
-    UINT64 FileAttribute;           /* 32 */
-    UINT64 LastAccessTime;          /* 40 */
-    UINT64 ModificationTime;        /* 48 */
-    UINT64 CreateTime;              /* 56 */
-    UINT64 IsReadOnly;              /* 64 */
-    CHAR16 FileName[1];             /* 72 */
+    UINT64 FileSize;                /* 8  dosya boyu (bayt) */
+    UINT64 PhysicalSize;            /* 16 */
+    UINT8 CreateTime[16];           /* 24 EFI_TIME */
+    UINT8 LastAccessTime[16];       /* 40 EFI_TIME */
+    UINT8 ModificationTime[16];     /* 56 EFI_TIME */
+    UINT64 Attribute;               /* 72 */
+    CHAR16 FileName[1];             /* 80 */
 } EFI_FILE_INFO;
-_Static_assert(offsetof(EFI_FILE_INFO, FileSize) == 24,
-               "FileInfo->FileSize 24 olmali");
-_Static_assert(offsetof(EFI_FILE_INFO, FileName) == 72,
-               "FileInfo->FileName 72 olmali");
+_Static_assert(offsetof(EFI_FILE_INFO, FileSize) == 8,
+               "FileInfo->FileSize 8 olmali");
+_Static_assert(offsetof(EFI_FILE_INFO, FileName) == 80,
+               "FileInfo->FileName 80 olmali");
 
 /* --- EFI_GRAPHICS_OUTPUT_PROTOCOL (GOP) ----------------------------------
  * Tanimlar: UEFI 2.10, 12.9 Graphics Output Protocol. */

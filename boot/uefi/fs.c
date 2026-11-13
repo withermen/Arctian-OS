@@ -52,7 +52,7 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
     EFI_BOOT_SERVICES *bs;
     EFI_LOADED_IMAGE *li = 0;
     EFI_STATUS s, s1, s2;
-    UINT8 infobuf[256];   /* EFI_FILE_INFO temeli 72B + dosya adi */
+    UINT8 infobuf[256];   /* EFI_FILE_INFO temeli 80B + dosya adi */
     EFI_FILE_INFO *fi;
     UINTN infosz, got, kalan, bu;
     UINT8 *buf;
