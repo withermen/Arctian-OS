@@ -426,6 +426,108 @@ int arctian_shell_drop_at(int x, int y, const char *src_path) {
 }
 
 
+/* ---------------- Snap yerlesimleri (plan §20.9 md.7-8) ----------------
+ * Sol/sag yari ve ust kenar = maksimize. Iki yari aralarinda bosluk yok,
+ * yan yana tam dolar; alt kenar gorev cubugu alanina kadar iner.
+ * Tum olculer dpi_px ile olceklenir. */
+enum { SNAP_LEFT = 1, SNAP_RIGHT = 2, SNAP_MAX = 3 };
+
+/* Alt sinir: gorev cubugu alani korunur (TB_BH/TB_Y_OFF zaten dk_s ile
+ * olcekli). Cok kucuk ekranda tam yukseklige donulur. */
+static int snap_bottom(void) {
+    int sh = g_asi->gfx->height();
+    int bottom = sh - (TB_BH + TB_Y_OFF);
+    if (bottom < dpi_px(200)) bottom = sh;
+    return bottom;
+}
+
+/* snap gecis animasyonu: x/y/w/h ayri ayri oynar, tek karede birlesir */
+static void snap_anim_x(void *var, int32_t v) { lv_obj_set_x((lv_obj_t *)var, (int)v); }
+static void snap_anim_y(void *var, int32_t v) { lv_obj_set_y((lv_obj_t *)var, (int)v); }
+static void snap_anim_w(void *var, int32_t v) { lv_obj_set_width((lv_obj_t *)var, (int)v); }
+static void snap_anim_h(void *var, int32_t v) { lv_obj_set_height((lv_obj_t *)var, (int)v); }
+
+static void snap_anim_prop(lv_obj_t *w, lv_anim_exec_xcb_t cb, int32_t from, int32_t to) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, w);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, 130);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_exec_cb(&a, cb);
+    lv_anim_start(&a);
+}
+
+/* Hedef geometriye gecis. Hareketi azalt (g_reduce_motion) acikken
+ * animasyon kurulmaz; boyut/konum aninda uygulanir. */
+static void snap_move_to(lv_obj_t *w, int x, int y, int ww, int hh) {
+    if (!w) return;
+    if (g_reduce_motion) {
+        lv_obj_set_pos(w, x, y);
+        lv_obj_set_size(w, ww, hh);
+        return;
+    }
+    lv_anim_delete(w, snap_anim_x);
+    lv_anim_delete(w, snap_anim_y);
+    lv_anim_delete(w, snap_anim_w);
+    lv_anim_delete(w, snap_anim_h);
+    snap_anim_prop(w, snap_anim_x, lv_obj_get_x(w), x);
+    snap_anim_prop(w, snap_anim_y, lv_obj_get_y(w), y);
+    snap_anim_prop(w, snap_anim_w, lv_obj_get_width(w), ww);
+    snap_anim_prop(w, snap_anim_h, lv_obj_get_height(w), hh);
+}
+
+/* Maksimize: mevcut geometriyi hatirla, kenar bosluklari dpi olcekli. */
+static void win_apply_max(winrec_t *r) {
+    lv_obj_t *w = r->win;
+    r->max_saved_w = lv_obj_get_width(w);
+    r->max_saved_h = lv_obj_get_height(w);
+    r->max_saved_x = lv_obj_get_x(w);
+    r->max_saved_y = lv_obj_get_y(w);
+    lv_obj_add_flag(w, LV_OBJ_FLAG_USER_1);
+    snap_move_to(w, dpi_px(20), dpi_px(20),
+                 g_asi->gfx->width() - dpi_px(40),
+                 g_asi->gfx->height() - dpi_px(120));
+}
+
+/* Geri al: buyutulmeden onceki geometri; kayit yoksa ortali 520x340. */
+static void win_restore_max(winrec_t *r) {
+    lv_obj_t *w = r->win;
+    lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+    if (r->max_saved_w > 0 && r->max_saved_h > 0) {
+        snap_move_to(w, r->max_saved_x, r->max_saved_y,
+                     r->max_saved_w, r->max_saved_h);
+    } else {
+        int dw = dpi_px(520), dh = dpi_px(340);
+        snap_move_to(w, (g_asi->gfx->width() - dw) / 2,
+                     (g_asi->gfx->height() - dh) / 2, dw, dh);
+    }
+}
+
+/* Yerlesimi uygula. Sol/sag yari bitisik: sol 0..sw/2, sag sw/2..sw,
+ * boylece iki pencere aralarinda bosluk birakmadan ekrani doldurur. */
+static void win_snap_layout(winrec_t *r, int mode) {
+    if (!r || !r->win) return;
+    lv_obj_t *w = r->win;
+    if (lv_obj_has_flag(w, LV_OBJ_FLAG_USER_3)) return;  /* tam ekran snap'lenmez */
+    lv_obj_set_style_align(w, LV_ALIGN_DEFAULT, 0);
+    int sw = g_asi->gfx->width();
+    int bottom = snap_bottom();
+    int lw = sw / 2;
+    int rw = sw - sw / 2;
+    if (mode == SNAP_LEFT) {
+        lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+        snap_move_to(w, 0, 0, lw, bottom);
+    } else if (mode == SNAP_RIGHT) {
+        lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+        snap_move_to(w, sw - rw, 0, rw, bottom);
+    } else if (mode == SNAP_MAX) {
+        if (lv_obj_has_flag(w, LV_OBJ_FLAG_USER_1)) return;  /* zaten buyuk */
+        win_apply_max(r);
+    }
+}
+
+
 /* baslik cubuguna cift tik: ekran kapla / geri al */
 void title_dbl_cb(lv_event_t *e) {
     win_max_cb(e);
@@ -435,36 +537,33 @@ void title_dbl_cb(lv_event_t *e) {
 void win_max_cb(lv_event_t *e) {
     winrec_t *r = (winrec_t *)lv_event_get_user_data(e);
     if (!r || !r->win) return;
-    lv_obj_t *w = r->win;
-    lv_obj_set_style_align(w, LV_ALIGN_DEFAULT, 0);
-    if (lv_obj_has_flag(w, LV_OBJ_FLAG_USER_1)) {
-        /* geri al: buyutulmeden onceki geometriye don.
-         * kayit yoksa ortali varsayilan 520x340'a don. */
-        if (r->max_saved_w > 0 && r->max_saved_h > 0) {
-            lv_obj_set_size(w, r->max_saved_w, r->max_saved_h);
-            lv_obj_set_pos(w, r->max_saved_x, r->max_saved_y);
-        } else {
-            /* ortali varsayilan: taban 520x340, dpi olcekli */
-            int dw = dpi_px(520), dh = dpi_px(340);
-            lv_obj_set_size(w, dw, dh);
-            lv_obj_set_pos(w, (g_asi->gfx->width() - dw) / 2,
-                           (g_asi->gfx->height() - dh) / 2);
-        }
-        lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_1)) win_restore_max(r);
+    else win_apply_max(r);
+    lv_obj_move_foreground(r->win);
+}
+
+
+/* Global snap kisayolu kancasi (plan §20.9 md.8). main.c klavye olay
+ * dongusunden cagirir (henuz bagli degil — S3 disi tek satir baglama).
+ * 20=sol yari, 21=sag yari, 22=maksimize/geri al, 23=geri al. */
+void win_snap_hotkey(int hk) {
+    winrec_t *r = winrec_top();
+    if (!r || !r->win) return;
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) return;
+    if (hk == 20) {
+        win_snap_layout(r, SNAP_LEFT);
+    } else if (hk == 21) {
+        win_snap_layout(r, SNAP_RIGHT);
+    } else if (hk == 22) {
+        if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_1)) win_restore_max(r);
+        else win_apply_max(r);
+    } else if (hk == 23) {
+        if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_1)) win_restore_max(r);
+        else return;
     } else {
-        /* buyutmeden once mevcut geometriyi hatirla */
-        r->max_saved_w = lv_obj_get_width(w);
-        r->max_saved_h = lv_obj_get_height(w);
-        r->max_saved_x = lv_obj_get_x(w);
-        r->max_saved_y = lv_obj_get_y(w);
-        /* kenar bosluklari taban 40/120 (genislik/yukseklik) ve 20/20,
-         * hepsi dpi olcekli; ekran boyutu sabit degil, gfx'ten gelir */
-        lv_obj_set_size(w, g_asi->gfx->width() - dpi_px(40),
-                        g_asi->gfx->height() - dpi_px(120));
-        lv_obj_set_pos(w, dpi_px(20), dpi_px(20));
-        lv_obj_add_flag(w, LV_OBJ_FLAG_USER_1);
+        return;
     }
-    lv_obj_move_foreground(w);
+    lv_obj_move_foreground(r->win);
 }
 
 
@@ -505,24 +604,16 @@ void title_drag_cb(lv_event_t *e) {
         lv_obj_set_pos(win, nx, ny);
     } else if (code == LV_EVENT_RELEASED) {
         int sw = g_asi->gfx->width();
-        int sh = g_asi->gfx->height();
         int x = lv_obj_get_x(win);
         int y = lv_obj_get_y(win);
         int ww = lv_obj_get_width(win);
-        int bottom = sh - (TB_BH + TB_Y_OFF);
-        if (bottom < 200) bottom = sh;
-
-        int snap = dpi_px(8);        /* kenere yapisma esigi de dpi olcekli */
-        if (x <= snap) {
-            lv_obj_set_pos(win, 0, 0);
-            lv_obj_set_size(win, sw / 2, bottom);
-        } else if (x + ww >= sw - snap) {
-            lv_obj_set_pos(win, sw / 2, 0);
-            lv_obj_set_size(win, sw - sw / 2, bottom);
-        } else if (y <= snap) {
-            lv_obj_set_pos(win, 0, 0);
-            lv_obj_set_size(win, sw, bottom);
-        }
+        int snap = dpi_px(8);        /* kenara yapisma esigi dpi olcekli */
+        winrec_t *r = winrec_own(win);
+        if (!r) return;
+        /* ust kenar once gelir: maksimize; sonra sol/sag yari */
+        if (y <= snap) win_snap_layout(r, SNAP_MAX);
+        else if (x <= snap) win_snap_layout(r, SNAP_LEFT);
+        else if (x + ww >= sw - snap) win_snap_layout(r, SNAP_RIGHT);
     }
 }
 
