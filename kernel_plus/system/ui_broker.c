@@ -18,6 +18,7 @@ typedef struct {
     uint32_t      generation;
     ui_widget_id  parent;
     uint32_t      type;
+    uint32_t      app;      /* UI_APP_NONE = sahibi yok */
     uint8_t       used;
 } ui_widget_slot_t;
 
@@ -26,6 +27,7 @@ typedef struct {
     uint32_t     type;
     int32_t      a;
     int32_t      b;
+    uint32_t     app;       /* hedef uygulama (upcall icin) */
 } ui_event_node_t;
 
 static spinlock_t        g_lock;
@@ -40,6 +42,9 @@ static uint32_t          g_ev_count;
 
 static uint32_t          g_caps[UI_BROKER_APP_MAX];
 static uint8_t           g_caps_known[UI_BROKER_APP_MAX];
+
+static ui_upcall_fn      g_upcall[UI_BROKER_APP_MAX];
+static void             *g_upcall_ctx[UI_BROKER_APP_MAX];
 
 /* destroy tarafindan kullanilan gecici liste; tek seferde tek destroy. */
 static ui_widget_id      g_destroy_buf[UI_BROKER_WIDGET_MAX];
@@ -97,6 +102,7 @@ void ui_broker_init(void) {
         g_widgets[i].generation = 0;
         g_widgets[i].parent = UI_WIDGET_INVALID;
         g_widgets[i].type = 0;
+        g_widgets[i].app = UI_APP_NONE;
         g_widgets[i].used = 0;
     }
     g_widget_used = 0;
@@ -107,6 +113,8 @@ void ui_broker_init(void) {
     for (uint32_t i = 0; i < UI_BROKER_APP_MAX; i++) {
         g_caps[i] = 0;
         g_caps_known[i] = 0;
+        g_upcall[i] = 0;
+        g_upcall_ctx[i] = 0;
     }
 
     ui_unlock(f);
@@ -153,6 +161,7 @@ int ui_broker_widget_create(uint32_t type, ui_widget_id parent_id,
         g_widgets[i].used = 1;
         g_widgets[i].type = type;
         g_widgets[i].parent = parent_id;
+        g_widgets[i].app = UI_APP_NONE;
         id = slot_id(i, g_widgets[i].generation);
         g_widget_used++;
         found = 1;
@@ -231,6 +240,7 @@ int ui_broker_widget_destroy(ui_widget_id id) {
         if (!g_widgets[slot].used) continue;
         g_widgets[slot].used = 0;
         g_widgets[slot].parent = UI_WIDGET_INVALID;
+        g_widgets[slot].app = UI_APP_NONE;
         g_widgets[slot].generation =
             (g_widgets[slot].generation + 1u) & UI_GEN_MASK;
         if (g_widget_used > 0) g_widget_used--;
@@ -350,10 +360,14 @@ int ui_broker_event_push(ui_widget_id id, uint32_t ev, int32_t a, int32_t b) {
         ui_unlock(f);
         return UI_BROKER_ERR_FULL;
     }
+    uint32_t ev_app = UI_APP_NONE;
+    uint32_t slot;
+    if (widget_lookup(id, &slot)) ev_app = g_widgets[slot].app;
     g_events[g_ev_tail].id = id;
     g_events[g_ev_tail].type = ev;
     g_events[g_ev_tail].a = a;
     g_events[g_ev_tail].b = b;
+    g_events[g_ev_tail].app = ev_app;
     g_ev_tail = (g_ev_tail + 1u) % UI_BROKER_EVENT_MAX;
     g_ev_count++;
     ui_unlock(f);
@@ -444,4 +458,137 @@ int ui_broker_clear_caps(uint32_t app_id) {
     g_caps_known[app_id] = 0;
     ui_unlock(f);
     return UI_BROKER_OK;
+}
+
+/* ------------------------------------------------------------------ bind */
+
+int ui_broker_widget_bind(ui_widget_id id, uint32_t app_id) {
+    if (app_id >= UI_BROKER_APP_MAX) return UI_BROKER_ERR_PARAM;
+    uint64_t f = ui_lock();
+    uint32_t slot;
+    if (!widget_lookup(id, &slot)) {
+        ui_unlock(f);
+        return UI_BROKER_ERR_PARAM;
+    }
+    g_widgets[slot].app = app_id;
+    ui_unlock(f);
+    return UI_BROKER_OK;
+}
+
+/* ---------------------------------------------------------------- upcall */
+
+int ui_broker_set_upcall(uint32_t app_id, ui_upcall_fn fn, void *ctx) {
+    if (app_id >= UI_BROKER_APP_MAX) return UI_BROKER_ERR_PARAM;
+    uint64_t f = ui_lock();
+    g_upcall[app_id] = fn;
+    g_upcall_ctx[app_id] = fn ? ctx : 0;
+    ui_unlock(f);
+    return UI_BROKER_OK;
+}
+
+#define UI_UPCALL_BATCH 16u
+
+int ui_broker_upcall_drain(uint32_t app_id, uint32_t max_events) {
+    if (app_id >= UI_BROKER_APP_MAX) return UI_BROKER_ERR_PARAM;
+    if (max_events == 0 || max_events > UI_UPCALL_BATCH)
+        max_events = UI_UPCALL_BATCH;
+
+    ui_upcall_fn fn;
+    void *ctx;
+    ui_event_node_t batch[UI_UPCALL_BATCH];
+    ui_event_node_t kept[UI_BROKER_EVENT_MAX];
+    uint32_t n = 0, kn = 0;
+
+    uint64_t f = ui_lock();
+    fn = g_upcall[app_id];
+    ctx = g_upcall_ctx[app_id];
+    if (!fn) {
+        ui_unlock(f);
+        return UI_BROKER_ERR_STATE;
+    }
+    for (uint32_t i = 0; i < g_ev_count; i++) {
+        uint32_t idx = (g_ev_head + i) % UI_BROKER_EVENT_MAX;
+        if (g_events[idx].app == app_id && n < max_events) {
+            batch[n++] = g_events[idx];
+        } else {
+            kept[kn++] = g_events[idx];
+        }
+    }
+    for (uint32_t i = 0; i < kn; i++) g_events[i] = kept[i];
+    g_ev_head = 0;
+    g_ev_tail = kn % UI_BROKER_EVENT_MAX;
+    g_ev_count = kn;
+    ui_unlock(f);
+
+    for (uint32_t i = 0; i < n; i++) {
+        ui_event_t ev = { batch[i].id, batch[i].type, batch[i].a, batch[i].b };
+        int rc = fn(ctx, &ev);
+        if (rc < 0) return (int)n;
+    }
+    return (int)n;
+}
+
+/* --------------------------------------------------- taslak syscall yuzeyi
+ * S5a syscall ABI basligi commit edilince numara gecisi ve kullanici
+ * bellek kopyasi (copy_in/out) oraya tasinacak; simdilik isaretciler
+ * cekirdek-gorunur kabul edilir. */
+
+static int ui_sys_cap_gate(uint32_t app_id, uint32_t cap) {
+    if (app_id == UI_APP_NONE) return UI_BROKER_OK;
+    return ui_broker_check_caps(app_id, cap);
+}
+
+int64_t ui_broker_syscall(uint32_t app_id, uint32_t nr,
+                          uint64_t a0, uint64_t a1,
+                          uint64_t a2, uint64_t a3) {
+    int rc;
+
+    switch (nr) {
+    case UI_SYS_WIDGET_CREATE: {
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_CREATE);
+        if (rc < 0) return rc;
+        ui_widget_id id = UI_WIDGET_INVALID;
+        rc = ui_broker_widget_create((uint32_t)a0, (ui_widget_id)a1, &id);
+        if (rc < 0) return rc;
+        if (app_id != UI_APP_NONE) (void)ui_broker_widget_bind(id, app_id);
+        return (int64_t)id;
+    }
+    case UI_SYS_WIDGET_DESTROY:
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_DESTROY);
+        if (rc < 0) return rc;
+        return ui_broker_widget_destroy((ui_widget_id)a0);
+    case UI_SYS_WIDGET_INFO: {
+        uint32_t *out_type = (uint32_t *)(uintptr_t)a1;
+        ui_widget_id *out_parent = (ui_widget_id *)(uintptr_t)a2;
+        rc = ui_broker_widget_info((ui_widget_id)a0, out_type, out_parent);
+        return rc;
+    }
+    case UI_SYS_LABEL_SET:
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_LABEL);
+        if (rc < 0) return rc;
+        return ui_broker_label_set((ui_widget_id)a0, (const char *)(uintptr_t)a1);
+    case UI_SYS_BUTTON_SET:
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_BUTTON);
+        if (rc < 0) return rc;
+        return ui_broker_button_set((ui_widget_id)a0,
+                                    (const char *)(uintptr_t)a1, (int)a2);
+    case UI_SYS_INPUT_GET:
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_INPUT);
+        if (rc < 0) return rc;
+        return ui_broker_input_get((ui_widget_id)a0,
+                                   (char *)(uintptr_t)a1, (uint32_t)a2);
+    case UI_SYS_EVENT_WAIT: {
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_EVENTS);
+        if (rc < 0) return rc;
+        return ui_broker_event_wait((ui_event_t *)(uintptr_t)a0,
+                                    (uint32_t)a1);
+    }
+    case UI_SYS_EVENT_POST:
+        rc = ui_sys_cap_gate(app_id, UI_BROKER_CAP_EVENTS);
+        if (rc < 0) return rc;
+        return ui_broker_event_push((ui_widget_id)a0, (uint32_t)a1,
+                                    (int32_t)a2, (int32_t)a3);
+    default:
+        return UI_BROKER_ERR_PARAM;
+    }
 }

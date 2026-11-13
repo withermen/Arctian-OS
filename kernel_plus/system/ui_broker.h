@@ -133,4 +133,43 @@ uint32_t      ui_broker_get_caps(uint32_t app_id);
 int           ui_broker_check_caps(uint32_t app_id, uint32_t cap);
 int           ui_broker_clear_caps(uint32_t app_id);
 
+/* Widget sahibi (.wlf uygulamasi). Bind edilmezse olaylar yalnizca
+ * event_wait ile cekilebilir (upcall dagitimi sahibi olmayan olayi atlar). */
+#define UI_APP_NONE 0xFFFFFFFFu
+int           ui_broker_widget_bind(ui_widget_id id, uint32_t app_id);
+
+/*
+ * TASLAK syscall yuzeyi. S5a (B1 loader) syscall ABI basligini commit
+ * edince numara/parametre gecisi oraya uyarlancak; buradaki UI_SYS_*
+ * degerleri gecicidir ve syscall.h'e DOKUNULMAZ. Sozlesme:
+ *  - app_id cagiran .wlf'in kimligi; UI_APP_NONE cekirdek cagrisi demektir
+ *    (yetenek kontrolu atlanir).
+ *  - Metin/tampon argumanlari su an cekirdek-gorunur isaretci kabul edilir;
+ *    kullanici bellez kopyasi (copy_in/out) s5a ABI'siyle eklenecek.
+ *  - Donus: widget_create basarida widget id, digerlerinde >=0 basari,
+ *    negatif = UI_BROKER_ERR_*.
+ */
+#define UI_SYS_WIDGET_CREATE 0x10u /* a0=type a1=parent_id */
+#define UI_SYS_WIDGET_DESTROY 0x11u /* a0=id */
+#define UI_SYS_WIDGET_INFO   0x12u /* a0=id, a1=&type(uint32*), a2=&parent */
+#define UI_SYS_LABEL_SET     0x13u /* a0=id a1=text */
+#define UI_SYS_BUTTON_SET    0x14u /* a0=id a1=text a2=pressed */
+#define UI_SYS_INPUT_GET     0x15u /* a0=id a1=buf a2=cap */
+#define UI_SYS_EVENT_WAIT    0x16u /* a0=&ui_event_t a1=timeout_ticks */
+#define UI_SYS_EVENT_POST    0x17u /* a0=id a1=ev a2=a a3=b (test) */
+
+int64_t       ui_broker_syscall(uint32_t app_id, uint32_t nr,
+                                uint64_t a0, uint64_t a1,
+                                uint64_t a2, uint64_t a3);
+
+/*
+ * Callback upcall: olay kuyrugundaki bir uygulamaya ait olaylari tek tek
+ * uygulamayla kayitli kanca cagirisina dagitir. Kanca kilit birakildiktan
+ * sonra cagrilir; icinden ui_broker API'si serbesttir. Tek seferde en fazla
+ * 16 olay; donus = dagitilan sayi (>=0) ya da hata.
+ */
+typedef int (*ui_upcall_fn)(void *ctx, const ui_event_t *ev);
+int           ui_broker_set_upcall(uint32_t app_id, ui_upcall_fn fn, void *ctx);
+int           ui_broker_upcall_drain(uint32_t app_id, uint32_t max_events);
+
 #endif /* ARCTIAN_UI_BROKER_H */
