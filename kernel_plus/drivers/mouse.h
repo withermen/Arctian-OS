@@ -63,4 +63,17 @@ void mouse_feed_byte(uint8_t data);
 /** Sol tus basma kenari sayaci (kaybolan tiklamalari yakalamak icin) */
 uint32_t mouse_left_press_seq(void);
 
+/**
+ * Son cagridan bu yana biriken kaydirma miktarini dondurur ve sifirlar.
+ * Hem PS/2 tekerlek (4/6 bayt) hem de USB HID kaydirma verisini kapsar.
+ * Isaret: pozitif = yukari/asagi degil, cihazin bildirdigi ham yon.
+ */
+int mouse_scroll_delta(void);
+
+/**
+ * Basinc esigi + kisa sure ile algilanan dokunma (tap) sayisi.
+ * Yalnizca 6 baytlik basinc bildiren gelismis paketlerde artar.
+ */
+int mouse_tap_count(void);
+
 #endif /* MOUSE_H */

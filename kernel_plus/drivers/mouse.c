@@ -19,6 +19,7 @@
 #include "pic.h"
 #include "mouse.h"
 #include "serial.h"
+#include "clock.h"
 
 /* USB HID fare state (PS/2 donanimina bagli olmadan calisir) */
 static int usb_mouse_dx = 0;
@@ -71,12 +72,33 @@ static bool usb_mouse_ever = false;
 #define MOUSE_ID_INTELLI    0x03
 #define MOUSE_ID_INTELLI_5B 0x04
 
+/* Gelismis (dokunmatik yuzey) cihaz kimlikleri */
+#define MOUSE_ID_SYNAPTICS  0x47
+#define MOUSE_ID_ALPS       0x73
+#define MOUSE_ID_ELANTECH   0x04
+#define MOUSE_ID_ELANTECH2  0x0E
+
 /* ================================================================== */
 /* Packet Types                                                        */
 /* ================================================================== */
 
 #define PACKET_3BYTE    3
 #define PACKET_4BYTE    4
+#define PACKET_6BYTE    6   /* x/y ust bitleri + Z basinc + tekerlek */
+
+/* Basinc esigi (0..255) ve tap icin ust sure siniri (ms) */
+#define MOUSE_TAP_PRESSURE  40
+#define MOUSE_TAP_MAX_MS    220
+
+/* Taninan cihaz ailesi */
+typedef enum {
+    MOUSE_DEV_UNKNOWN = 0,
+    MOUSE_DEV_STANDARD,
+    MOUSE_DEV_INTELLI,
+    MOUSE_DEV_SYNAPTICS,
+    MOUSE_DEV_ALPS,
+    MOUSE_DEV_ELANTECH
+} mouse_device_t;
 
 /* ================================================================== */
 /* Timeouts & Delays                                                  */
@@ -92,7 +114,8 @@ static bool usb_mouse_ever = false;
 static mouse_state_t mouse_state;
 static int mouse_packet_size = PACKET_3BYTE;
 static int mouse_packet_cycle = 0;
-static uint8_t mouse_packet[4];     /* max 4-byte packet */
+static uint8_t mouse_packet[6];     /* en fazla 6-bayt gelismis paket */
+static mouse_device_t mouse_device = MOUSE_DEV_UNKNOWN;
 
 /*
  * Screen dimensions (default VESA 1024x768, updated by vesa_init)
@@ -265,6 +288,137 @@ static bool mouse_detect_intellimouse(void) {
 }
 
 /* ================================================================== */
+/* Device Identification: Synaptics / ALPS / Elantech                 */
+/* ================================================================== */
+
+/**
+ * Get_ID komutunu gonderip cihazin kimlik baytini okur.
+ * Basarisizlikta 0xFF doner (gecerli bir kimlik degil).
+ */
+static uint8_t mouse_read_device_id(void) {
+    uint8_t id;
+    if (mouse_send_cmd(MOUSE_CMD_GET_ID) != 0)
+        return 0xFF;
+    if (ps2_read_data(&id) != 0)
+        return 0xFF;
+    return id;
+}
+
+/**
+ * Ornekleme hizini ayarlar; ACK disinda bir sey beklenmez.
+ * Basarili olursa 0 doner.
+ */
+static int mouse_set_rate(uint8_t rate) {
+    if (mouse_send_cmd(MOUSE_CMD_SET_RATE) != 0)
+        return -1;
+    return mouse_send_cmd(rate);
+}
+
+/**
+ * Synaptics "magic knock": arka arkaya 4 kez 20 Hz ornekleme hizi,
+ * ardindan Get_ID. Dokunmatik yuzeyler 0x47 ile kimlik verir.
+ */
+static bool mouse_prob_synaptics(void) {
+    for (int i = 0; i < 4; i++) {
+        if (mouse_set_rate(20) != 0)
+            return false;
+    }
+    return mouse_read_device_id() == MOUSE_ID_SYNAPTICS;
+}
+
+/**
+ * ALPS: 200 Hz (0xC8) ornekleme hizindan sonra Get_ID -> 0x73.
+ */
+static bool mouse_prob_alps(void) {
+    if (mouse_set_rate(0xC8) != 0)
+        return false;
+    return mouse_read_device_id() == MOUSE_ID_ALPS;
+}
+
+/**
+ * Elantech: 10 Hz (0x0A) ornekleme hizindan sonra Get_ID -> 0x04/0x0E.
+ */
+static bool mouse_prob_elantech(void) {
+    if (mouse_set_rate(0x0A) != 0)
+        return false;
+    uint8_t id = mouse_read_device_id();
+    return id == MOUSE_ID_ELANTECH || id == MOUSE_ID_ELANTECH2;
+}
+
+/**
+ * Synaptics'i mutlak (absolute) 6-bayt moduna alir.
+ * Magic knock sonrasinda 200/100/80 hizi gonderilir ve cihaz 3 yetenek
+ * bayti dondurur. Herhangi bir adim basarisiz olursa cihaz eski
+ * 3/4-bayt akisina geri birakilir (cagiran taraf SET_DEFAULTS yapar).
+ */
+static bool mouse_synaptics_absolute(void) {
+    if (mouse_set_rate(0xC8) != 0) return false;
+    if (mouse_set_rate(0x64) != 0) return false;
+    if (mouse_set_rate(0x50) != 0) return false;
+
+    /* Yetenek/model baytlari: icerigi kullanilmiyor, senkron icin okunur. */
+    uint8_t caps[3];
+    for (int i = 0; i < 3; i++) {
+        if (ps2_read_data(&caps[i]) != 0)
+            return false;
+    }
+    return true;
+}
+
+/**
+ * Cihaz ailesini tespit eder ve seri porta raporlar.
+ *
+ * Sirayla Synaptics knock, ALPS ve Elantech yoklamalari denenir; hicbiri
+ * tutmazsa cihaz standart/IntelliMouse kabul edilir. Yoklamalar ornekleme
+ * hizini degistirdigi icin sonunda SET_DEFAULTS ile temiz duruma donulur
+ * (Synaptics mutlak modu basariyla kurulduysa bu adim atlanir).
+ */
+static void mouse_identify_device(void) {
+    ps2_flush_buffer();
+
+    if (mouse_prob_synaptics()) {
+        mouse_device = MOUSE_DEV_SYNAPTICS;
+        if (mouse_synaptics_absolute()) {
+            mouse_packet_size = PACKET_6BYTE;
+            serial_printf("[ps2] synaptics dokunmatik yuzey (id=0x%x), "
+                          "6-bayt mutlak mod\n", MOUSE_ID_SYNAPTICS);
+            return;     /* SET_DEFAULTS mutlak modu bozar: dokunma */
+        }
+        serial_printf("[ps2] synaptics dokunmatik yuzey (id=0x%x), "
+                      "mutlak mod yok: 3/4-bayt\n", MOUSE_ID_SYNAPTICS);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    ps2_flush_buffer();
+    if (mouse_prob_alps()) {
+        mouse_device = MOUSE_DEV_ALPS;
+        serial_printf("[ps2] alps dokunmatik yuzey (id=0x%x), 3/4-bayt\n",
+                      MOUSE_ID_ALPS);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    ps2_flush_buffer();
+    if (mouse_prob_elantech()) {
+        mouse_device = MOUSE_DEV_ELANTECH;
+        serial_printf("[ps2] elantech dokunmatik yuzey (id=0x%x/0x%x), "
+                      "3/4-bayt\n", MOUSE_ID_ELANTECH, MOUSE_ID_ELANTECH2);
+        mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+        ps2_flush_buffer();
+        return;
+    }
+
+    mouse_device = MOUSE_DEV_STANDARD;
+    serial_printf("[ps2] gelismis kimlik yok: standart PS/2 fare, "
+                  "3/4-bayt yol\n");
+    mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
+    ps2_flush_buffer();
+}
+
+/* ================================================================== */
 /* USB HID Mouse Bridge API                                           */
 /* ================================================================== */
 
@@ -288,6 +442,26 @@ static void mouse_track_left(bool left) {
 
 uint32_t mouse_left_press_seq(void) { return s_left_press_seq; }
 
+/* Kaydirma: son okumadan bu yana biriken miktar (mouse_scroll_delta()).
+ * USB ve PS/2 tekerlek yollarinin ikisi de buraya besler. */
+static volatile int s_scroll_delta = 0;
+
+/* Dokunma (tap): basinc esigini asan kisa basislar sayilir. */
+static volatile uint32_t s_tap_count = 0;
+static bool s_pressure_prev = false;
+static uint64_t s_pressure_down_ms = 0;
+
+static void mouse_track_pressure(int z) {
+    bool pressed = z >= MOUSE_TAP_PRESSURE;
+    if (pressed && !s_pressure_prev) {
+        s_pressure_down_ms = clock_ms();
+    } else if (!pressed && s_pressure_prev) {
+        if (clock_ms() - s_pressure_down_ms <= MOUSE_TAP_MAX_MS)
+            s_tap_count++;
+    }
+    s_pressure_prev = pressed;
+}
+
 static void mouse_process_usb(void) {
     if (!usb_mouse_ever) return;   /* USB fare yok: PS/2 durumunu bozma */
     if (usb_mouse_dx == 0 && usb_mouse_dy == 0 && usb_mouse_scroll == 0 &&
@@ -310,6 +484,7 @@ static void mouse_process_usb(void) {
     mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (usb_mouse_buttons & 0x04) != 0;
     mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
 
+    s_scroll_delta += usb_mouse_scroll;
     mouse_state.scroll += usb_mouse_scroll;
     usb_mouse_dx = 0;
     usb_mouse_dy = 0;
@@ -321,10 +496,69 @@ static void mouse_process_usb(void) {
 /* ================================================================== */
 
 /**
+ * Gelismis 6-bayt paketi cozer (Synaptics mutlak modu).
+ *
+ *   p[0] : durum bayti (3-bayt ile ayni: butonlar + tasma bitleri)
+ *   p[1] : x alt 8 bit
+ *   p[2] : y alt 8 bit
+ *   p[3] : bit 0-1 = x ust 2 bit, bit 2-3 = y ust 2 bit
+ *   p[4] : Z basinc (0..255)
+ *   p[5] : tekerlek/kaydirma (isaretli 8 bit)
+ *
+ * x/y 10-bit isaretli degerdir. 3-bayt yoluna dokunulmaz: bu islev
+ * yalnizca mouse_packet_size == PACKET_6BYTE iken cagrilir.
+ */
+static void mouse_decode_packet6(void) {
+    uint8_t status_byte = mouse_packet[0];
+    int dx, dy;
+
+    dx = (int)mouse_packet[1] | ((int)(mouse_packet[3] & 0x03) << 8);
+    dy = (int)mouse_packet[2] | ((int)(mouse_packet[3] & 0x0C) << 6);
+    if (dx & 0x200) dx -= 0x400;    /* 10-bit isaret uzatma */
+    if (dy & 0x200) dy -= 0x400;
+
+    /* Tasma bitleri ust bitlerden daha guvenilir */
+    if (status_byte & 0x40) dx = (dx > 0) ? 511 : -512;
+    if (status_byte & 0x80) dy = (dy > 0) ? 511 : -512;
+
+    mouse_state.dx = dx;
+    mouse_state.dy = dy;
+
+    mouse_state.x += dx;
+    mouse_state.y -= dy;
+
+    if (mouse_state.x < 0) mouse_state.x = 0;
+    if (mouse_state.x >= mouse_screen_width)
+        mouse_state.x = mouse_screen_width - 1;
+    if (mouse_state.y < 0) mouse_state.y = 0;
+    if (mouse_state.y >= mouse_screen_height)
+        mouse_state.y = mouse_screen_height - 1;
+
+    mouse_state.buttons[MOUSE_BUTTON_LEFT]   = (status_byte & 0x01) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_RIGHT]  = (status_byte & 0x02) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
+    mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
+
+    /* Z basinc: tap algilama. Tekerlek bayti kaydirma uretir. */
+    mouse_track_pressure((int)mouse_packet[4]);
+
+    int wheel = (int)(int8_t)mouse_packet[5];
+    if (wheel != 0) {
+        s_scroll_delta += wheel;
+        mouse_state.scroll += wheel;
+    }
+}
+
+/**
  * Decode and process a completed 3-byte or 4-byte mouse packet.
  * Called at the end of packet assembly.
  */
 static void mouse_decode_packet(void) {
+    if (mouse_packet_size == PACKET_6BYTE) {
+        mouse_decode_packet6();
+        return;
+    }
+
     uint8_t status_byte = mouse_packet[0];
     int dx, dy;
 
@@ -358,8 +592,11 @@ static void mouse_decode_packet(void) {
     mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
     mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
 
-    if (mouse_packet_size == PACKET_4BYTE)
-        mouse_state.scroll += (int)(int8_t)mouse_packet[3];
+    if (mouse_packet_size == PACKET_4BYTE) {
+        int wheel = (int)(int8_t)mouse_packet[3];
+        s_scroll_delta += wheel;
+        mouse_state.scroll += wheel;
+    }
 }
 
 /**
@@ -405,19 +642,23 @@ void mouse_feed_byte(uint8_t data) {
         case 2:
             mouse_packet[2] = data;
 
-            if (mouse_packet_size == PACKET_4BYTE) {
-                mouse_packet_cycle = 3;  /* need one more byte */
+            if (mouse_packet_size > PACKET_3BYTE) {
+                mouse_packet_cycle = 3;  /* 4. ya da 6. bayta kadar devam */
             } else {
                 mouse_packet_cycle = 0;
                 mouse_decode_packet();
             }
             break;
 
-        case 3:
-            /* 4th byte: scroll wheel data (IntelliMouse) */
-            mouse_packet[3] = data;
-            mouse_packet_cycle = 0;
-            mouse_decode_packet();
+        case 3:     /* 4. bayt (tekerlek) veya 6-baytlik paketin 4. bayti */
+        case 4:     /* 5. bayt: Z basinc (6-bayt) */
+        case 5:     /* 6. bayt: kaydirma (6-bayt) */
+            mouse_packet[mouse_packet_cycle] = data;
+            mouse_packet_cycle++;
+            if (mouse_packet_cycle >= mouse_packet_size) {
+                mouse_packet_cycle = 0;
+                mouse_decode_packet();
+            }
             break;
 
         default:
@@ -479,6 +720,10 @@ void mouse_init(void) {
     mouse_state.scroll_wheel = false;
     mouse_packet_cycle = 0;
     mouse_packet_size = PACKET_3BYTE;
+    mouse_device = MOUSE_DEV_UNKNOWN;
+    s_scroll_delta = 0;
+    s_pressure_prev = false;
+    s_tap_count = 0;
 
     /*
      * Step 1: Flush any stale data from the PS/2 buffer.
@@ -548,10 +793,21 @@ void mouse_init(void) {
     /* Step 5: Set default settings (disable, 1:1 scaling, 4 counts/mm) */
     mouse_send_cmd(MOUSE_CMD_SET_DEFAULTS);
 
-    /* Step 6: Detect IntelliMouse scroll wheel */
-    if (mouse_detect_intellimouse()) {
+    /*
+     * Step 5b: Gelismis cihaz kimligi (Synaptics/ALPS/Elantech).
+     * Basarili bir Synaptics mutlak modu PACKET_6BYTE'a gecirir ve
+     * ardindan gelen IntelliMouse yoklamasi atlanir.
+     */
+    mouse_identify_device();
+
+    /* Step 6: Detect IntelliMouse scroll wheel (6-bayt modda gerekmez) */
+    if (mouse_packet_size == PACKET_6BYTE) {
+        mouse_state.scroll_wheel = true;
+        kernel_debug("PS/2 mouse: 6-bayt gelismis paket modu");
+    } else if (mouse_detect_intellimouse()) {
         mouse_packet_size = PACKET_4BYTE;
         mouse_state.scroll_wheel = true;
+        mouse_device = MOUSE_DEV_INTELLI;
         kernel_debug("PS/2 mouse: IntelliMouse scroll wheel detected");
     } else {
         mouse_packet_size = PACKET_3BYTE;
@@ -566,11 +822,13 @@ void mouse_init(void) {
      * IMPORTANT: The sample rate must be set AFTER detection,
      * because the detection sequence changes the sample rate.
      */
-    mouse_send_cmd(MOUSE_CMD_SET_SAMPLE);
-    mouse_send_cmd(100);        /* 100 Hz sample rate */
+    if (mouse_packet_size != PACKET_6BYTE) {
+        mouse_send_cmd(MOUSE_CMD_SET_SAMPLE);
+        mouse_send_cmd(100);        /* 100 Hz sample rate */
 
-    mouse_send_cmd(MOUSE_CMD_SET_RES);
-    mouse_send_cmd(2);          /* 4 counts/mm */
+        mouse_send_cmd(MOUSE_CMD_SET_RES);
+        mouse_send_cmd(2);          /* 4 counts/mm */
+    }
 
     /* Step 8: Enable data reporting (stream mode) */
     if (mouse_send_cmd(MOUSE_CMD_ENABLE) != 0) {
@@ -607,5 +865,13 @@ void mouse_set_screen_size(int width, int height) {
     if (mouse_state.y >= mouse_screen_height) mouse_state.y = mouse_screen_height - 1;
     if (mouse_state.x < 0) mouse_state.x = 0;
     if (mouse_state.y < 0) mouse_state.y = 0;
+}
+
+int mouse_scroll_delta(void) {
+    return __atomic_exchange_n(&s_scroll_delta, 0, __ATOMIC_RELAXED);
+}
+
+int mouse_tap_count(void) {
+    return (int)__atomic_load_n(&s_tap_count, __ATOMIC_RELAXED);
 }
 
