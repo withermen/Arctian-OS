@@ -525,6 +525,8 @@ void desktop_main(void *arg) {
                 assistant_toggle();     /* Ctrl+Alt+A: asistan */
             } else if (hk == 13) {
                 fps_hud_toggle();       /* Ctrl+Alt+F : kare hizi HUD'u */
+            } else if (hk >= 20 && hk <= 23) {
+                win_snap_hotkey(hk);    /* Ctrl+Alt+ok: snap yerlesimleri */
             }
         }
         switcher_tick();
