@@ -368,6 +368,9 @@ void keyboard_interrupt_handler(void) {
                 gui_pressed = false;
             } else if (scancode == 0x38) { // Right Alt (AltGr)
                 altgr_pressed = false;
+            } else if (scancode == 0x4B || scancode == 0x4D ||
+                       scancode == 0x48 || scancode == 0x50) {
+                s_hot_guard = 0;
             }
             return;
         }
@@ -402,6 +405,15 @@ void keyboard_interrupt_handler(void) {
                 return;
             case 0x38: // Right Alt (AltGr)
                 altgr_pressed = true;
+                return;
+            case 0x4B: case 0x4D: case 0x48: case 0x50:
+                /* Ctrl+Alt+ok: snap (20 sol, 21 sag, 22 maks, 23 geri) */
+                if (ctrl_pressed && alt_pressed && !s_hot_guard) {
+                    s_hot_guard = 1;
+                    int hk = scancode == 0x4B ? 20 : scancode == 0x4D ? 21
+                           : scancode == 0x48 ? 22 : 23;
+                    keyboard_push_hotkey(hk);
+                }
                 return;
             default:
                 return;
