@@ -10,6 +10,11 @@
 #include "paging.h"
 #include "syscall.h"
 #include "klog.h"
+#include "lapic.h"
+
+/* main_kernel.elf lapic.o baglamaz (BIOS yolu LAPIC timer kullanmaz);
+ * zayif bildirimle sembol orada NULL kalir ve cagri atlanir. */
+extern void lapic_timer_irq(void) __attribute__((weak));
 
 static void serial_hex(uint64_t v) {
     const char *d = "0123456789ABCDEF";
@@ -99,6 +104,13 @@ void isr_handler(registers_t *regs) {
 
     if (int_no == 0x80) {
         syscall_dispatch(regs);
+        return;
+    }
+
+    /* LAPIC timer vektoru (0x40): PIC'ten bagimsizdir, bu yuzden PIC EOI'si
+     * yapilmaz; EOI'yi lapic_timer_irq() kendisi gonderir. */
+    if (int_no == 0x40) {
+        if (lapic_timer_irq) lapic_timer_irq();
         return;
     }
 

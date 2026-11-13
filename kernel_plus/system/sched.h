@@ -36,6 +36,16 @@ void        sched_block_current(void);
 void        sched_wake(sched_tid_t tid);
 void        sched_reap(sched_tid_t tid);
 
+/* Paket 7: CPU basina run queue.
+ * sched_enqueue_cpu: gorevi o CPU'nun kuyruguna tasir (READY ise kuyruga
+ * girer). sched_pick_local: bu CPU'nun kuyrugundan READY gorev secip
+ * switch eder; bos ise -1 doner. CPU 0'da legacy round-robin'e yonlendirir
+ * (BSP davranisi degismez). sched_tick_local: LAPIC timer kancasi
+ * (lapic_timer_irq cagirir; CPU 0'da legacy sched_tick'e devreder). */
+int         sched_enqueue_cpu(uint32_t cpu, sched_tid_t tid);
+sched_tid_t sched_pick_local(void);
+void        sched_tick_local(void);
+
 void        sched_set_owner(sched_tid_t tid, void *owner);
 void       *sched_owner(sched_tid_t tid);
 void       *sched_owner_current(void);
