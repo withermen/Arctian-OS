@@ -67,7 +67,7 @@ Arctian'da iki tür uygulama vardır:
   arayüzü anlatır.
 - **`.wlf` uygulaması:** başlık + meta bloğu (`role`, `handles`, …) + `wolf_main(const
   wolf_api_t *api)`. Arayüzü yalnızca libWolf'tur (`include/wolf.h`); `WLF_BASE`
-  (0x03000000) bölgesine yüklenir. Ayrıntı: [sdk/README.md](../sdk/README.md).
+  (0x06800000) bölgesine yüklenir. Ayrıntı: [sdk/README.md](../sdk/README.md).
 
 **Önemli mimari gerçekler:**
 
@@ -1667,8 +1667,8 @@ Sistem modülleri (kernel/install/driver/desktop/app) için düz `.bin` başlı�
 
 ### 26.5 Bellek haritası (`include/arctian/memory_map.h`)
 
-Uygulamayı ilgilendiren satırlar: `.wlf` uygulama bölgesi `WLF_BASE = 0x03000000`
-(boyut `WLF_MAX = 8 MB`), eski `.dpk` bölgesi `APP_BASE = 0x01800000` (40 MB).
+Uygulamayı ilgilendiren satırlar: `.wlf` uygulama bölgesi `WLF_BASE = 0x06800000`
+(boyut `WLF_MAX = 8 MB`), eski `.dpk` bölgesi `APP_BASE = 0x04000000` (40 MB).
 
 ### 26.6 Wolf Engine JS köprüsü (`include/arctian/wolf.h`)
 

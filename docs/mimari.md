@@ -18,7 +18,7 @@ adres alanında, aynı ayrıcalık halkasında (ring 0) çalışır.
              └─ main_kernel (0x100000) main_kernel/           GDT/IDT, yükleyici, syscall
                   ├─ install   (0x200000)  install/           kurulum sihirbazı
                   ├─ kernel_plus (0x300000) kernel_plus/      sürücüler + servisler (ASI)
-                  └─ desktop   (0xC00000)  desktop/           LVGL kabuğu + uygulamalar
+                  └─ desktop   (0x1000000) desktop/           LVGL kabuğu + uygulamalar
 ```
 
 Adreslerin tek kaynağı [`include/arctian/memory_map.h`](../include/arctian/memory_map.h).
@@ -28,17 +28,20 @@ Bölgeler ve sınırları:
 |---|---|---|
 | `main_kernel` | `0x00100000` | 1 MB |
 | `install` | `0x00200000` | 1 MB |
-| `kernel_plus` | `0x00300000` | 7 MB |
-| `desktop` (imaj + bss) | `0x00C00000` | 8 MB |
-| `.dpk` uygulama bölgesi | `0x01800000` | 40 MB (2 MB dilimler) |
-| `.wlf` uygulama bölgesi | `0x03000000` | 8 MB |
-| disk tamponu | `0x04000000` | 16 MB |
-| blok/DMA geçici alan | `0x05000000` | 1 MB |
-| backbuffer | `0x08000000` | 16 MB |
+| `kernel_plus` | `0x00300000` | 13 MB |
+| `desktop` (imaj + bss) | `0x01000000` | 48 MB |
+| `.dpk` uygulama bölgesi | `0x04000000` | 40 MB (2 MB dilimler) |
+| `.wlf` uygulama bölgesi | `0x06800000` | 8 MB |
+| disk tamponu | `0x07000000` | 16 MB |
+| blok/DMA geçici alan | `0x08000000` | 1 MB |
+| backbuffer | `0x09000000` | 16 MB |
+| VMM havuzu | `0x0A000000` | 64 MB |
 | yığın (heap) | `0x10000000` | 768 MB |
 
-`kernel_plus` `.bss`'i eski masaüstü tabanına dayandığı için masaüstü `0xA00000`'dan
-`0xC00000`'a taşındı; adreslere dokunurken bu tabloyu birlikte düşünmek gerekir.
+0.9'da `kernel_plus` `.bss`'i `0xCC4000`'e, desktop imaj+bss'si ~`0x2AC0000`'e ulaştı;
+eski 7/8 MB'lık sınırlar aşıldığı için desktop `0x1000000`'a taşındı ve sonraki bölgeler
+kaydırıldı (önceki taşınma: `0xA00000` → `0xC00000`). Adreslere dokunurken bu tabloyu
+birlikte düşünmek gerekir.
 
 Önbellek/idleme eşlemesi: 0–1 GB arası 2 MB'lik huge page'lerle kimlik-eslemeli
 (`IDENTITY_MAP_*`), yani modüller yüklenirken sanal=fiziksel çalışır.

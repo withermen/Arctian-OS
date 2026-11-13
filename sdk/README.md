@@ -191,7 +191,7 @@ int wolf_main(const wolf_api_t *api) {
 sdk/
   include/wolf.h      public API (uygulama bunu include eder)
   src/libwolf.c       API'nin istemci tarafı (uygulamaya linklenir)
-  link.ld             native .wlf yerleşimi (0x03000000)
+  link.ld             native .wlf yerleşimi (0x06800000)
   wlfpack.py          .wlf paketleyici + --inspect
   build.bat           Windows derleme
   build.sh            Linux/macOS/WSL derleme
