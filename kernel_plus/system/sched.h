@@ -12,7 +12,9 @@ typedef enum {
     TASK_READY,
     TASK_RUNNING,
     TASK_BLOCKED,
-    TASK_DONE
+    TASK_DONE,
+    TASK_CARRY          /* C3 is calma tasima hali: hedef CPU sahiplendi,
+                         * henuz kuyruguna girmedi; seciciler gormez */
 } sched_state_t;
 
 void        sched_init(void);
@@ -45,6 +47,13 @@ void        sched_reap(sched_tid_t tid);
 int         sched_enqueue_cpu(uint32_t cpu, sched_tid_t tid);
 sched_tid_t sched_pick_local(void);
 void        sched_tick_local(void);
+
+/* C3 SMP IPI handler'lari (isr.c vektor 0x41/0x42 dagitimi; zayif karsi
+ * taraf). smp_tlb_shootdown_all: paging.c vmm_unmap'tan zayif bildiriminle
+ * cagrilir; tum diger cevrimici CPU'larda CR3 yenileme IPI'si atar. */
+void        smp_resched_irq(void);
+void        smp_tlb_irq(void);
+void        smp_tlb_shootdown_all(void);
 
 void        sched_set_owner(sched_tid_t tid, void *owner);
 void       *sched_owner(sched_tid_t tid);

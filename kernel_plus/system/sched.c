@@ -1,4 +1,5 @@
 #include "sched.h"
+#include <stdbool.h>
 #include "isr.h"
 #include "serial.h"
 #include "paging.h"
@@ -44,12 +45,19 @@ extern void arctian_sched_switch(uint64_t *from_rsp, uint64_t *to_rsp,
                                  void *from_fpu, void *to_fpu);
 extern void arctian_task_entry(void);
 
+/* Paket 7 yardimcilari (tanitularlari asagida; kendine-yonetim yollari
+ * sleep/exit/yield bunlari erken kullaniyor). */
+static uint32_t sched_self_cpu(void);
+static sched_task_t *sched_self_current(void);
+static void sched_resched_notify(uint32_t cpu);
+
 static sched_task_t s_tasks[SCHED_MAX_TASKS] __attribute__((aligned(16)));
 static uint8_t s_stacks[SCHED_MAX_TASKS][SCHED_STACK_SIZE] __attribute__((aligned(16)));
 static sched_task_t *s_current;    /* yalniz CPU 0 (BSP) icin gecerli */
 static volatile uint32_t s_tick;
 static volatile uint64_t s_total_ticks;
 static volatile int s_ready;
+static uint32_t s_spawn_rr;        /* spawn round-robin sayaci (C3) */
 
 static runq_t s_runq[CPU_MAX_APICS];
 
@@ -104,11 +112,47 @@ static void rq_enqueue_bound(int tid) {
     sched_task_t *t = &s_tasks[tid];
     if (t->state != TASK_READY || t->bound_cpu >= CPU_MAX_APICS) return;
     runq_t *rq = &s_runq[t->bound_cpu];
+    uint32_t cpu = t->bound_cpu;
     uint64_t f = irq_save();
     spin_lock(&rq->lock);
     rq_push_locked(rq, tid);
     spin_unlock(&rq->lock);
     irq_restore(f);
+    sched_resched_notify(cpu);   /* kilit/bayrak disinda: AP'yi bekletme */
+}
+
+/* C3 is calma (paket 8): victim kuyrugundan bir READY gorevi CARRY
+ * durumuna alip kendine (self) ayirir. CARRY oldugu surece ne legacy
+ * tarama ne baska bir AP gorevi gorur; cagiran kendi kuyruk kilidi
+ * altinda CARRY -> READY cevirip kuyruguna alir. Boylece tasima
+ * sirasinda cift calisma yarisi kapanir.
+ * Kilit disiplini: yardimci TEK kilit alir (victim); cagiran kendi
+ * kilidini birakmis olmali. bound_cpu guncellemesi victim kilidi
+ * altinda kalir - gozlemciler hep ait oldugu kuyruk kilidi altinda okur. */
+static int steal_runq_locked(uint32_t self) {
+    if (self == 0 || self >= CPU_MAX_APICS) return -1;
+    for (uint32_t k = 1; k < CPU_MAX_APICS; k++) {
+        uint32_t victim = (self + k) % CPU_MAX_APICS;
+        if (victim == self || victim == 0) continue;   /* BSP kuyrugu calinmaz */
+        runq_t *vq = &s_runq[victim];
+        if (vq->count == 0) continue;                  /* ucuz on bak */
+        int got = -1;
+        int cand;
+        spin_lock(&vq->lock);
+        while ((cand = rq_pop_locked(vq)) >= 0) {
+            if (s_tasks[cand].state == TASK_READY) {
+                s_tasks[cand].state = TASK_CARRY;
+                s_tasks[cand].bound_cpu = self;
+                got = cand;
+                break;
+            }
+            /* TASK_RUNNING: sahibi AP'de calisiyor, dokunma.
+             * BLOCKED/DONE/UNUSED/CARRY: bayat ya da sahibi var, dusur. */
+        }
+        spin_unlock(&vq->lock);
+        if (got >= 0) return got;
+    }
+    return -1;
 }
 
 uint64_t sched_irq_save(void) {
@@ -134,7 +178,13 @@ static void schedule(void) {
     for (int k = 1; k < SCHED_MAX_TASKS; k++) {
         int idx = (cur->id + k) % SCHED_MAX_TASKS;
         sched_task_t *t = &s_tasks[idx];
-        if (t->state == TASK_READY) { next = t; break; }
+        /* Baska bir CPU'nun kuyrugunda duran READY gorevi BSP secmez:
+         * sahibi olan AP'nin tik'i gelir; ikili calisma yarisi olurdu.
+         * Tek CPU sistemi etkilemez (bound_cpu hep 0). */
+        if (t->state != TASK_READY) continue;
+        if (t->in_q && t->bound_cpu != 0) continue;
+        next = t;
+        break;
     }
 
     if (!next) {
@@ -149,11 +199,6 @@ static void schedule(void) {
     s_current = next;
     cur->switches++;
     sched_switch_to(cur, next);
-}
-
-static void sched_idle(void) {
-    while (s_current && s_current->state == TASK_BLOCKED)
-        __asm__ volatile("sti; hlt" ::: "memory");
 }
 
 void sched_tick(void) {
@@ -175,27 +220,42 @@ void sched_tick(void) {
     schedule();
 }
 
+/* ---- gorev kendini yonetim yollari (C3: CPU-bagimsiz) ----
+ * s_current yalniz BSP'ninkidir; AP'de "ben" percpu current_task'tan
+ * gelir. Bu yuzden tüm "beni" yapan yollar sched_self_current() kullanim.
+ * Bekleme taramasi BSP'nin PIT tikindedir (sched_tick); wake_tick tüm
+ * sistemde ortak s_tick sayacina baglidir - AP de bu sayaci okur. */
+
 void sched_yield(void) {
     if (!s_ready) return;
+    uint32_t ci = sched_self_cpu();
     uint64_t f = sched_irq_save();
-    schedule();
+    if (ci == 0) schedule();
+    else sched_pick_local();
     sched_irq_restore(f);
 }
 
 void sched_sleep_ms(uint32_t ms) {
     if (!s_ready || ms == 0) return;
+    sched_task_t *me = sched_self_current();
+    if (!me) return;
     uint64_t f = sched_irq_save();
-    s_current->wake_tick = s_tick + ms;
-    s_current->state = TASK_BLOCKED;
-    schedule();
-    sched_idle();
+    me->wake_tick = s_tick + ms;
+    me->state = TASK_BLOCKED;
+    if (sched_self_cpu() == 0) schedule();
+    else sched_pick_local();
+    while (me->state == TASK_BLOCKED)
+        __asm__ volatile("sti; hlt" ::: "memory");
     sched_irq_restore(f);
 }
 
 void sched_exit(void) {
+    sched_task_t *me = sched_self_current();
+    if (!me) return;
     uint64_t f = sched_irq_save();
-    s_current->state = TASK_DONE;
-    schedule();
+    me->state = TASK_DONE;
+    if (sched_self_cpu() == 0) schedule();
+    else sched_pick_local();
     sched_irq_restore(f);
     for (;;) __asm__ volatile("hlt");
 }
@@ -243,12 +303,28 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     t->owner = 0;
     t->next_q = -1;
     t->in_q = 0;
-    t->bound_cpu = 0;                    /* varsayilan: BSP kuyrugu */
-    spin_lock(&s_runq[0].lock);          /* ayna kayit; legacy tarama da var */
-    rq_push_locked(&s_runq[0], idx);
-    spin_unlock(&s_runq[0].lock);
+    /* Dagitim: cevrimici CPU'larda round-robin (C3). Tek CPU eski davranis:
+     * bound_cpu=0, runq[0] ayna kayit, legacy tarama secici. */
+    uint32_t bound = 0;
+    {
+        uint32_t ncpu = percpu_online_count();
+        if (ncpu > 1) {
+            uint32_t want = ++s_spawn_rr % ncpu;
+            uint32_t seen = 0;
+            for (uint32_t c = 0; c < CPU_MAX_APICS; c++) {
+                percpu_t *p = percpu_by_index(c);
+                if (!p || !p->online) continue;
+                if (seen++ == want) { bound = c; break; }
+            }
+        }
+    }
+    t->bound_cpu = bound;
+    spin_lock(&s_runq[bound].lock);
+    rq_push_locked(&s_runq[bound], idx);        /* cpu0: ayna kayit; legacy tarama da var */
+    spin_unlock(&s_runq[bound].lock);
 
     sched_irq_restore(f);
+    sched_resched_notify(bound);   /* AP kuyruguna girdiyse hemen uyandir */
     serial_printf("[sched] task olustur: %s (id=%d)\n", name ? name : "?", idx);
     return idx;
 }
@@ -273,13 +349,17 @@ uint64_t sched_current_cr3(void) {
 
 void sched_block_current(void) {
     if (!s_ready) return;
+    sched_task_t *me = sched_self_current();
+    if (!me) return;
     uint64_t f = sched_irq_save();
-    if (s_current && s_current->state == TASK_RUNNING) {
-        s_current->state = TASK_BLOCKED;
-        s_current->wake_tick = s_tick + 0x40000000u;
+    if (me->state == TASK_RUNNING) {
+        me->state = TASK_BLOCKED;
+        me->wake_tick = s_tick + 0x40000000u;
     }
-    schedule();
-    sched_idle();
+    if (sched_self_cpu() == 0) schedule();
+    else sched_pick_local();
+    while (me->state == TASK_BLOCKED)
+        __asm__ volatile("sti; hlt" ::: "memory");
     sched_irq_restore(f);
 }
 
@@ -319,11 +399,13 @@ void *sched_owner(sched_tid_t tid) {
 }
 
 void *sched_owner_current(void) {
-    return s_current ? s_current->owner : 0;
+    sched_task_t *me = sched_self_current();
+    return me ? me->owner : 0;
 }
 
 sched_tid_t sched_current(void) {
-    return s_current ? s_current->id : -1;
+    sched_task_t *me = sched_self_current();
+    return me ? (sched_tid_t)me->id : -1;
 }
 
 int sched_task_count(void) {
@@ -430,9 +512,15 @@ int sched_enqueue_cpu(uint32_t cpu, sched_tid_t tid) {
     uint64_t f = irq_save();
     spin_lock(&s_runq[cpu].lock);
     t->bound_cpu = cpu;
-    if (t->state == TASK_READY) rq_push_locked(&s_runq[cpu], tid);
+    int pushed = 0;
+    /* CARRY: gorev bir AP'nin tasima elinde; acikca hedef degistirme
+     * istegei onu serbest birakir. Taslayan AP kendi kilidi altinda
+     * state'i CARRY gormezse zaten birakir; iki yol da tutarli. */
+    if (t->state == TASK_CARRY) t->state = TASK_READY;
+    if (t->state == TASK_READY) { rq_push_locked(&s_runq[cpu], tid); pushed = 1; }
     spin_unlock(&s_runq[cpu].lock);
     irq_restore(f);
+    if (pushed) sched_resched_notify(cpu);
     return 0;
 }
 
@@ -455,7 +543,23 @@ sched_tid_t sched_pick_local(void) {
     while ((cand = rq_pop_locked(rq)) >= 0) {
         if (s_tasks[cand].state == TASK_READY) { to = &s_tasks[cand]; break; }
         /* TASK_RUNNING: bu CPU'da calisiyor olabilir, dokunma.
-         * BLOCKED/DONE/UNUSED: bayat girdi, dusur. */
+         * BLOCKED/DONE/UNUSED/CARRY: bayat girdi ya da sahibi var, dusur. */
+    }
+    if (!to) {
+        /* Kuyruk bos: baska AP'nin kuyrugundan bir gorev ayir. Kendi
+         * kilit yardimci sirasinda brakilir; hicbir anda iki runq kilidi
+         * tutulmaz. CARRY yakalandiktan sonra kendi kilidimiz altinda
+         * READY'e donusup kuyruga girer. */
+        spin_unlock(&rq->lock);
+        int stolen = steal_runq_locked(ci);
+        spin_lock(&rq->lock);
+        if (stolen >= 0 && s_tasks[stolen].state == TASK_CARRY) {
+            s_tasks[stolen].state = TASK_READY;
+            rq_push_locked(rq, stolen);
+        }
+        while ((cand = rq_pop_locked(rq)) >= 0) {
+            if (s_tasks[cand].state == TASK_READY) { to = &s_tasks[cand]; break; }
+        }
     }
     if (!to) {
         spin_unlock(&rq->lock);
@@ -472,7 +576,13 @@ sched_tid_t sched_pick_local(void) {
     to->switches++;
     spin_unlock(&rq->lock);
 
-    if (!cur) cur = &s_ap_idle[ci];           /* AP ilk gecis: park baglami */
+    if (!cur) {
+        /* AP ilk gecis: park baglami uzerinden goreve geciyor. Tek seferlik
+         * kanit satiri: testler "AP gercekten gorev aliyor" bunu grep'ler. */
+        cur = &s_ap_idle[ci];
+        serial_printf("[sched] cpu%u gorev devraldi: %s\n",
+                      ci, to->name ? to->name : "?");
+    }
     sched_switch_to(cur, to);                 /* donus: gorev buraya resumes */
     irq_restore(f);
     return to->id;
@@ -487,6 +597,8 @@ void sched_tick_local(void) {
     if (ci == 0) { sched_tick(); return; }
 
     uint32_t n = ++s_ap_tick[ci];
+    if (n == 1)
+        serial_printf("[sched] cpu%u lapic tik aliyor\n", ci);
     if ((n % SCHED_SLICE_TICKS) != 0) return;
 
     if (sched_pick_local() < 0) {
@@ -494,6 +606,46 @@ void sched_tick_local(void) {
         if (!cur || cur->state != TASK_RUNNING)
             __asm__ volatile("sti; hlt" ::: "memory");
     }
+}
+
+/* ---- C3: resched IPI + TLB shootdown (vektor 0x41 / 0x42) ----
+ * ISR dagitimi main_kernel/isr.c (zayif sembol); EOI'yi burada gondeririz. */
+
+void smp_resched_irq(void) {
+    lapic_eoi();
+    /* BSP'nin PIT tiki 1 ms'de bir zaten secim yapar; bildirim yersiz. */
+    if (sched_self_cpu() == 0) return;
+    sched_pick_local();
+}
+
+void smp_tlb_irq(void) {
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    lapic_eoi();
+}
+
+/* Tum diger cevrimici CPU'larda TLB'yi bosalt + burada da CR3 yenile.
+ * PCID yok; CR3 yeniden yuklemesi cekirdek-eslemeleri dahil tam bosaltir
+ * (basit ve dogru; maliyet dusuk - unmap seyrek bir islem). */
+void smp_tlb_shootdown_all(void) {
+    uint64_t f = irq_save();
+    lapic_send_ipi_all_excl_self(LAPIC_TLB_VECTOR);
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    irq_restore(f);
+}
+
+/* Hedef AP'nin kuyruguna bir sey girdiyse onu bekletme: resched IPI.
+ * YALNIZ kilit disindan cagrilir (ICR beklemesi milisaniye surabilir);
+ * hedef cevrimdisi ise sessizce atla - 5 ms'lik tik dilimi garanti. */
+static void sched_resched_notify(uint32_t cpu) {
+    if (cpu == 0 || cpu >= CPU_MAX_APICS) return;   /* BSP zaten tikliyor */
+    if (cpu == sched_self_cpu()) return;
+    percpu_t *p = percpu_by_index(cpu);
+    if (!p || !p->online) return;
+    lapic_send_ipi(p->apic_id, LAPIC_RESCHED_VECTOR);
 }
 
 static volatile uint64_t s_count1;
