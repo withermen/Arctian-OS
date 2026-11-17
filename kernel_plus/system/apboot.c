@@ -8,6 +8,7 @@
 #include "percpu_gdt.h"
 #include "clock.h"
 #include "serial.h"
+#include "sched.h"
 
 _Static_assert(offsetof(ap_params_t, cr3) == 0x00, "cr3 0x8F00'da");
 _Static_assert(offsetof(ap_params_t, entry) == 0x08, "entry 0x8F08'de");
@@ -93,10 +94,37 @@ bool apboot_start(uint32_t cpu_index, uint32_t apic_id) {
     return s_params->status == AP_STATUS_APOK;
 }
 
+/* BSP IDT'sinin kaydiricisi (sidt ile alinir). Ayni sayfa tablosu ve
+ * ayni sanal adres her CPU icin gecerli; AP kendi IDTR'ina bunu yukler.
+ * lidt/sidt islemci-yereldir - SIPI sonrasi AP'nin IDTR'i bos gelir. */
+typedef struct {
+    uint16_t limit;
+    uint64_t base;
+} __attribute__((packed)) idtr_t;
+
+static idtr_t s_idtr;
+
+static void ap_park(void) {
+    __asm__ volatile ("cli");
+    for (;;) __asm__ volatile ("hlt");
+}
+
 void ap_entry(uint32_t cpu_index) {
-    /* Kendi GDT/TSS/IDT devri: kesmeler acilmaz, IDT icerigi degismez. */
+    /* Kendi GDT/TSS devri: kesmeler henuz acilmaz. */
     gdt_init_cpu(cpu_index,
                  (uint64_t)(uintptr_t)(&s_ap_stacks[cpu_index][AP_STACK_SIZE]));
+
+    /* IDT devri: vektor 0x40 kapisi olmadan timer yaklasan #GP -> triple
+     * fault; lidt'ten once kesme alinamaz (IF=0), sonra alinabilir. */
+    __asm__ volatile ("lidt %0" :: "m"(s_idtr) : "memory");
+
+    /* Kendi yerel APIC'ini kur: INIT/SIPI APIC state'ini sifirlar, APIC_BASE
+     * MSR AP'de EN=0 ile gelir. Timer olmadan AP beslenmez; basarisizlikta
+     * online saymayip park et (BSP bu AP'siz devam eder). LINT maskesi:
+     * legacy PIC kesmeleri yalniz BSP'ye gitsin (C3 esyasamali donem). */
+    if (!lapic_cpu_enable()) ap_park();
+    lapic_ap_mask_lint();
+    if (!lapic_timer_start_cpu()) ap_park();
 
     percpu_t *p = percpu_by_index(cpu_index);
     if (p) {
@@ -111,9 +139,15 @@ void ap_entry(uint32_t cpu_index) {
     } else {
         serial_printf("AP bilinmeyen index=%u\n", cpu_index);
     }
-    /* Park et: IDT yuklenmedi, kesme beklenmez. */
-    __asm__ volatile ("cli");
-    for (;;) __asm__ volatile ("hlt");
+
+    /* Gorev dongusu: her turde kuyruga bir bak, is yoksa kesme bekle.
+     * sti;hlt atomik penceresi uyandirma yarisini kapatir; LAPIC timer
+     * tik'i (ve ileride resched IPI'si) hlt'den cikarir. pick_local ilk
+     * geciste park baglamindan (s_ap_idle) goreve switch eder. */
+    for (;;) {
+        sched_pick_local();
+        __asm__ volatile ("sti; hlt" ::: "memory");
+    }
 }
 
 uint32_t apboot_start_all(void) {
@@ -123,6 +157,24 @@ uint32_t apboot_start_all(void) {
         serial_printf("[apboot] uyari: BSP APIC ID farkli cpuid=%u lapic=0x%X\n",
                       ci->bsp_apic_id, lapic_id());
     }
+
+    /* AP'lerin timer'i kendi uzerinde calisacagindan once periyot olculur.
+     * BSP'nin PIT tiki devam eder (esyasamali donem); BSP'de LAPIC timer
+     * bilerek baslatilmaz - cift sched_tick olmamasi icin. */
+    int timer_ok = lapic_timer_calibrate(1000);
+
+    /* Vektor 0x40'in karsiligi: tick'i zamanlayiciya bagla. Kayit olmadan
+     * lapic_timer_irq() yalniz EOI gonderirdi (AP'ler sessiz kalirdi). */
+    lapic_timer_set_handler(sched_tick_local);
+
+    /* IDTR anlik goruntusu: ap_entry AP'lerde lidt icin kullanir. */
+    __asm__ volatile ("sidt %0" : "=m"(s_idtr) :: "memory");
+
+    if (!timer_ok) {
+        serial_puts("[apboot] LAPIC timer kalibrasyonu yok; AP'ler parkta kalacak\n");
+        return 0;
+    }
+
     uint32_t ok = 0;
     for (uint32_t i = 0; i < ci->apic_count; i++) {
         uint32_t id = ci->apic_ids[i];
