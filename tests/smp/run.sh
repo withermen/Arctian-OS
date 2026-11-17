@@ -23,24 +23,47 @@ if [ "$size" -ge 3840 ]; then
 fi
 
 echo "[smp] sembol kontrolu"
-elf=$(ls build/obj-*/kernel_plus/kernel_plus.elf | head -1)
+# En yeni nesne dizini secilir: build/obj-<hash> onege gore siralaninca
+# eski onbellek bastirilabiliyordu (ls -t ile zaman sirasi).
+elf=$(ls -t build/obj-*/kernel_plus/kernel_plus.elf | head -1)
 nm "$elf" | grep -E 'ap_trampoline_bin|apboot_start_all'
+nm "$elf" | grep -E 'lapic_timer_calibrate|lapic_cpu_enable|lapic_ap_mask_lint'
 
 if [ ! -f build/arctian.img ]; then
     echo "[smp] IMG YOK, atlandi"
     exit 0
 fi
-
-echo "[smp] QEMU -smp 4 (40 sn)"
-timeout 40 qemu-system-x86_64 \
-    -drive file=build/arctian.img,format=raw \
-    -m 512M -smp 4 -serial stdio -display none -no-reboot \
-    > "$LOG" 2>&1 || true
-
-if grep -E 'AP online=' "$LOG"; then
-    echo "[smp] GECTI: AP online satiri goruldu"
-    exit 0
+# Imaj bayat olabilir: kernel_plus.bin daha yeniyse uyar (test yaniltmasin).
+kpb=$(ls -t build/obj-*/kernel_plus/kernel_plus.bin 2>/dev/null | head -1)
+if [ -n "$kpb" ] && [ "$kpb" -nt build/arctian.img ]; then
+    echo "[smp] UYARI: build/arctian.img bayat (once 'make pack' calistirin)"
 fi
 
-echo "[smp] FAIL: AP online= satiri yok"
+echo "[smp] QEMU -smp 4 (80 sn)"
+timeout 80 qemu-system-x86_64 \
+    -drive file=build/arctian.img,format=raw \
+    -m 1024M -smp 4 -serial stdio -display none -no-reboot \
+    > "$LOG" 2>&1 || true
+
+fail=0
+if grep -E 'AP online=' "$LOG"; then
+    echo "[smp] OK: AP online satirlari goruldu"
+else
+    echo "[smp] FAIL: AP online= satiri yok"
+    fail=1
+fi
+if grep -E '\[sched\] cpu[1-9][0-9]* gorev devraldi' "$LOG"; then
+    echo "[smp] OK: AP gercek gorev calistiriyor"
+else
+    echo "[smp] FAIL: AP gorev devralma satiri yok (AP'ler calismiyor)"
+    fail=1
+fi
+if grep -E 'tick testi' "$LOG"; then
+    grep -E 'tick testi' "$LOG"
+fi
+if [ "$fail" -eq 0 ]; then
+    echo "[smp] GECTI"
+    exit 0
+fi
+echo "[smp] FAIL"
 exit 1
