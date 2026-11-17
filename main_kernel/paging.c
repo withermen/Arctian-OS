@@ -2,6 +2,13 @@
 #include "serial.h"
 #include "isr.h"
 
+/* C3 TLB shootdown (kernel_plus/sched.c): IPI ile diger CPU'larda CR3
+ * yenile. Zayif sembol: main_kernel-tek (boot) imajda NULL kalir.
+ * UYARI: IPI beklemesi milisaniye surebilir; vmm_unmap kilit altindayken
+ * cagrilirmisa karsi CPU'nun ayni kilidi beklememesi gerekir (C2 esyasamali
+ * donemde unmap yollari kilit altindan gelmiyor; B hattinda yeniden dogrula). */
+extern void smp_tlb_shootdown_all(void) __attribute__((weak));
+
 static inline uint64_t rd_cr3(void) {
     uint64_t v;
     __asm__ volatile("mov %%cr3,%0" : "=r"(v));
@@ -175,6 +182,10 @@ int vmm_unmap(vmm_space_t sp, uint64_t va) {
     if (!(pt[i1] & VMM_PTE_P)) return -1;
     pt[i1] = 0;
     invlpg(va);
+    /* SMP (C3): invlpg yalniz bu islemcinin TLB'sini temizler; diger
+     * cevrimici CPU'lara IPI ile CR3 yenileme attirilir. main_kernel-tek
+     * (boot) imajda sembol NULL, tek CPU'da gerek yok. */
+    if (smp_tlb_shootdown_all) smp_tlb_shootdown_all();
     return 0;
 }
 
