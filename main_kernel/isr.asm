@@ -148,6 +148,13 @@ ISR_NOERROR 128
 ; ============================================
 ISR_NOERROR 64
 
+; C3 SMP IPI vektorleri (LAPIC ICR sabit gonderim):
+;   0x41 resched  - "kuyrugunda is var, yeniden secim yap"
+;   0x42 tlb      - "CR3'i yenile (TLB shootdown)"
+; EOI'yi handler'lari kendisi gonderir (PIC'a dokunmazlar).
+ISR_NOERROR 65
+ISR_NOERROR 66
+
 ; ============================================
 ; Stub tablosu (C tarafindan erisilecek)
 ; 48 entry: [0-31] exceptions, [32-47] IRQs

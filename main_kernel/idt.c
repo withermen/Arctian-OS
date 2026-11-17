@@ -11,6 +11,9 @@ extern uint64_t isr_stub_table[48];
 /* LAPIC timer stub (vektor 0x40) isr.asm icinde ayrca tanimli; tablo 48
  * girdilik oldugu icin dogrudan sembol ile baglanir. */
 extern uint64_t isr_stub_64[];
+/* C3 SMP IPI stub'lari (vektor 0x41 resched, 0x42 tlb). */
+extern uint64_t isr_stub_65[];
+extern uint64_t isr_stub_66[];
 
 static idt_entry_t idt[IDT_ENTRIES] __attribute__((aligned(16)));
 static idt_ptr_t idt_ptr;
@@ -45,6 +48,12 @@ void idt_init(void) {
     /* LAPIC timer vektoru 0x40: PIC'ten bagimsiz zamanlayici. EOI'yi
      * lapic_timer_irq() gonderir; PIC EOI'si yapilmaz. */
     idt_set_gate(0x40, (uint64_t)isr_stub_64, 0x08, IDT_INTERRUPT_GATE);
+
+    /* C3 SMP IPI kapilari: 0x41 resched, 0x42 TLB shootdown. EOI'yi
+     * handler'lari gonderir. main_kernel-tek (boot) imajda handler
+     * sembolleri NULL'dur; dispatch bos gecer. */
+    idt_set_gate(0x41, (uint64_t)isr_stub_65, 0x08, IDT_INTERRUPT_GATE);
+    idt_set_gate(0x42, (uint64_t)isr_stub_66, 0x08, IDT_INTERRUPT_GATE);
 
     // Load IDT
     asm volatile ("lidt %0" : : "m"(idt_ptr));

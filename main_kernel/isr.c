@@ -15,6 +15,10 @@
 /* main_kernel.elf lapic.o baglamaz (BIOS yolu LAPIC timer kullanmaz);
  * zayif bildirimle sembol orada NULL kalir ve cagri atlanir. */
 extern void lapic_timer_irq(void) __attribute__((weak));
+/* C3 SMP IPI handler'lari (vektor 0x41/0x42) kernel_plus'ta tanimli;
+ * main_kernel-tek imajda NULL kalir, kapilar bos gecer. */
+extern void smp_resched_irq(void) __attribute__((weak));
+extern void smp_tlb_irq(void) __attribute__((weak));
 
 static void serial_hex(uint64_t v) {
     const char *d = "0123456789ABCDEF";
@@ -111,6 +115,17 @@ void isr_handler(registers_t *regs) {
      * yapilmaz; EOI'yi lapic_timer_irq() kendisi gonderir. */
     if (int_no == 0x40) {
         if (lapic_timer_irq) lapic_timer_irq();
+        return;
+    }
+
+    /* C3 SMP IPI'leri (0x41 resched, 0x42 TLB shootdown): LAPIC ICR ile
+     * gelir, PIC ile ilgisi yoktur; EOI'yi handler'lari gonderir. */
+    if (int_no == 0x41) {
+        if (smp_resched_irq) smp_resched_irq();
+        return;
+    }
+    if (int_no == 0x42) {
+        if (smp_tlb_irq) smp_tlb_irq();
         return;
     }
 
