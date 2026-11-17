@@ -197,12 +197,16 @@ bool lapic_send_sipi(uint32_t dest_apic_id, uint8_t vector) {
  * (switch) olabilir; EOI onceden gonderildigi icin sonraki tick kaclmaz. */
 
 #define XAPIC_SVR     0x0F0u
+#define XAPIC_LVT_L0  0x350u   /* LINT0; 0x310 ICR-high idi, yanlisti */
 #define XAPIC_LVT_TIM 0x320u
+#define XAPIC_LVT_L1  0x360u   /* LINT1; 0x330 termal LVT idi, yanlisti */
 #define XAPIC_ICOUNT  0x380u
 #define XAPIC_CCOUNT  0x390u
 #define XAPIC_DCR     0x3E0u
 
 #define MSR_X2APIC_SVR     0x80Fu
+#define MSR_X2APIC_LVT_L0  0x835u
+#define MSR_X2APIC_LVT_L1  0x836u
 #define MSR_X2APIC_LVT_TIM 0x832u
 #define MSR_X2APIC_ICOUNT  0x838u
 #define MSR_X2APIC_CCOUNT  0x839u
@@ -222,6 +226,7 @@ bool lapic_send_sipi(uint32_t dest_apic_id, uint8_t vector) {
 
 static void (*s_timer_handler)(void);
 static uint32_t s_timer_hz;
+static uint32_t s_timer_initial;
 static volatile bool s_timer_started;
 
 void lapic_timer_set_handler(void (*fn)(void)) { s_timer_handler = fn; }
@@ -258,16 +263,56 @@ static bool pit_t2_wait(void) {
     return false;
 }
 
-bool lapic_timer_init(uint32_t hz) {
+bool lapic_cpu_enable(void) {
+    if (s_mode == LAPIC_MODE_NONE) return false;
+
+    /* Her CPU'nun kendi APIC arayuzu ayri: INIT/SIPI sonrasi AP'lerde
+     * APIC_BASE MSR reset degerindedir (EN=0) ve SVR kapali gelir.
+     * MMIO erisimi EN biti kurulmadan #GP verir; sira onemli: once EN,
+     * x2APIC'e gecis ancak ondan sonra iki yazimla yapilir. */
+    uint64_t base = rdmsr(MSR_APIC_BASE);
+    if (!(base & APIC_BASE_EN)) {
+        wrmsr(MSR_APIC_BASE, base | APIC_BASE_EN);
+        base |= APIC_BASE_EN;
+    }
+    if (s_mode == LAPIC_MODE_X2APIC && !(base & APIC_BASE_X2)) {
+        wrmsr(MSR_APIC_BASE, base | APIC_BASE_X2);
+    }
+
+    /* SVR: yerel APIC arayuzunu ac (timer/IPI ateelenmesi icin sart). */
+    tmr_write(XAPIC_SVR, MSR_X2APIC_SVR, SVR_ENABLE | SVR_SPURIOUS);
+
+    /* TPR: INIT yazilimi gorev önceliligini 0xFF'e sifirlar (SDM INIT/SIPI
+     * sirasi) - APIC o CPU'ya HICBIR kesme iletmez. Timer/IPI'nin
+     * ulasmasi icin mutlak sifirlanmali. PPR INIT'te zaten 0'a doner. */
+    if (s_mode == LAPIC_MODE_X2APIC) wrmsr(MSR_APIC_TPR, 0);
+    else mmio_wr(XAPIC_TPR, 0);
+    return true;
+}
+
+/* AP'de PIC kaynakli kesmeleri (8259 -> LINT0 ExtINT) kes. Bu donemde
+ * legacy IRQ yollari BSP varsayimiyla calisiyor (PIT tik'i sched_tick'e
+ * gider ve s_current kullanir); PIT/klavye/fare kesmesi AP'ye duserse o
+ * varsayim kirilir. SPEC INIT sonrasi LVT'yi maskeli birakir ama
+ * firmware/QEMU farkliliklarina karsi burada ACIKCA maskeleriz.
+ * BSP'nin LINT0'ina dokunulmaz; ExtINT orada calismaya devam eder. */
+void lapic_ap_mask_lint(void) {
+    tmr_write(XAPIC_LVT_L0, MSR_X2APIC_LVT_L0, TMR_MASKED);
+    tmr_write(XAPIC_LVT_L1, MSR_X2APIC_LVT_L1, TMR_MASKED);
+}
+
+/* BSP tarafinda bir kez: sayac hizini olc ve periyot degerini sakla.
+ * Timer BASLATMAZ; her CPU kendi sayacini lapic_timer_start_cpu() ile
+ * kurar (LVT/ICOUNT CPU-yerel kayitlardir). */
+bool lapic_timer_calibrate(uint32_t hz) {
     if (s_mode == LAPIC_MODE_NONE) return false;
     if (hz == 0) hz = 1000;
-    if (s_timer_started) return true;            /* BSP bir kez baslatir */
+    if (s_timer_hz != 0) return true;             /* olcum yapildi */
+
+    if (!lapic_cpu_enable()) return false;
 
     /* Kesmeler halenuz kapaliysa PIT kalibrasyonu calismaz ama t2 port
      * tabanli olcum IRQ gerektirmez; yine de PIT yoksa 1 GHz fallback. */
-
-    /* SVR: yerel APIC arayuzunu yaz (timer'in ateslenmesi icin sart). */
-    tmr_write(XAPIC_SVR, MSR_X2APIC_SVR, SVR_ENABLE | SVR_SPURIOUS);
 
     /* Bolme /16 (DCR yazimi bir sonraki ICOUNT yaziminda yuklenir). */
     tmr_write(XAPIC_DCR, MSR_X2APIC_DCR, DIV_16);
@@ -293,16 +338,38 @@ bool lapic_timer_init(uint32_t hz) {
     if (initial < 32u) initial = 32u;
     if (initial > 0xFFFFFFFFull) initial = 0xFFFFFFFFull;
 
-    /* Periyodik mod, maskesiz, vektor 0x40; ICOUNT yazimi sayaci baslatir. */
-    tmr_write(XAPIC_LVT_TIM, MSR_X2APIC_LVT_TIM, TMR_PERIODIC | LAPIC_TIMER_VECTOR);
-    tmr_write(XAPIC_ICOUNT, MSR_X2APIC_ICOUNT, (uint32_t)initial);
     s_timer_hz = hz;
-    s_timer_started = true;
+    s_timer_initial = (uint32_t)initial;
 
-    serial_printf("[lapic] timer hz=%u div=%llu initial=%llu (kalibrasyon=%s)\n",
+    serial_printf("[lapic] timer hz=%u div=%llu initial=%u (kalibrasyon=%s)\n",
                   hz, (unsigned long long)(div_hz * 16ull),
-                  (unsigned long long)initial, measured ? "PIT" : "1GHz-tahmin");
+                  s_timer_initial, measured ? "PIT" : "1GHz-tahmin");
     return true;
+}
+
+/* Bu CPU'nun yerel LAPIC timer'ini kalibre edilmis periyotla calistir.
+ * Cagirmadan once: (1) lapic_cpu_enable() bu CPU icin yapilmis olmali
+ * (burada da yinelenir, zararsiz), (2) IDT yuklenmis olmali - vektor
+ * 0x40 kapisi takili degilse ilk tik triple fault verir. */
+bool lapic_timer_start_cpu(void) {
+    if (s_mode == LAPIC_MODE_NONE) return false;
+    if (s_timer_hz == 0) return false;            /* once kalibre et */
+
+    if (!lapic_cpu_enable()) return false;
+
+    /* Bolme /16 + periyodik mod, maskesiz, vektor 0x40;
+     * ICOUNT yazimi sayaci baslatir (DCR yuklemesi de burada gerceklesir). */
+    tmr_write(XAPIC_DCR, MSR_X2APIC_DCR, DIV_16);
+    tmr_write(XAPIC_LVT_TIM, MSR_X2APIC_LVT_TIM, TMR_PERIODIC | LAPIC_TIMER_VECTOR);
+    tmr_write(XAPIC_ICOUNT, MSR_X2APIC_ICOUNT, s_timer_initial);
+    s_timer_started = true;
+    return true;
+}
+
+bool lapic_timer_init(uint32_t hz) {
+    if (s_timer_started) return true;             /* BSP bir kez baslatir */
+    if (!lapic_timer_calibrate(hz)) return false;
+    return lapic_timer_start_cpu();
 }
 
 void lapic_timer_irq(void) {
