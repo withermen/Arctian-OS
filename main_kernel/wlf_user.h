@@ -71,4 +71,16 @@ uint64_t wlf_user_start(const void *image, uint64_t size, wlf_user_t *out);
  *  (cift serbest birakma yok). 0 = basarili. */
 int wlf_user_free(wlf_user_t *out);
 
+/** Yuklenmis imaji ring 3'te ayrı CR3 altinda calistirir (B1).
+ *  Donus: >= 0 uygulama cikis kodu; < 0 WLF_EXIT_FAULT|istisna
+ *  (WLF_EXIT_IS_FAULT) ya da WLF_USER_ERR_*. Basarida alan bu cagri
+ *  icinde serbest birakilir (out yeniden kullanilacaksa yeniden yukle).
+ *  Cagiran baglam: gorev baglami (kesme icinde cagrilmaz), tek seferde
+ *  tek izole uygulama (ic ice yurutme yok). */
+int wlf_user_run(wlf_user_t *u);
+
+/** B1 kanit testi: gomulu PIC imaji yukler ve ring 3'te calistirir.
+ *  0 = basarili (uygulama cikis kodu 0), negatif = hata/kod. */
+int wlf_user_selftest(void);
+
 #endif /* ARCTIAN_WLF_USER_H */

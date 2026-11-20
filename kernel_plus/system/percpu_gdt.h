@@ -10,9 +10,12 @@
  * geldigi icin "gdt.h" o basliga cozulurdu (carpisma).
  *
  * Her CPU kendi GDT kopyasini kullanir (0x00 bos, 0x08 kod, 0x10 veri,
- * 0x18 TSS). TSS yalnizca rsp0 tasir; IST girdileri simdilik sifir cunku
- * idt.c hicbir kapida IST kullanmiyor. iomap_base = sizeof(tss): IO bitmap
- * yok, yani izin kontrolu yok (ring3 henuz yok).
+ * 0x18 kullanici verisi, 0x20 kullanici kodu, 0x28 TSS). Ring 3 secicileri
+ * RPL 3 ile 0x1B/0x23 olur (bkz. ring3_user.asm iretq); B1'den once TSS
+ * 0x18'deydi ve kullanici tanimi yoktu — kernel_plus icinde ring 3'e gecis
+ * #GP ile oluyordu. TSS yalnizca rsp0 tasir; IST girdileri simdilik sifir
+ * cunku idt.c hicbir kapida IST kullanmiyor. iomap_base = sizeof(tss): IO
+ * bitmap yok, yani izin kontrolu yok.
  *
  * gdt_init_cpu() kesme durumunu DEGISTIRMEZ ve IDT icerigine dokunmaz;
  * mevcut IDTR'yi sidt+lidt ile kendi ustune alir (AP'de IDTR reset sonrasi
@@ -20,7 +23,9 @@
 
 #define GDT_SEL_CODE 0x08u
 #define GDT_SEL_DATA 0x10u
-#define GDT_SEL_TSS  0x18u
+#define GDT_SEL_UDATA 0x18u   /* ring 3'te 0x1B olarak kullanilir */
+#define GDT_SEL_UCODE 0x20u   /* ring 3'te 0x23 olarak kullanilir */
+#define GDT_SEL_TSS  0x28u
 
 typedef struct {
     uint32_t reserved0;

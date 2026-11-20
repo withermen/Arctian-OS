@@ -160,10 +160,15 @@ void syscall_dispatch(registers_t *regs) {
             ret = 0;
             break;
         }
-        case SYS_EXIT:
+        case SYS_EXIT: {
+            /* B1: izole .wlf gorevi aktifse kurtarma kancasi devralir
+             * (donmez; wlf_user_run toparlar). Yoksa eski davranis. */
+            extern int wlf_exit_hook(uint32_t) __attribute__((weak));
+            if (wlf_exit_hook && wlf_exit_hook((uint32_t)regs->rdi)) return;
             serial_puts("[syscall] exit\n");
             ret = 0;
             break;
+        }
         default:
             ret = -1;
             break;

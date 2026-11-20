@@ -23,6 +23,25 @@ enter_user:
     push rdi
     iretq
 
+global enter_user_arg
+; void enter_user_arg(uint64_t rip [rdi], uint64_t rsp [rsi],
+;                     uint64_t rflags [rdx], uint64_t arg [rcx])
+; Ayni gecis; ek olarak kullanici RDI'sine arg yazilir. .wlf girisine
+; wolf_api_t isaretcisi (veya 0) boyle verilir.
+enter_user_arg:
+    mov r8, rdi            ; rip
+    mov rdi, rcx           ; kullanici argumani -> RDI
+    mov ax, 0x1b
+    mov ds, ax
+    mov es, ax
+    cli
+    push 0x1b
+    push rsi
+    push rdx
+    push 0x23
+    push r8
+    iretq
+
 ring3_payload_start:
     lea rsi, [rel ring3_msg]
     mov edx, ring3_msg_len

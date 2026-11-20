@@ -18,6 +18,8 @@
 #include "wlf_user.h"
 #include "vmm_space.h"
 #include "alloc.h"
+#include "wlf_abi.h"
+#include "serial.h"
 #include <stddef.h>
 
 extern void *memcpy(void *dst, const void *src, size_t n);
@@ -214,4 +216,175 @@ int wlf_user_free(wlf_user_t *out) {
     out->magic  = WLF_USER_FREED;
     out->status = WLF_USER_ERR_STATE;
     return WLF_USER_OK;
+}
+
+/* ================= B1: ring 3 yurutme =================
+ *
+ * Sozlesme: wlf_user_run() cagiran gorev baglaminda calisir. Yuklenmis
+ * alan aktif CR3 yapilir, enter_user() ile CPL3'e inilir. Uygulama
+ * int 0x80 SYS_EXIT cagirirsa syscall.c'deki zayif kanca buraya gelir ve
+ * kurtarma noktasina (longjmp) doner; CPU istisnasi olursa isr.c zaten
+ * ayni kurtarma noktasina doner (main_kernel/ring3.c ile ayni mekanizma,
+ * orada #PF testiyle kanitli).
+ *
+ * Kritik: longjmp sirasinda hala UYGULAMA CR3'undeyiz; once cekirdek
+ * alanina donulur, sonra alan serbest birakilir. Cekirdek sayfalari
+ * uygulama alaninda U=0'dir ama ring 0 erisebildigi icin setjmp donusu
+ * guvenlidir. */
+#include "recover.h"
+#include "gdt.h"
+
+extern void enter_user(uint64_t rip, uint64_t rsp, uint64_t rflags);
+extern void enter_user_arg(uint64_t rip, uint64_t rsp, uint64_t rflags,
+                           uint64_t arg);
+extern arctian_recover_t *g_arctian_recover;
+
+static wlf_user_t *volatile s_active;   /* calisan izole uygulama (tek) */
+static uint64_t          s_kernel_space; /* uygulama CR3'unden donus icin */
+static volatile int      s_exit_seen;
+static volatile uint32_t s_exit_code;
+
+/* int 0x80 SYS_EXIT → syscall.c zayif kancasi. Aktif izole gorev yoksa 0
+ * doner (normal yol isler). Varsa beklemeden kurtarma noktasina atlar. */
+int wlf_exit_hook(uint32_t code) {
+    if (!s_active) return 0;
+    if (!g_arctian_recover || !g_arctian_recover->active) return 0;
+    s_active = 0;
+    s_exit_code = code;
+    s_exit_seen = 1;
+    arctian_longjmp(g_arctian_recover, 1);   /* donmez */
+}
+
+int wlf_user_run(wlf_user_t *u) {
+    if (!u || u->magic != WLF_USER_MAGIC || u->status != WLF_USER_OK)
+        return WLF_USER_ERR_ARG;
+    if (!u->space || !u->entry_va || !u->stack_top) return WLF_USER_ERR_STATE;
+    if (s_active) return WLF_USER_ERR_STATE;        /* ic ice yurutme yok */
+    if (g_arctian_recover) return WLF_USER_ERR_STATE;
+
+    vmm_state_t *st = VMM_STATE;
+    if (!st->ready || !st->kernel_space) return WLF_USER_ERR_STATE;
+
+    s_kernel_space = vmm_current();
+
+    static arctian_recover_t rec;   /* gorev basina tek: ic ice yok */
+    rec.active = 0;
+    rec.code = 0;
+    rec.reason[0] = '\0';
+    s_exit_seen = 0;
+    g_arctian_recover = &rec;
+
+    int rc = arctian_setjmp(&rec);
+    if (rc == 0) {
+        rec.active = 1;
+        s_active = u;
+        vmm_switch((vmm_space_t)u->space);   /* ayri adres alani */
+        __asm__ volatile("cli");
+        /* IF=0: CPL3'te kesme almiyoruz. Kesme/planlayici girisinin ring 3
+         * baglaminda guvenli olmasi (TSS.rsp0, preemption) B2'nin isi;
+         * kanitlanmis ring3.c yolu da ayni sekilde 0x2 kullaniyor.
+         *
+         * RDI = 0: B3'te buraya kullanici belleğindeki wolf_api_t
+         * trampoline tablosu gelecek. Simdilik 0, libWolf uygulamalari
+         * wolf_ready()=0 gorup durustce hata koduyla cikar; cekirdege
+         * sizmaz. Ham syscall kullanan self-contained imajlar calisir. */
+        enter_user_arg(u->entry_va, u->stack_top, 0x2, 0);
+        __asm__ volatile("ud2");             /* iretq donmez */
+    }
+
+    /* Geri donus: SYS_EXIT (s_exit_seen) veya CPU istisnasi. Hala
+     * uygulama CR3'undeyiz; once cekirdege don. */
+    __asm__ volatile("cli");
+    {
+        uint16_t kd = GDT_KERNEL_DATA;
+        __asm__ volatile("movw %0, %%ds; movw %0, %%es; movw %0, %%ss"
+                         :: "r"(kd) : "memory");
+    }
+    s_active = 0;
+    rec.active = 0;
+    g_arctian_recover = 0;
+    vmm_switch((vmm_space_t)s_kernel_space);
+    wlf_user_free(u);
+    __asm__ volatile("sti");
+
+    if (s_exit_seen) return (int)s_exit_code;
+    /* Istisna: numara recover kaydinda metin olarak duruyor; ABI'de
+     * ayri alan yok (bkz. wlf_abi.h). Seri logda sebep yazilir. */
+    serial_printf("[wlf] izole gorev istisna ile oldu: %s\n",
+                  rec.reason[0] ? rec.reason : "?");
+    return (int)(WLF_EXIT_FAULT | 0u);
+}
+
+/* ============ B1 kanit: ring 3 izolasyon selftesti ============
+ *
+ * Disk gerektirmeyen, PIC bir kullanici imaji uretip yukleyici + ring-3
+ * yurutucusunu bastan sona calistirir. Payload:
+ *
+ *   mov edi, 1            ; fd = stdout
+ *   lea rsi, [rip+0x17]   ; "izole wlf ring3 ok\n"
+ *   mov edx, 19           ; uzunluk
+ *   mov eax, 1            ; SYS_WRITE
+ *   int 0x80
+ *   xor edi, edi          ; cikis kodu 0
+ *   mov eax, 0            ; SYS_EXIT
+ *   int 0x80
+ *   jmp $                 ; (int 0x80 donmez; guvenlik agi)
+ *   "izole wlf ring3 ok\n"
+ *
+ * Basarili kanit: seri logda satir WLF_WRITE'tan (ring 3) cikar, exit
+ * kancasi doner, donus kodu 0 olur ve masaustu acilmaya devam eder.
+ * Basarisizlikta donus negatiftir; cagiran loglar, sistem ayakta kalir. */
+int wlf_user_selftest(void) {
+    static const uint8_t payload[] = {
+        0xBF, 0x01, 0x00, 0x00, 0x00,             /* mov edi,1            */
+        0x48, 0x8D, 0x35, 0x17, 0x00, 0x00, 0x00, /* lea rsi,[rip+0x17]   */
+        0xBA, 0x13, 0x00, 0x00, 0x00,             /* mov edx,19           */
+        0xB8, 0x01, 0x00, 0x00, 0x00,             /* mov eax,1 (WRITE)    */
+        0xCD, 0x80,                               /* int 0x80             */
+        0x31, 0xFF,                               /* xor edi,edi          */
+        0xB8, 0x00, 0x00, 0x00, 0x00,             /* mov eax,0 (EXIT)     */
+        0xCD, 0x80,                               /* int 0x80             */
+        0xEB, 0xFE,                               /* jmp $                */
+        'i','z','o','l','e',' ','w','l','f',' ','r',
+        'i','n','g','3',' ','o','k','\n'
+    };
+    const uint32_t plen = (uint32_t)sizeof(payload);
+    const uint32_t total = WLF_HEADER_SIZE + (uint32_t)sizeof(payload);
+    wlf_header_t *hdr;
+    wlf_user_t u;
+    uint8_t *img;
+    int rc;
+
+    img = (uint8_t *)kmalloc(total);
+    if (!img) {
+        serial_puts("[wlf] selftest: imaj icin bellek yok\n");
+        return WLF_USER_ERR_NO_MEM;
+    }
+    memset(img, 0, total);
+    hdr = (wlf_header_t *)img;
+    hdr->magic       = WLF_MAGIC;
+    hdr->version     = WLF_VERSION;
+    hdr->kind        = WLF_KIND_NATIVE;
+    hdr->image_size  = plen;
+    hdr->bss_size    = 0;
+    hdr->entry_off   = 0;
+    hdr->payload_off = WLF_HEADER_SIZE;
+    hdr->payload_len = plen;
+    memcpy(img + WLF_HEADER_SIZE, payload, sizeof(payload));
+
+    serial_puts("[wlf] izolasyon selftest: yukleniyor + ring 3...\n");
+    if (!wlf_user_start(img, total, &u)) {
+        rc = u.status;
+        serial_printf("[wlf] selftest: yukleme basarisiz status=%d\n", rc);
+        kfree(img);
+        return rc;
+    }
+    kfree(img);   /* yukleyici kopyaladi; kaynak artik gerekmiyor */
+
+    rc = wlf_user_run(&u);
+    if (rc == 0)
+        serial_puts("[wlf] izolasyon selftest GECTI: ring 3 yazdi, cikis 0, sistem ayakta\n");
+    else
+        serial_printf("[wlf] izolasyon selftest BASARISIZ: donus=%d\n", rc);
+    return rc;
 }

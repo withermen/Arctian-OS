@@ -6,16 +6,20 @@ _Static_assert(sizeof(tss64_t) == 104, "tss64_t 104 bayt olmali");
 
 #define GDT_CODE64 0x00AF9A000000FFFFull   /* base 0, limit FFFFF, L=1 D=0 */
 #define GDT_DATA64 0x00CF92000000FFFFull   /* base 0, limit FFFFF, D=1 */
+#define GDT_UDATA  0x00CFF2000000FFFFull   /* DPL3 veri  (secici 0x1B) */
+#define GDT_UCODE  0x00AFFA000000FFFFull   /* DPL3 kod, L=1 (secici 0x23) */
 
 typedef struct {
     uint64_t null;
     uint64_t code;
     uint64_t data;
-    uint64_t tss_low;     /* 0x18: 16 baytlik sistem tanimi */
+    uint64_t udata;       /* 0x18: kullanici verisi (secici 0x1B) */
+    uint64_t ucode;       /* 0x20: kullanici kodu  (secici 0x23) */
+    uint64_t tss_low;     /* 0x28: 16 baytlik sistem tanimi */
     uint64_t tss_high;
 } gdt64_t;
 
-_Static_assert(sizeof(gdt64_t) == 40, "gdt64_t 40 bayt olmali");
+_Static_assert(sizeof(gdt64_t) == 56, "gdt64_t 56 bayt olmali");
 
 typedef struct {
     uint16_t limit;
@@ -57,6 +61,8 @@ void gdt_init_cpu(uint32_t index, uint64_t rsp0) {
     g->null = 0;
     g->code = GDT_CODE64;
     g->data = GDT_DATA64;
+    g->udata = GDT_UDATA;
+    g->ucode = GDT_UCODE;
     tss_desc_set(g, (uint64_t)(uintptr_t)t, (uint32_t)sizeof(tss64_t) - 1u);
 
     dtable_ptr_t gp = { (uint16_t)(sizeof(*g) - 1u), (uint64_t)(uintptr_t)g };
