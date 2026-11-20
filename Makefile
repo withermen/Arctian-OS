@@ -89,7 +89,11 @@ LIB_SRCS = lib/util.c lib/console.c lib/printf.c lib/alloc.c lib/storage.c \
            lib/blockdev.c lib/blk_ata.c lib/blk_ahci.c lib/blk_nvme.c lib/afs.c lib/fat32.c lib/klog.c \
            lib/netdev.c lib/diag.c lib/ec.c
 
-MAIN_C   = $(wildcard main_kernel/*.c) $(LIB_SRCS)
+# main_kernel (.wlf yukleyicisini TASIMAZ): vmm_space/wlf_user yalniz
+# kernel_plus'a baglanir. Bu dosyalar main_kernel'e girdiginde bss buyuyup
+# INSTALL_BASE (0x200000) bolgesine tasiyordu ve install modulu acilirken
+# eziliyordu (linker.ld'deki ASSERT da bunu yakalar).
+MAIN_C   = $(filter-out main_kernel/wlf_user.c main_kernel/vmm_space.c,$(wildcard main_kernel/*.c)) $(LIB_SRCS)
 MAIN_ASM = $(filter-out main_kernel/isr.asm,$(wildcard main_kernel/*.asm))
 ISR_STUB_OBJ = $(BUILD)/main_kernel/isr_stubs.o
 RECOVER_OBJ  = $(BUILD)/lib/recover.o
@@ -98,7 +102,8 @@ INSTALL_C = install/installer.c $(LIB_SRCS)
 
 KP_C = kernel_plus/init.c main_kernel/idt.c main_kernel/isr.c main_kernel/paging.c \
        main_kernel/syscall.c main_kernel/pic.c \
-       main_kernel/loader.c $(LIB_SRCS) lib/mbedtls_port.c \
+       main_kernel/loader.c main_kernel/vmm_space.c main_kernel/wlf_user.c \
+       $(LIB_SRCS) lib/mbedtls_port.c \
        $(wildcard kernel_plus/drivers/*.c) \
        $(wildcard kernel_plus/net/*.c) \
        $(wildcard kernel_plus/tls/*.c) \
@@ -163,7 +168,7 @@ LVGL_C = $(shell find third_party/lvgl/src -name '*.c' \
 
 MAIN_OBJS    = $(patsubst %.c,$(BUILD)/%.o,$(MAIN_C)) $(patsubst %.asm,$(BUILD)/%.o,$(MAIN_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
 INSTALL_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(INSTALL_C))
-KP_OBJS      = $(patsubst %.c,$(BUILD)/%.o,$(KP_C)) $(patsubst %.S,$(BUILD)/%.o,$(KP_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
+KP_OBJS      = $(patsubst %.c,$(BUILD)/%.o,$(KP_C)) $(patsubst %.S,$(BUILD)/%.o,$(KP_ASM)) $(BUILD)/main_kernel/ring3_user.o $(ISR_STUB_OBJ) $(RECOVER_OBJ)
 DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
 
 .PHONY: all boot main_kernel install kernel_plus desktop pack qemu qemu-iso clean store-packs FORCE \
@@ -372,8 +377,8 @@ $(BUILD)/apps/%.o: desktop/apps/%/main.rs
 	bash tools/rust_compile_stub.sh $< $@
 	$(OBJCOPY) --redefine-sym app_entry=app_$*_entry $@
 
-$(BUILD)/main_kernel/main_kernel.elf: $(MAIN_OBJS)
-	$(LD) -m elf_x86_64 -nostdlib -T main_kernel/linker.ld -o $@ $^
+$(BUILD)/main_kernel/main_kernel.elf: $(MAIN_OBJS) main_kernel/linker.ld
+	$(LD) -m elf_x86_64 -nostdlib -T main_kernel/linker.ld -o $@ $(MAIN_OBJS)
 $(BUILD)/main_kernel/main_kernel.bin: $(BUILD)/main_kernel/main_kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
