@@ -26,6 +26,7 @@
 #include "audio.h"
 #include "pci.h"
 #include "serial.h"
+#include "wlf_user.h"
 #include "rtc.h"
 #include "disk.h"
 #include "net.h"
@@ -48,6 +49,7 @@
 #include "volfs.h"
 #include "printf.h"
 #include "serial.h"
+#include "wlf_user.h"
 #include "clock.h"
 #include "cpu.h"
 #include "percpu.h"
@@ -469,6 +471,24 @@ static asi_power_t s_power;
 static asi_spool_t s_spool;
 static asi_log_t s_log;
 static asi_dev_t s_dev;
+static asi_wlf_t s_wlf;
+
+/* B2: masaustunun verdigi .wlf imajini izole calistirir. Masaustu CPL0'da
+ * ve imaj cekirdek bellekte oldugu icin isaretci dogrulamasi gerekmez;
+ * yine de sinirlar wlf_user_start icinde yeniden denetlenir. */
+static int wlf_run_image_fn(const void *image, uint32_t size) {
+    wlf_user_t u;
+    int rc;
+
+    if (!image || size < WLF_HEADER_SIZE) return -1;
+    if (!wlf_user_start(image, size, &u)) {
+        serial_printf("[wlf] izole yukleme reddedildi: status=%d\n", (int)u.status);
+        return u.status;
+    }
+    rc = wlf_user_run(&u);
+    serial_printf("[wlf] izole calistirma bitti: kod=%d\n", rc);
+    return rc;
+}
 
 static int      gfx_w(void)   { return backbuffer_width(); }
 static int      gfx_h(void)   { return backbuffer_height(); }
@@ -947,6 +967,8 @@ void kernel_plus_main(void *arg) {
     g_asi->proc = &s_proc;
     g_asi->lab = &s_lab;
     g_asi->audio = &s_audio;
+    s_wlf.run_image = wlf_run_image_fn;
+    g_asi->wlf = &s_wlf;
 
     caps_init(g_asi);
     g_asi->fs = volfs_install(afs_asi());
@@ -982,6 +1004,10 @@ void kernel_plus_main(void *arg) {
 
     sched_selftest();
     proc_selftest();
+    /* B1 kaniti: izole .wlf yolu (dogrulama + ayri CR3 + ring 3 + exit
+     * kancasi) masaustunden once gercek bir imajla denenir. Basarisizlik
+     * masaustunu engellemez; seri logda BASARISIZ olarak gorunur. */
+    wlf_user_selftest();
 #ifdef ARCTIAN_SELFTESTS
     proc_fault_selftest();
 #endif
@@ -1044,6 +1070,10 @@ void kernel_plus_main(void *arg) {
 
     terminal_writestring("kernel_plus: desktop baslatiliyor...\n");
     klog_write(KLOG_INFO, "boot", "desktop baslatiliyor");
+    /* B1 kaniti: izole .wlf yolu (ayri CR3 + ring 3) masaustunden once
+     * bir kez gercek imajla denenir. Basarisizlik masaustunu engellemez;
+     * seri logda BASARISIZ olarak gorunur. */
+    wlf_user_selftest();
     klog_flush();
     serial_puts("[kp] jumping to desktop\n");
     ((void (*)(void *))(uintptr_t)d.load_addr)(g_asi);

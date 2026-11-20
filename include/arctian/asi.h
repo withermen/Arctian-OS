@@ -450,6 +450,15 @@ typedef struct {
     const char *(*status)(int i);
 } asi_dev_t;
 
+/* ---- Izole .wlf calistirma (B2) ----
+ * Masaustu (guvenilir, CPL0) bir .wlf imajini buradan calistirir; cekirdek
+ * imaji dogrular, ayri PML4 + ring 3'te yurutur. image/size cekirdek
+ * isaretcisidir (masaustu tamponu). Donus: >=0 uygulama cikis kodu,
+ * <0 hata (wlf_abi.h). Yapisal ABI icin EN SONA eklendi. */
+typedef struct {
+    int (*run_image)(const void *image, uint32_t size);
+} asi_wlf_t;
+
 typedef struct {
     uint32_t        version;   /* ASI_VERSION */
     asi_console_t  *console;
@@ -471,6 +480,7 @@ typedef struct {
     asi_spool_t    *spool;
     asi_log_t      *log;
     asi_dev_t      *dev;
+    asi_wlf_t      *wlf;      /* B2: izole .wlf yurutucu (EN SONA) */
 } asi_t;
 
 /* kernel_plus tarafindan doldurulur; tum moduller erisir. */

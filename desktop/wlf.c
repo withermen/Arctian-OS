@@ -333,10 +333,19 @@ int wlf_scan_one(const char *full_path) {
 /* Calistirma                                                          */
 /* ------------------------------------------------------------------ */
 
-/* Native: kodu load_addr'e kopyala, bss'i sifirla, wolf_main(api) cagir. */
-static int wlf_run_native(dyn_app_t *d, const uint8_t *payload, uint32_t plen,
+/* Native calistirma.
+ * B2: masaustu bir .wlf imajini artik cekirdegin izole yurutucusune verir
+ * (ayri CR3 + ring 3). Geriye uyum: g_asi->wlf bagli degilse (eski cekirdek)
+ * eski, ayni adres alaninda calisan yol kullanilir. */
+static int wlf_run_native(dyn_app_t *d, const uint8_t *image, uint32_t size,
                           lv_obj_t *body, asi_t *asi) {
     (void)asi;
+    if (g_asi && g_asi->wlf && g_asi->wlf->run_image)
+        return g_asi->wlf->run_image(image, size);
+
+    const wlf_header_t *h = (const wlf_header_t *)image;
+    const uint8_t *payload = image + h->payload_off;
+    uint32_t plen = h->payload_len;
     if (plen < d->image_size) return -1;
     uint8_t *dst = (uint8_t *)(uintptr_t)d->load_addr;
     for (uint32_t i = 0; i < d->image_size; i++) dst[i] = payload[i];
@@ -373,7 +382,7 @@ void wlf_run_entry(dyn_app_t *d, lv_obj_t *body, asi_t *asi) {
     }
     const uint8_t *payload = buf + h->payload_off;
     if (h->kind == WLF_KIND_NATIVE) {
-        int rc = wlf_run_native(d, payload, h->payload_len, body, asi);
+        int rc = wlf_run_native(d, buf, len, body, asi);
         if (own) g_asi->mem->free(buf);
         if (rc != 0) wlf_host_error("Uygulama hata kodu dondurdu");
     } else {
@@ -416,7 +425,7 @@ int wlf_run_cli(dyn_app_t *d, const char *arg, void (*puts)(const char *s)) {
     const uint8_t *payload = buf + h->payload_off;
     int rc;
     if (h->kind == WLF_KIND_NATIVE)
-        rc = wlf_run_native(d, payload, h->payload_len, body, g_asi);
+        rc = wlf_run_native(d, buf, len, body, g_asi);
     else
         rc = wlf_vm_run(payload, h->payload_len, body, g_asi);
     wlf_host_set_sink(0);
