@@ -3,7 +3,13 @@
 
 #include <stdint.h>
 
-#define SCHED_MAX_TASKS 8
+/* C4: sablon sabit dizi yerine dinamik havuz. s_tasks havuzu boot'ta bir
+ * kez SCHED_TASK_HARD_CAP kadar ayrilir (heap'ten); gercek kapasite
+ * (kabul edilen gorev sayisi tavanı) calisma zamaninda
+ * min(64 x cevrimici CPU, HARD_CAP, RAM politikasi) ile belirlenir ve
+ * sched_capacity() ile okunur. Tek CPU geri uyumu: kapasite 64. */
+#define SCHED_TASK_HARD_CAP 4096
+#define SCHED_CAP_PER_CPU   64u
 
 typedef int sched_tid_t;
 
@@ -61,5 +67,12 @@ void       *sched_owner_current(void);
 
 uint64_t    sched_irq_save(void);
 void        sched_irq_restore(uint64_t flags);
+
+/* C4 kapasite sozlesmesi: sched_capacity kabul tavanini, sched_task_count
+ * kullanimi dondurur (gorev yoneticisi "kullanilan / kapasite" gosterir).
+ * sched_scale_capacity: AP bootu sonrasi cevrimici CPU sayisina gore
+ * tavani yeniden hesaplar (yalniz buyutur, kucultmez). */
+int         sched_capacity(void);
+void        sched_scale_capacity(void);
 
 #endif

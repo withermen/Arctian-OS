@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "percpu.h"
 #include "lapic.h"
+#include "alloc.h"        /* C4: gorev yiginlari heap'ten */
 
 #define SCHED_STACK_SIZE   (32u * 1024u)
 #define SCHED_SLICE_TICKS  5u
@@ -25,6 +26,7 @@ typedef struct sched_task {
     /* Per-CPU run queue baglanti alanlari (paket 7). */
     int32_t next_q;               /* kuyrukta sonraki task indexi, -1 = yok */
     uint8_t in_q;                 /* bir kuyruga bagli mi (tek kuyruk garantisi) */
+    uint8_t stack_heap;           /* C4: yigin heap'ten ayrildi (reap'ta kfree) */
     uint32_t bound_cpu;           /* bulundugu kuyruk (CPU indexi) */
 } sched_task_t;
 
@@ -51,8 +53,8 @@ static uint32_t sched_self_cpu(void);
 static sched_task_t *sched_self_current(void);
 static void sched_resched_notify(uint32_t cpu);
 
-static sched_task_t s_tasks[SCHED_MAX_TASKS] __attribute__((aligned(16)));
-static uint8_t s_stacks[SCHED_MAX_TASKS][SCHED_STACK_SIZE] __attribute__((aligned(16)));
+static sched_task_t *s_tasks;       /* C4: boot'ta heap'ten ayrilir (HARD_CAP) */
+static uint32_t s_capacity;         /* kabul tavani: 64*cpu, HARD_CAP ve RAM ile sinirli */
 static sched_task_t *s_current;    /* yalniz CPU 0 (BSP) icin gecerli */
 static volatile uint32_t s_tick;
 static volatile uint64_t s_total_ticks;
@@ -60,6 +62,34 @@ static volatile int s_ready;
 static uint32_t s_spawn_rr;        /* spawn round-robin sayaci (C3) */
 
 static runq_t s_runq[CPU_MAX_APICS];
+
+/* ---- C4 kapasite ve RAM esiği ----
+ * Havuz HARD_CAP kadar ayrilir; kabul tavani ayri: her cevrimici CPU icin
+ * SCHED_CAP_PER_CPU, en az 64, en cok HARD_CAP. RAM esiği: yiginlar heap
+ * havuzundan (HEAP_MAX) geldigi icin "havuzun en az %10'u bos kalsin"
+ * kurali uygulanir; 1 GB sistem gereksiniminde bu makinenin ~%7-8'ine
+ * karsilik gelir (muhafazakar). kmalloc'un kendisi de basarisizlikta 0
+ * donerur - cift katmanli koruma. */
+static bool ram_gate_ok(uint64_t need) {
+    size_t used = kmalloc_used();
+    size_t total = kmalloc_total();
+    if (used + need > total) return false;
+    return (total - used - need) >= total / 10u;
+}
+
+int sched_capacity(void) { return (int)s_capacity; }
+
+void sched_scale_capacity(void) {
+    uint32_t n = percpu_online_count();
+    if (n == 0) n = 1;
+    uint64_t want = (uint64_t)n * SCHED_CAP_PER_CPU;
+    if (want > SCHED_TASK_HARD_CAP) want = SCHED_TASK_HARD_CAP;
+    if (want < SCHED_CAP_PER_CPU) want = SCHED_CAP_PER_CPU;
+    if ((uint32_t)want > s_capacity) {
+        s_capacity = (uint32_t)want;
+        serial_printf("[sched] kapasite=%u (cpu=%u)\n", s_capacity, n);
+    }
+}
 
 /* AP ilk goreve gecerken "uzerinden gecilen" baglam: AP'nin park dongusu
  * kesimden once calisan bir gorev degildi; switch buradan yapilir. */
@@ -108,7 +138,7 @@ static void rq_detach_locked(runq_t *rq, int tid) {
 
 /* Gorevi bound_cpu kuyruguna READY ise ekler (dedupe in_q ile). */
 static void rq_enqueue_bound(int tid) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
     sched_task_t *t = &s_tasks[tid];
     if (t->state != TASK_READY || t->bound_cpu >= CPU_MAX_APICS) return;
     runq_t *rq = &s_runq[t->bound_cpu];
@@ -175,8 +205,9 @@ static void schedule(void) {
     if (!cur) return;
 
     sched_task_t *next = 0;
-    for (int k = 1; k < SCHED_MAX_TASKS; k++) {
-        int idx = (cur->id + k) % SCHED_MAX_TASKS;
+    uint32_t cap = s_capacity;
+    for (uint32_t k = 1; k < cap; k++) {
+        int idx = (int)((cur->id + k) % cap);
         sched_task_t *t = &s_tasks[idx];
         /* Baska bir CPU'nun kuyrugunda duran READY gorevi BSP secmez:
          * sahibi olan AP'nin tik'i gelir; ikili calisma yarisi olurdu.
@@ -207,7 +238,7 @@ void sched_tick(void) {
     s_total_ticks++;
     if (s_current && s_current->state == TASK_RUNNING) s_current->ticks++;
 
-    for (int i = 0; i < SCHED_MAX_TASKS; i++) {
+    for (uint32_t i = 0; i < s_capacity; i++) {
         sched_task_t *t = &s_tasks[i];
         if (t->state == TASK_BLOCKED &&
             (int32_t)(s_tick - t->wake_tick) >= 0) {
@@ -270,14 +301,34 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     uint64_t f = sched_irq_save();
 
     int idx = -1;
-    for (int i = 1; i < SCHED_MAX_TASKS; i++) {
-        if (s_tasks[i].state == TASK_UNUSED) { idx = i; break; }
+    for (uint32_t i = 1; i < s_capacity; i++) {
+        if (s_tasks[i].state == TASK_UNUSED) { idx = (int)i; break; }
     }
     if (idx < 0) { sched_irq_restore(f); return -1; }
 
     sched_task_t *t = &s_tasks[idx];
-    void *base = stack ? stack : s_stacks[idx];
-    uint32_t size = stack ? stack_size : SCHED_STACK_SIZE;
+    void *base = stack;
+    uint32_t size = stack_size;
+    uint8_t heap_stack = 0;
+    if (!base) {
+        /* C4: yigin heap'ten. RAM esiği ve kmalloc basarisizligi cagirana
+         * durust -1 olarak yansir (eskiden 8. gorev sessizce reddedilirdi;
+         * simdi kapasite dolunca da ayni sekilde). */
+        if (!ram_gate_ok(SCHED_STACK_SIZE)) {
+            sched_irq_restore(f);
+            serial_printf("[sched] RED %s: RAM esiği (kullanim %u KB)\n",
+                          name ? name : "?", (unsigned)(kmalloc_used() / 1024u));
+            return -1;
+        }
+        base = kmalloc(SCHED_STACK_SIZE);
+        if (!base) {
+            sched_irq_restore(f);
+            serial_printf("[sched] RED %s: heap tukendi\n", name ? name : "?");
+            return -1;
+        }
+        size = SCHED_STACK_SIZE;
+        heap_stack = 1;
+    }
     uintptr_t top = ((uintptr_t)base + size) & ~(uintptr_t)15;
     uint64_t *fr = (uint64_t *)(top - 64);
     fr[0] = 0;
@@ -303,6 +354,7 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     t->owner = 0;
     t->next_q = -1;
     t->in_q = 0;
+    t->stack_heap = heap_stack;
     /* Dagitim: cevrimici CPU'larda round-robin (C3). Tek CPU eski davranis:
      * bound_cpu=0, runq[0] ayna kayit, legacy tarama secici. */
     uint32_t bound = 0;
@@ -339,7 +391,7 @@ sched_tid_t sched_spawn_stack(const char *name, void (*fn)(void *), void *arg,
 }
 
 int sched_state(sched_tid_t tid) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return TASK_UNUSED;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return TASK_UNUSED;
     return s_tasks[tid].state;
 }
 
@@ -364,7 +416,7 @@ void sched_block_current(void) {
 }
 
 void sched_wake(sched_tid_t tid) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
     uint64_t f = sched_irq_save();
     if (s_tasks[tid].state == TASK_BLOCKED) s_tasks[tid].state = TASK_READY;
     sched_irq_restore(f);
@@ -372,7 +424,7 @@ void sched_wake(sched_tid_t tid) {
 }
 
 void sched_reap(sched_tid_t tid) {
-    if (tid <= 0 || tid >= SCHED_MAX_TASKS) return;
+    if (tid <= 0 || tid >= SCHED_TASK_HARD_CAP) return;
     uint64_t f = sched_irq_save();
     if (s_tasks[tid].state == TASK_DONE) {
         uint32_t bc = s_tasks[tid].bound_cpu;
@@ -381,20 +433,26 @@ void sched_reap(sched_tid_t tid) {
             rq_detach_locked(&s_runq[bc], tid);
             spin_unlock(&s_runq[bc].lock);
         }
+        /* C4: heap'ten ayrilan yigin geri verilir; spawn-stack (extern
+         * yiginli) gorevlerde stack_heap=0'dir, dokunulmaz. */
+        if (s_tasks[tid].stack_heap && s_tasks[tid].stack_base)
+            kfree(s_tasks[tid].stack_base);
         s_tasks[tid].state = TASK_UNUSED;
         s_tasks[tid].owner = 0;
         s_tasks[tid].name = 0;
+        s_tasks[tid].stack_base = 0;
+        s_tasks[tid].stack_heap = 0;
     }
     sched_irq_restore(f);
 }
 
 void sched_set_owner(sched_tid_t tid, void *owner) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
     s_tasks[tid].owner = owner;
 }
 
 void *sched_owner(sched_tid_t tid) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return 0;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return 0;
     return s_tasks[tid].owner;
 }
 
@@ -410,13 +468,13 @@ sched_tid_t sched_current(void) {
 
 int sched_task_count(void) {
     int n = 0;
-    for (int i = 0; i < SCHED_MAX_TASKS; i++)
+    for (uint32_t i = 0; i < s_capacity; i++)
         if (s_tasks[i].state != TASK_UNUSED) n++;
     return n;
 }
 
 uint32_t sched_task_ticks(sched_tid_t tid) {
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return 0;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return 0;
     return (uint32_t)s_tasks[tid].ticks;
 }
 
@@ -425,7 +483,17 @@ uint32_t sched_total_ticks(void) {
 }
 
 void sched_init(void) {
-    for (int i = 0; i < SCHED_MAX_TASKS; i++) {
+    /* C4: havuz boot'ta bir kez heap'ten ayrilir (kmalloc 16 bayt hiza-
+     * li dondurur; fpu alaninin fxsave 16-bayt kosulu eleman bazinda
+     * aligned(16) ile garanti altinda). Basarisizlikta s_ready kurulmaz:
+     * sistem uretici olmadan yuksek sesle hata verir. */
+    s_tasks = kmalloc(sizeof(sched_task_t) * SCHED_TASK_HARD_CAP);
+    if (!s_tasks) {
+        serial_puts("[sched] HATA: gorev havuzu ayrilamadi, planlayici kapali\n");
+        return;
+    }
+    s_capacity = SCHED_CAP_PER_CPU;   /* tek CPU geri uyumu: 64 */
+    for (int i = 0; i < SCHED_TASK_HARD_CAP; i++) {
         s_tasks[i].rsp = 0;
         s_tasks[i].state = TASK_UNUSED;
         s_tasks[i].id = i;
@@ -438,6 +506,7 @@ void sched_init(void) {
         s_tasks[i].ticks = 0;
         s_tasks[i].next_q = -1;
         s_tasks[i].in_q = 0;
+        s_tasks[i].stack_heap = 0;
         s_tasks[i].bound_cpu = 0;
     }
     for (uint32_t c = 0; c < CPU_MAX_APICS; c++) {
@@ -490,7 +559,7 @@ static void sched_set_self_current(sched_task_t *t) {
 
 int sched_enqueue_cpu(uint32_t cpu, sched_tid_t tid) {
     if (!s_ready) return -1;
-    if (tid < 0 || tid >= SCHED_MAX_TASKS) return -1;
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return -1;
     if (tid == 0) return -1;                  /* main gorevi tasinmaz */
     if (cpu >= CPU_MAX_APICS) return -1;
     sched_task_t *t = &s_tasks[tid];

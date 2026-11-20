@@ -184,5 +184,8 @@ uint32_t apboot_start_all(void) {
         if (apboot_start(p->index, id)) ok++;
         else serial_printf("[apboot] AP baslamadi apic=0x%X\n", id);
     }
+    /* C4: gorev kapasitesi cevrimici CPU sayisina gore buyur
+     * (64 x CPU, tavani var). Basarisiz AP olursa tavan dusuk kalir. */
+    if (ok) sched_scale_capacity();
     return ok;
 }

@@ -5,16 +5,16 @@
 #include "syscall.h"
 #include "clock.h"
 
-static uint32_t s_over[SCHED_MAX_TASKS];
-static uint8_t  s_has[SCHED_MAX_TASKS];
-static uint32_t s_uid_t[SCHED_MAX_TASKS];
-static uint32_t s_gid_t[SCHED_MAX_TASKS];
+static uint32_t s_over[SCHED_TASK_HARD_CAP];
+static uint8_t  s_has[SCHED_TASK_HARD_CAP];
+static uint32_t s_uid_t[SCHED_TASK_HARD_CAP];
+static uint32_t s_gid_t[SCHED_TASK_HARD_CAP];
 static int      s_err = 0;
 
 /* ---- 0.6 uyumlulugu: gorev basina yetki maskesi ---- */
 static int cur_task(void) {
     int t = sched_current();
-    if (t < 0 || t >= SCHED_MAX_TASKS) return 0;
+    if (t < 0 || t >= SCHED_TASK_HARD_CAP) return 0;
     return t;
 }
 
@@ -401,7 +401,7 @@ void caps_fs_guard_install(asi_fs_t **slot) {
 static asi_sandbox_t s_sandbox;
 
 void caps_init(asi_t *asi) {
-    for (int i = 0; i < SCHED_MAX_TASKS; i++) {
+    for (int i = 0; i < SCHED_TASK_HARD_CAP; i++) {
         s_over[i] = CAP_ALL;
         s_has[i] = 0;
         s_uid_t[i] = 0;
