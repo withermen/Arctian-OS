@@ -22,6 +22,7 @@ kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 | Ağ | ARP/IPv4/TCP/UDP + DHCP, DNS, HTTP/HTTPS (mbedTLS), NTP, uygulama seviyesi güvenlik duvarı |
 | Sürücüler | e1000, PCnet, RTL8139, RTL8169, Atheros ath9k, Intel AX201 (gen3 ürün yazılımı yükleme; tarama/bağlantı iskelet), USB UHCI/EHCI/XHCI + HID + MSD, AHCI/ATA/ATAPI/NVMe, AC'97 ses, PS/2 klavye-fare, CMOS RTC, ACPI (Güç Kapat / uyku durumları), VESA |
 | Uygulama modeli | **Her uygulama bir `.wlf`'tir** (gömülü çekirdek uygulamalar hariç); roller: `ui`, `cli`, `runtime`; dosya uzantısı eşlemesi ("birlikte aç") |
+| Yalıtım | `.wlf` uygulamaları **ring 3'te, kendi sayfa tablosunda (CR3)** çalışır: çekirdek eşlemeleri kullanıcı alanında U=0, kod yazılamaz/X, veri-yığın NX (W^X); çıkış ve CPU istisnası çekirdeği çökertmeden uygulamayı kapatır. Kabuk ve gömülü sistem uygulamaları tasarım gereği çekirdek yetkisindedir |
 | Güvenlik | Yetenek maskesi + dosya kapısı + komut kapısı + kullanıcı onay penceresi + karar deposu; RSA-2048/SHA-256 paket ve manifesto imzası |
 | Güncelleme | İmzalı sürüm manifestosu, kapanışta/açılışta kurulum, A/B sistem yuvası ve geri dönüş |
 | Mağaza | DuckStore: Python feed + web market sunucusu, OS istemcisi, `wf` komut satırı aracı |
@@ -107,9 +108,20 @@ docs/          mimari, derleme, uygulama geliştirme
 
 ## Bilinen sınırlar
 
-- **Uygulamalar kabukla aynı adres alanında çalışır.** Yetenek kapıları, dosya/komut
-  kapıları ve onay penceresi bir *politika* sınırıdır; donanımsal (ring 3 + ayrı sayfa
-  tablosu) izolasyon henüz yok. Hedeflenen tasarım mimari belgesinde açıkça yazılı.
+- **`.wlf` uygulamaları donanımsal olarak yalıtılmıştır (ring 3 + ayrı sayfa
+  tablosu).** Masaüstü bir `.wlf`'i çekirdeğe verir; çekirdek imajı doğrular,
+  kendi PML4'ünü kurar (çekirdek sayfaları bu alanda U=0 → uygulama çekirdek
+  belleğini okuyamaz/yazamaz), kodu X, veri ve yığını NX olarak eşler ve
+  `iretq` ile CPL3'e düşer. Uygulama yalnız `int 0x80` syscall'larını görür;
+  `SYS_EXIT`'i veya bir CPU istisnası yalnız kendi penceresini kapatır,
+  sistem ayakta kalır. Kanıt: `bash tests/isolation/run.sh` (gömülü PIC
+  imajla yükleme + ring 3 çıktısı + çıkış kanca + masaüstünün devamı).
+  **Açık kalan:** libWolf GUI API'sinin kullanıcı tarafı köprüsü (`wolf_api_t`
+  trampolinleri + olay modeli) henüz yok; bu yüzden GUI'li native `.wlf`
+  uygulamaları yalıtılmış ortamda arayüzlerini çizemez (uygulama `wolf_ready()`
+  = 0 görüp dürüst bir hata koduyla çıkar). Kabuk ve gömülü sistem
+  uygulamaları tasarım gereği kabukla aynı adres alanındadır; script (VM)
+  `.wlf` uygulamaları makine kodu yürütmeyen yorumlayıcıda çalışır.
 - **UEFI önyükleyici yalnızca QEMU/OVMF üzerinde test edildi.** Gerçek firmware ve
   dizüstü donanımında denenmedi. Mevcut UEFI kodu bir iskelettir: COM1'e test işareti
   basar ve GOP mod bilgisini ortak bootinfo sözleşmesine yazar; `ExitBootServices`

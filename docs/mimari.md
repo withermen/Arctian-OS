@@ -77,7 +77,7 @@ tarafından sıfırlanır; `entry_off` adrese eklenip atılır.
 | Modül | İçerik |
 |---|---|
 | `boot/` | NASM ile yazılmış üç aşama: disk/ISO okuma, A20, uzun mod, sayfama, VESA modu seçimi, VBE info bloğu |
-| `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve VMM, modül yükleyici, syscall, ring3 iskeleti (`ring3.c` — henüz tam izolasyon sağlamaz) |
+| `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve VMM, modül yükleyici, syscall, ring 3 geçişi (`ring3_user.asm`: `enter_user` / `enter_user_arg`); `.wlf` izole yürütücüsü `wlf_user.c` + `vmm_space.c` **yalnız `kernel_plus`a bağlanır** |
 | `install/` | Kurulum sihirbazı: bölümleme, AFS biçimlendirme, modül kopyalama, önyükleme kaydı |
 | `kernel_plus/` | Sürücüler (`drivers/`), ağ yığını (`net/`), zamanlayıcı/işlem/iplik/senkronizasyon, yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS, açılış animasyonu (`system/bootanim.c`) |
 | `desktop/` | LVGL ile masaüstü kabuğu (dock, pencereler, paneller), gömülü uygulamalar, `.wlf` yükleyici/VM, tarayıcı motorları (Wolf Engine + QuickJS, Lexbor), tema (ADL-Wolf), kurulum sonrası ekranlar |
@@ -124,13 +124,28 @@ kullanılır.
 - Sağlama toplamı ikon + payload üzerindedir; meta bloğu bunun dışındadır ama **imza
   kapsamındadır**. Başlığa alan eklerken kural: alanlar yalnızca sona eklenir.
 
-Native `.wlf` kendi bölgesine (`WLF_BASE`) yüklenir, `.bss` sıfırlanır ve
-`int wolf_main(const wolf_api_t *api)` çağrılır.
+Native `.wlf` artık çekirdeğin izole yürütücüsüne verilir (`asi_wlf_t.run_image`
+→ `wlf_user_start` + `wlf_user_run`): imaj kendi PML4'ündeki kullanıcı
+aralığına (`VMM_USER_BASE`) yüklenir, `.bss` sıfırlanır ve `iretq` ile CPL3'te
+`int wolf_main(const wolf_api_t *api)` karşılığı olan giriş noktasına düşülür.
+Yükleyici çekirdekte, **uygulama kodu çekirdek yetkisinde değildir**.
 
 ## 6. Koruma sınırı ve imza
 
-Bu sürümdeki sınır **politika** düzeyindedir; donanımsal izolasyon (ring 3 + süreç başına
-adres alanı) henüz uygulanmadı.
+`.wlf` uygulamaları için sınır **donanımsaldır**: CPU ring 3 + uygulama
+başına sayfa tablosu. Kabuk ve gömülü sistem uygulamaları için sınır
+**politika** düzeyindedir (yetenek kapıları); bu tasarım gereği böyledir.
+
+Yalıtımın somut içeriği:
+
+- Uygulama başına PML4 (`vmm_space_create`). Çekirdek eşlemeleri kopyalanırken
+  U biti temizlenir → kullanıcı kodu çekirdek belleğini ne okuyabilir ne yazar.
+- W^X: kod sayfaları yazılamaz (X), veri ve yığın NX + yazılabilir.
+- Kullanıcıdan çekirdeğe geçiş yalnız `int 0x80` üzerindendir; syscall
+  dağıtıcısı her tamponu sayfa sayfa `U=1` olarak yoklar (`vmm_probe_user`).
+- `SYS_EXIT` ve CPU istisnaları `setjmp` tabanlı kurtarma noktasına döner:
+  çekirdek alanına geri geçilir, uygulama alanı serbest bırakılır, kabuk
+  devam eder.
 
 Akış:
 
