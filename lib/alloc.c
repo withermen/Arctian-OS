@@ -20,7 +20,37 @@ static uintptr_t heap_ptr = HEAP_BASE;
 static block_t  *free_list = 0;
 static size_t    used_bytes = 0;
 
+/* SMP (C4): free_list/heap_ptr/used_bytes paylasili durumdur. kmalloc
+ * kesmeler kapaliyken de cagrilabildigi icin (ve bir kenar yoldan bile
+ * olsa kullanan oldugu icin) kilit RFLAGS kaydedip cli ile doner; ayni
+ * CPU'da kesme isleyicisinin ikinci kmalloc'undan kaynaklanan korluyusu
+ * onler. Esik kritik bolge sadece liste taramasidir; uyku yoktur. */
+static volatile int g_alloc_lock;
+
+static void *kmalloc_inner(size_t size);
+static void kfree_inner(void *ptr);
+
+static inline uint64_t alloc_lock(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    while (__sync_lock_test_and_set(&g_alloc_lock, 1))
+        __asm__ volatile("pause");
+    return flags;
+}
+
+static inline void alloc_unlock(uint64_t flags) {
+    __sync_lock_release(&g_alloc_lock);
+    if (flags & 0x200ull) __asm__ volatile("sti" ::: "memory");
+}
+
 void *kmalloc(size_t size) {
+    uint64_t al = alloc_lock();
+    void *r = kmalloc_inner(size);
+    alloc_unlock(al);
+    return r;
+}
+
+static void *kmalloc_inner(size_t size) {
     if (size == 0) size = 1;
     /* Yuvarlama tasmayi gizliyordu: SIZE_MAX'a yakin istek (size+15)&~15 ile
      * kucuk sayiya donusup basarisizlik yerine kucuk blok dondururdu. Butun
@@ -64,6 +94,13 @@ void *kmalloc(size_t size) {
 }
 
 void kfree(void *ptr) {
+    if (!ptr) return;
+    uint64_t al = alloc_lock();
+    kfree_inner(ptr);
+    alloc_unlock(al);
+}
+
+static void kfree_inner(void *ptr) {
     if (!ptr) return;
     block_t *b = (block_t *)((char *)ptr - BLK_HDR);
     if (b->magic != BLK_MAGIC || b->free) return;
