@@ -44,3 +44,12 @@ desktop.ini
 
 # ofis paketleri derlemeyle uretilir (sdk/examples'taki ornekler trackli kaldi)
 sdk/office/*/*.wlf
+
+# Gizli imzalama anahtarlari ve gelistirici araclari - depoya/asla girmez
+tools/
+tools/keys/
+*.pem
+*.key
+*.pfx
+.env
+.id_rsa

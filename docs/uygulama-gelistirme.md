@@ -808,7 +808,7 @@ const char *(*last_url)(void);                                 /* yönlendirme s
   yönlendirmelerini (en fazla 6) takip eder ve yalnızca **gövdeyi** döndürür.
 - Dönen işaretçi **bir sonraki çağrıya kadar** geçerlidir; hemen kopyalayın.
 - Cevap tamponu ~192 KB; daha büyük gövde için `download` kullanın.
-- URL'de doğrudan IP de kullanılabilir (`http://45.143.99.75:8090/...`) → DNS yapılmaz.
+- URL'de doğrudan IP de kullanılabilir (`http://<sunucu-ip>:8090/...`) → DNS yapılmaz.
 
 ```c
 if (asi->net->link_type() == ASI_LINK_NONE) { /* önce bağlan */ }
