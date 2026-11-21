@@ -1070,10 +1070,6 @@ void kernel_plus_main(void *arg) {
 
     terminal_writestring("kernel_plus: desktop baslatiliyor...\n");
     klog_write(KLOG_INFO, "boot", "desktop baslatiliyor");
-    /* B1 kaniti: izole .wlf yolu (ayri CR3 + ring 3) masaustunden once
-     * bir kez gercek imajla denenir. Basarisizlik masaustunu engellemez;
-     * seri logda BASARISIZ olarak gorunur. */
-    wlf_user_selftest();
     klog_flush();
     serial_puts("[kp] jumping to desktop\n");
     ((void (*)(void *))(uintptr_t)d.load_addr)(g_asi);
