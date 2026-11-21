@@ -527,6 +527,8 @@ void desktop_main(void *arg) {
                 fps_hud_toggle();       /* Ctrl+Alt+F : kare hizi HUD'u */
             } else if (hk >= 20 && hk <= 23) {
                 win_snap_hotkey(hk);    /* Ctrl+Alt+ok: snap yerlesimleri */
+            } else if (hk == 30) {
+                tb_peek_toggle();       /* Win tusu: dock peek ac/kapat */
             }
         }
         switcher_tick();

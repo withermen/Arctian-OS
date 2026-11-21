@@ -20,7 +20,7 @@ static uint32_t s_accent2 = 0x8B5CF6;
 static int s_font_pct = 100;     /* yaz olcegi: 100/125/150 (%) */
 static int s_contrast = 0;       /* 1 = yuksek kontrast teması */
 static int s_light = 0;          /* 1 = acik tema */
-static int s_ring_on = 1;        /* 1 = odak halkasi acik */
+static int s_ring_on = 0;        /* 0.9: varsayilan KAPALI (tiklayinca secim kutusu cikmasin) */
 
 /* Odak halkasi stili + uzerine eklenen tema */
 static lv_style_t s_ring_style;

@@ -57,7 +57,7 @@ void settings_apply_values(void) {
     g_reduce_motion = (kv_get_int("motion", 1) == 0);
     adl_set_contrast(kv_get_int("contrast", 0));
     adl_set_light(kv_get_int("light", 0));
-    adl_set_focus_ring(kv_get_int("focusring", 1));
+    adl_set_focus_ring(kv_get_int("focusring", 0));
     g_icon_big = kv_get_int("bigicons", 0) ? 1 : 0;
 }
 

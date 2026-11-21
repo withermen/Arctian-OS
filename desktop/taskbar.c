@@ -210,7 +210,7 @@ void tb_show_app_menu(int x, int y, const arctian_app_t *a) {
     if (pinned) tb_menu_button(p, k++, "Görev çubuğundan kaldır", tb_menu_unpin_cb);
     else        tb_menu_button(p, k++, "Görev çubuğuna sabitle", tb_menu_pin_cb);
     tb_menu_button(p, k++, desk ? "Masaustunden kaldir" : "Masaustune ekle", tb_menu_desk_cb);
-    if (running) tb_menu_button(p, k++, "Pencereyi kapat", tb_menu_kill_cb);
+    if (running) tb_menu_button(p, k++, "Uygulamayı kapat", tb_menu_kill_cb);
 }
 
 
@@ -299,7 +299,7 @@ void tb_show_menu(int x, const char *title) {
     int k = 0;
     if (i_pin)   tb_menu_button(p, k++, "Sabitle", tb_menu_pin_cb);
     if (i_unpin) tb_menu_button(p, k++, "Sabitlemeyi kaldir", tb_menu_unpin_cb);
-    if (i_kill)  tb_menu_button(p, k++, "Pencereyi kapat", tb_menu_kill_cb);
+    if (i_kill)  tb_menu_button(p, k++, "Uygulamayı kapat", tb_menu_kill_cb);
 }
 
 
@@ -864,19 +864,121 @@ void build_taskbar(lv_obj_t *scr) {
     clock_tick();
 }
 
+/* ---- 0.9: dock peek (Win tusu) ----
+ * Tam ekran uygulama acikken dock gizlenir. Win tusu dock'u alttan
+ * yumusak bir animasyonla getirir; ekranda bos bir yere tiklaninca
+ * ayni sekilde asagi kayip gizlenir. Masaustunde her zaman gorunur. */
+static int s_tb_peek = 0;      /* 1 = Win tusuyla cagrildi */
+static int s_tb_pl = 0;        /* onceki sol tus durumu */
+
+static int tb_base_y(void) {
+    return g_asi->gfx->height() - TB_BH - TB_Y_OFF;
+}
+
+static void tb_slide_cb(void *var, int32_t v) {
+    lv_obj_set_y((lv_obj_t *)var, v);
+}
+
+static void tb_slide_done_cb(lv_anim_t *a) {
+    (void)a;
+    if (!g_taskbar || s_tb_peek) return;
+    lv_obj_add_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(g_taskbar, LV_ALIGN_BOTTOM_MID, 0, -TB_Y_OFF);
+}
+
+void tb_peek_show(void) {
+    if (!g_taskbar) return;
+    /* Masaustunde dock zaten gorunur; yalnizca tam ekranda anlamli. */
+    if (!win_fs_active() && !lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN)) return;
+    s_tb_peek = 1;
+    lv_anim_delete(g_taskbar, tb_slide_cb);
+    lv_obj_remove_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_taskbar);
+    int sh = g_asi->gfx->height();
+    if (g_reduce_motion) {
+        lv_obj_align(g_taskbar, LV_ALIGN_BOTTOM_MID, 0, -TB_Y_OFF);
+        return;
+    }
+    lv_obj_set_y(g_taskbar, sh);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, g_taskbar);
+    lv_anim_set_values(&a, sh, tb_base_y());
+    lv_anim_set_duration(&a, 220);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_exec_cb(&a, tb_slide_cb);
+    lv_anim_start(&a);
+}
+
+void tb_peek_hide(void) {
+    if (!g_taskbar || !s_tb_peek) return;
+    s_tb_peek = 0;
+    lv_anim_delete(g_taskbar, tb_slide_cb);
+    int sh = g_asi->gfx->height();
+    if (g_reduce_motion) {
+        lv_obj_add_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(g_taskbar, LV_ALIGN_BOTTOM_MID, 0, -TB_Y_OFF);
+        return;
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, g_taskbar);
+    lv_anim_set_values(&a, lv_obj_get_y(g_taskbar), sh);
+    lv_anim_set_duration(&a, 200);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
+    lv_anim_set_exec_cb(&a, tb_slide_cb);
+    lv_anim_set_deleted_cb(&a, tb_slide_done_cb);
+    lv_anim_start(&a);
+}
+
+void tb_peek_toggle(void) {
+    if (s_tb_peek) { tb_peek_hide(); return; }
+    /* Tam ekran yokken dock zaten gorunur: Win tusu eski davranisini
+     * (baslat menusu) korusun. Peek yalnizca tam ekranda anlamli. */
+    if (!win_fs_active() && !lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN)) {
+        toggle_start_menu();
+        return;
+    }
+    tb_peek_show();
+}
+
 void tb_poll(void) {
     if (g_tb_dirty) { g_tb_dirty = 0; tb_rebuild_icons(); }
-    /* 0.8: tam ekran uygulama acikken dock gizlenir, kapaninca geri gelir. */
+    /* 0.8/0.9: tam ekran uygulama acikken dock gizlenir; Win tusu ile
+     * peek acilir. Tam ekran yokken dock her zaman gorunur. */
     if (g_taskbar) {
-        int hide = win_fs_active();
-        if (hide && !lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN))
-            lv_obj_add_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
-        else if (!hide && lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN))
-            lv_obj_remove_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+        int fs = win_fs_active();
+        if (!fs) s_tb_peek = 0;
+        if (fs && !s_tb_peek) {
+            if (!lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN) &&
+                !lv_anim_get(g_taskbar, tb_slide_cb)) {
+                lv_obj_add_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_align(g_taskbar, LV_ALIGN_BOTTOM_MID, 0, -TB_Y_OFF);
+            }
+        } else if (!fs || s_tb_peek) {
+            if (lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN))
+                lv_obj_remove_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN);
+            /* Masaustu moduna donuste yarim kalmis kayma animasyonunu iptal
+             * et ve dock'u taban konumuna oturt (aksi halde yarim acik kalir). */
+            if (!fs && lv_anim_get(g_taskbar, tb_slide_cb)) {
+                lv_anim_delete(g_taskbar, tb_slide_cb);
+                lv_obj_align(g_taskbar, LV_ALIGN_BOTTOM_MID, 0, -TB_Y_OFF);
+            }
+        }
     }
     if (!g_taskbar || !g_asi->input || !g_asi->input->mouse_buttons) return;
     int b = g_asi->input->mouse_buttons();
     int right = (b >> 1) & 1;
+    int left = b & 1;
+    /* Peek acikken dock disina sol tik: animasyonla asagi gizle. */
+    if (s_tb_peek && left && !s_tb_pl) {
+        int mx = g_asi->input->mouse_x();
+        int my = g_asi->input->mouse_y();
+        lv_area_t ar;
+        lv_obj_get_coords(g_taskbar, &ar);
+        int inside = (mx >= ar.x1 && mx <= ar.x2 && my >= ar.y1 && my <= ar.y2);
+        if (!inside) tb_peek_hide();
+    }
     if (right && !s_tb_pr && !g_tb_menu) {
         int mx = g_asi->input->mouse_x();
         int my = g_asi->input->mouse_y();
@@ -910,5 +1012,6 @@ void tb_poll(void) {
         }
     }
     s_tb_pr = right;
+    s_tb_pl = left;
 }
 

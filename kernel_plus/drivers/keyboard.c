@@ -400,7 +400,9 @@ void keyboard_interrupt_handler(void) {
             case 0x5C: // Right GUI
                 if (!gui_pressed) {
                     gui_pressed = true;
-                    gui_toggle_start_menu();
+                    /* 0.9: Win tusu dock peek (hotkey 30). Tam ekran
+                     * uygulama dock'u gizliyken alttan cagirir. */
+                    keyboard_push_hotkey(30);
                 }
                 return;
             case 0x38: // Right Alt (AltGr)

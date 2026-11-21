@@ -361,6 +361,7 @@ extern int ic_drag;
 extern int ic_dox;
 extern int ic_doy;
 extern int ic_rub;
+extern int ic_rub_on;
 extern int ic_rx;
 extern int ic_ry;
 extern int ic_last_i;
@@ -607,6 +608,9 @@ void tb_rebuild_icons(void);
 void tb_sep(lv_obj_t *parent, lv_obj_t **out);
 void build_taskbar(lv_obj_t *scr);
 void tb_poll(void);
+void tb_peek_show(void);           /* 0.9: Win tusu dock'u acar */
+void tb_peek_hide(void);           /* 0.9: bos tiklamada animasyonla gizle */
+void tb_peek_toggle(void);
 void power_cancel_cb(lv_event_t *e);
 void power_off_cb(lv_event_t *e);
 void power_reboot_cb(lv_event_t *e);

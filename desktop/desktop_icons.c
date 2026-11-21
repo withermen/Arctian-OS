@@ -650,14 +650,17 @@ void poll_icons(void) {
             } else {
                 ic_last_i = -1;
                 clear_selection();
-                ic_rub = 1; ic_rx = mx; ic_ry = my;
-                rubber_show(ic_rx, ic_ry, mx, my);
+                ic_rub = 1; ic_rub_on = 0; ic_rx = mx; ic_ry = my;
             }
         }
         if (left && ic_drag >= 0 && g_dicons[ic_drag].cell)
             lv_obj_set_pos(g_dicons[ic_drag].cell, mx - ic_dox, my - ic_doy);
-        if (left && ic_rub)
-            rubber_show(ic_rx, ic_ry, mx, my);
+        if (left && ic_rub) {
+            /* Esik: 5 pikselden fazla suruklenmeden secim kutusu cizilmez. */
+            if (!ic_rub_on && (iabs2(mx - ic_rx) > 5 || iabs2(my - ic_ry) > 5))
+                ic_rub_on = 1;
+            if (ic_rub_on) rubber_show(ic_rx, ic_ry, mx, my);
+        }
         if (!left && ic_pl) {
             if (ic_drag >= 0 && g_dicons[ic_drag].cell) {
                 dicon_t *d = &g_dicons[ic_drag];
@@ -673,7 +676,7 @@ void poll_icons(void) {
                 d->gx = gx; d->gy = gy;
                 icon_apply_pos(ic_drag);
             }
-            if (ic_rub) { rubber_hide(); ic_rub = 0; }
+            if (ic_rub) { rubber_hide(); ic_rub = 0; ic_rub_on = 0; }
             ic_drag = -1;
         }
         if (right && !ic_pr) {

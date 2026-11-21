@@ -1032,7 +1032,7 @@ static void s_page_view(void) {
     stitle(c2, "Erişilebilirlik");
     sdesc(c2, "Yazi olcegi yukaridaki kaydir cubuguyla ayarlanir.");
     s_add_toggle(c2, "Yüksek kontrast", "contrast", 0);
-    s_add_toggle(c2, "Klavye odak halkası", "focusring", 1);
+    s_add_toggle(c2, "Klavye odak halkası", "focusring", 0);
     s_add_toggle(c2, "Büyük simgeler", "bigicons", 0);
     s_add_motion_toggle(c2, "Hareketi azalt");
 

@@ -389,6 +389,10 @@ int ic_pl = 0, ic_pr = 0;
 int ic_drag = -1, ic_dox = 0, ic_doy = 0;
 
 int ic_rub = 0, ic_rx = 0, ic_ry = 0;
+/* 0.9: lastik bant yalnizca GERCEK suruklemede cizilir. Tusa basar
+ * basmaz cizmek, bos bir tiklama birakinca fare altinda kucuk bir secim
+ * kutusu belirmesine yol aciyordu; kullanici bunu istemiyor. */
+int ic_rub_on = 0;
 
 int ic_last_i = -1;
 
