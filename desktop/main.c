@@ -348,6 +348,10 @@ void desktop_main(void *arg) {
     if (g_asi->time && g_asi->time->set_tz_offset)
         g_asi->time->set_tz_offset(kv_get_int("tz_minutes", 180));
     perm_init();              /* 0.7: karar deposu + dosya kapisi */
+    if (g_asi->wlf) {
+        g_asi->wlf->api_for_body = (void *(*)(void *))wlf_api_get;
+        g_asi->wlf->app_exited = wlf_host_close_body;
+    }
     slot_init(g_asi);         /* 0.7: A/B yuva durumu */
     adl_font_init();          /* yaz olcegi ayarlanmis olur (kv -> adl_*) */
     adl_wolf_theme_init();
@@ -431,6 +435,8 @@ void desktop_main(void *arg) {
 #endif
 
     for (;;) {
+        if (g_asi->wlf && g_asi->wlf->broker_drain)
+            g_asi->wlf->broker_drain();
         if (g_lock_request) {
             g_lock_request = 0;
             lock_hide_desktop(1);

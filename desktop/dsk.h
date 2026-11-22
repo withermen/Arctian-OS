@@ -706,6 +706,7 @@ void dyn_scan_afs(void);
 /* .wlf calisma zamani: widget agaci + wolf_api_t (wlf_host.c) */
 wolf_api_t *wlf_api_get(lv_obj_t *body);
 void wlf_host_reset(lv_obj_t *body);
+void wlf_host_close_body(void *body);
 void wlf_host_error(const char *msg);
 /* simdidiki host oturum numarasi (VM'nin timer baglamini geri yuklemesi
  * icin; madde 37) */

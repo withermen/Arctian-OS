@@ -277,6 +277,13 @@ typedef struct {
      * verine denk geldigi icin yazim reddedilir. ABI icin yapinin sonunda. */
     int (*download_raw)(const char *url, uint32_t lba,
                         uint32_t *out_size, uint32_t *out_crc);
+
+    /* Tam HTTP/HTTPS istek API'si (GET/POST/PUT/PATCH/DELETE + ozel basliklar
+     * + gzip/deflate otomatik acma). ABI uyumu icin yapinin EN SONUNDA. */
+    const char *(*http_request)(const char *method, const char *url,
+                                const char *content_type, const char *extra_headers,
+                                const void *body, uint32_t body_len,
+                                int *status_out, uint32_t *len_out);
 } asi_net_t;
 
 typedef struct {
@@ -457,6 +464,19 @@ typedef struct {
  * <0 hata (wlf_abi.h). Yapisal ABI icin EN SONA eklendi. */
 typedef struct {
     int (*run_image)(const void *image, uint32_t size);
+    /* B3: EN SONA eklenir. run_image_body: pencere govdesiyle izole
+     * calistirma (GUI koprusu etkin). api_for_body: masaustu tarafindan
+     * doldurulur, wolf_api_t* doner. event_push: LVGL olayini izole
+     * uygulamanin olay kuyruguna iter (1 = tuketildi, 0 = izole degil).
+     * broker_drain: masaustu dongusu her turda cagirir; bekleyen GUI
+     * cagrilarini LVGL baglaminda yurutur. app_exited: izole uygulama
+     * cikisinda pencere kapatma icin. */
+    int   (*run_image_body)(const void *image, uint32_t size, void *body);
+    void *(*api_for_body)(void *body);
+    int   (*event_push)(void *body, uint64_t cb, uint64_t user,
+                        int64_t wid, int64_t kind);
+    void  (*broker_drain)(void);
+    void  (*app_exited)(void *body);
 } asi_wlf_t;
 
 typedef struct {

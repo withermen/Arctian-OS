@@ -116,12 +116,14 @@ docs/          mimari, derleme, uygulama geliştirme
   `SYS_EXIT`'i veya bir CPU istisnası yalnız kendi penceresini kapatır,
   sistem ayakta kalır. Kanıt: `bash tests/isolation/run.sh` (gömülü PIC
   imajla yükleme + ring 3 çıktısı + çıkış kanca + masaüstünün devamı).
-  **Açık kalan:** libWolf GUI API'sinin kullanıcı tarafı köprüsü (`wolf_api_t`
-  trampolinleri + olay modeli) henüz yok; bu yüzden GUI'li native `.wlf`
-  uygulamaları yalıtılmış ortamda arayüzlerini çizemez (uygulama `wolf_ready()`
-  = 0 görüp dürüst bir hata koduyla çıkar). Kabuk ve gömülü sistem
-  uygulamaları tasarım gereği kabukla aynı adres alanındadır; script (VM)
-  `.wlf` uygulamaları makine kodu yürütmeyen yorumlayıcıda çalışır.
+  **B3 tamam:** GUI'li native `.wlf` uygulamaları yalıtılmış ortamda
+  (ring 3, ayrı CR3) arayüzlerini çizer: kullanıcı alanındaki `wolf_api_t`
+  trampoline tablosu syscall köprüsüne, LVGL çağrıları masaüstü broker
+  kuyruğuna, olaylar (click/change/timer/resize) kullanıcı olay döngüsüne
+  taşınır. Mevcut paketler yeniden paketlenmeden çalışır. Kabuk ve gömülü
+  sistem uygulamaları tasarım gereği kabukla aynı adres alanındadır;
+  script (VM) `.wlf` uygulamaları makine kodu yürütmeyen yorumlayıcıda
+  çalışır.
 - **Ağ sürücüleri kısmi:** e1000, PCnet, RTL8139/RTL8169 gibi eski PCI adaptörleri
   desteklenir; virtio-net yoktur. Kablosuz tarafta ath9k (AR928x) uçtan uca çalışıyor,
   Intel AX201 ürün yazılımını gerçek gen3 akışıyla yüklüyor ancak tarama ve bağlantı

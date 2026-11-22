@@ -19,6 +19,7 @@
 #include "vmm_space.h"
 #include "alloc.h"
 #include "wlf_abi.h"
+#include "wolf.h"
 #include "serial.h"
 #include <stddef.h>
 
@@ -93,7 +94,8 @@ uint64_t wlf_user_start(const void *image, uint64_t size, wlf_user_t *out) {
     code_pages  = WLF_CODE_PAGES(hdr.image_size);
     data_pages  = WLF_CODE_PAGES(hdr.bss_size);
     stack_pages = (uint64_t)WLF_USER_STACK_SIZE / WLF_PAGE_SIZE;
-    total_pages = code_pages + data_pages + stack_pages;
+    /* B3: +3 sayfa: api tablosu+stublar (X), olay dongusu (X), tamponlar (W+NX) */
+    total_pages = code_pages + data_pages + stack_pages + 3;
 
     /* Tasma / aralik denetimi: toplam alan kullanici VA'sina sigmali. */
     if (total_pages == 0 || total_pages > 0xFFFFFFFFull) {
@@ -141,8 +143,12 @@ uint64_t wlf_user_start(const void *image, uint64_t size, wlf_user_t *out) {
         out->frame_count = i + 1u;
 
         va = base_va + (uint64_t)i * WLF_PAGE_SIZE;
-        /* Kod: yazilamaz (X), veri/yigin: W + NX. */
-        flags = (i < (uint32_t)code_pages) ? 0ull : flags_data;
+        /* Kod: yazilamaz (X), veri/yigin: W + NX. B3: tablo+stub ve dongu
+         * sayfalari X (salt okunur calisma), tampon sayfasi W + NX. */
+        if (i < (uint32_t)code_pages) flags = 0ull;
+        else if (i >= (uint32_t)(code_pages + data_pages + stack_pages))
+            flags = (i == (uint32_t)total_pages - 1u) ? flags_data : 0ull;
+        else flags = flags_data;
 
         if (vmm_space_map_user((vmm_space_t)out->space, va, pa, flags) != 0) {
             out->status = WLF_USER_ERR_MAP;
@@ -166,6 +172,104 @@ uint64_t wlf_user_start(const void *image, uint64_t size, wlf_user_t *out) {
             left -= chunk;
             i++;
         }
+    }
+
+    /* ---- B3: GUI kopru sayfalari (fiziksel cerceve uzerinden yazilir;
+     * kullanici eslemesi yukarida kuruldu). Tablo+stublar X, dongu X,
+     * tamponlar W+NX. wolf_main'in ret adresi olay dongusune baglanir:
+     * mevcut .wlf paketleri yeniden paketlenmeden calisir. ---- */
+    {
+        uint64_t pa_tab  = out->frames[code_pages + data_pages + stack_pages];
+        uint64_t pa_loop = out->frames[code_pages + data_pages + stack_pages + 1];
+        uint64_t pa_buf  = out->frames[code_pages + data_pages + stack_pages + 2];
+        uint64_t api_va  = stack_top;
+        uint64_t loop_va = stack_top + WLF_PAGE_SIZE;
+        uint64_t buf_va  = stack_top + 2 * WLF_PAGE_SIZE;
+
+        wolf_api_t *t = (wolf_api_t *)(uintptr_t)pa_tab;
+        memset(t, 0, sizeof(*t));
+        t->magic   = WOLF_API_MAGIC;
+        t->version = WOLF_ABI_VERSION;
+        t->size    = (uint32_t)sizeof(wolf_api_t);
+        uint64_t *fn = (uint64_t *)((uint8_t *)t + 16); /* 3*u32 + 4 bayt hizalama */
+        /* Stub konvansiyonu: 8 C argumanini (6 register + 2 yigin)
+         * kullanici argbuf'ina yazar, sonra SYS_WOLF_CALL+i ile syscall.
+         * Boylece 7-8 argumanli canvas_* API'leri de tasınır.
+         * Yerlesim: sayfa0 tablo@0 + stub[0..40]@0x400 (74 bayt/adet);
+         * sayfa1 stub[41..93]@0 + olay dongusu@0xF60; sayfa2 tamponlar. */
+        uint64_t argbuf = buf_va + 640;
+        uint8_t *s0 = (uint8_t *)(uintptr_t)(pa_tab + 0x400);
+        uint8_t *s1 = (uint8_t *)(uintptr_t)pa_loop;
+        for (uint32_t i = 0; i < 94u; i++) {
+            uint64_t va = (i < 41u) ? (api_va + 0x400u + 74u * i)
+                                    : (loop_va + 74u * (i - 41u));
+            uint8_t *s = (i < 41u) ? (s0 + 74u * i) : (s1 + 74u * (i - 41u));
+            fn[i] = va;
+            uint32_t o = 0;
+            /* mov [rip+d],rdi / rsi / rdx / rcx / r8 / r9 */
+            static const uint8_t pre[6][3] = {
+                {0x48,0x89,0x3D}, {0x48,0x89,0x35}, {0x48,0x89,0x15},
+                {0x48,0x89,0x0D}, {0x4C,0x89,0x05}, {0x4C,0x89,0x0D} };
+            for (int r = 0; r < 6; r++) {
+                s[o] = pre[r][0]; s[o+1] = pre[r][1]; s[o+2] = pre[r][2];
+                int32_t d = (int32_t)(argbuf + 8u * r - (va + o + 7));
+                s[o+3] = (uint8_t)d; s[o+4] = (uint8_t)(d >> 8);
+                s[o+5] = (uint8_t)(d >> 16); s[o+6] = (uint8_t)(d >> 24);
+                o += 7;
+            }
+            /* mov rax,[rsp+8] ; mov [rip+d],rax */
+            s[o++] = 0x48; s[o++] = 0x8B; s[o++] = 0x44; s[o++] = 0x24; s[o++] = 0x08;
+            s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0x05;
+            { int32_t d = (int32_t)(argbuf + 48 - (va + o + 7));
+              s[o++] = (uint8_t)d; s[o++] = (uint8_t)(d >> 8);
+              s[o++] = (uint8_t)(d >> 16); s[o++] = (uint8_t)(d >> 24); }
+            /* mov rax,[rsp+16] ; mov [rip+d],rax */
+            s[o++] = 0x48; s[o++] = 0x8B; s[o++] = 0x44; s[o++] = 0x24; s[o++] = 0x10;
+            s[o++] = 0x48; s[o++] = 0x89; s[o++] = 0x05;
+            { int32_t d = (int32_t)(argbuf + 56 - (va + o + 7));
+              s[o++] = (uint8_t)d; s[o++] = (uint8_t)(d >> 8);
+              s[o++] = (uint8_t)(d >> 16); s[o++] = (uint8_t)(d >> 24); }
+            uint32_t nr = 8u + i;
+            s[o++] = 0xB8;
+            s[o++] = (uint8_t)nr; s[o++] = (uint8_t)(nr >> 8);
+            s[o++] = (uint8_t)(nr >> 16); s[o++] = (uint8_t)(nr >> 24);
+            s[o++] = 0x0F; s[o++] = 0x05;
+            s[o++] = 0xC3;
+        }
+
+        uint8_t *L = (uint8_t *)(uintptr_t)(pa_loop + 0xF60);
+        loop_va += 0xF60;
+        uint32_t o = 0;
+        int32_t d1 = (int32_t)(buf_va - (loop_va + 7));
+        int32_t d2 = (int32_t)(buf_va - (loop_va + 43));
+        L[o++] = 0x48; L[o++] = 0x8D; L[o++] = 0x3D;
+        L[o++] = (uint8_t)d1; L[o++] = (uint8_t)(d1 >> 8);
+        L[o++] = (uint8_t)(d1 >> 16); L[o++] = (uint8_t)(d1 >> 24);
+        L[o++] = 0xB8; L[o++] = 9; L[o++] = 0; L[o++] = 0; L[o++] = 0;
+        L[o++] = 0x0F; L[o++] = 0x05;
+        L[o++] = 0x48; L[o++] = 0x85; L[o++] = 0xC0;
+        L[o++] = 0x78; L[o++] = 0x1A;
+        L[o++] = 0x48; L[o++] = 0x8B; L[o++] = 0x47; L[o++] = 0x18;
+        L[o++] = 0x48; L[o++] = 0x83; L[o++] = 0xF8; L[o++] = 0x01;
+        L[o++] = 0x74; L[o++] = 0x10;
+        L[o++] = 0x48; L[o++] = 0x8B; L[o++] = 0x77; L[o++] = 0x08;
+        L[o++] = 0x48; L[o++] = 0x8B; L[o++] = 0x7F; L[o++] = 0x10;
+        L[o++] = 0xFF; L[o++] = 0x15;
+        L[o++] = (uint8_t)d2; L[o++] = (uint8_t)(d2 >> 8);
+        L[o++] = (uint8_t)(d2 >> 16); L[o++] = (uint8_t)(d2 >> 24);
+        L[o++] = 0xEB; L[o++] = 0xD3;
+        L[o++] = 0xBF; L[o++] = 0; L[o++] = 0; L[o++] = 0; L[o++] = 0;
+        L[o++] = 0xB8; L[o++] = 0; L[o++] = 0; L[o++] = 0; L[o++] = 0;
+        L[o++] = 0x0F; L[o++] = 0x05;
+        L[o++] = 0x0F; L[o++] = 0x0B;
+
+        /* wolf_main ret adresi = olay dongusu (yiginin en ust sozcugu) */
+        uint64_t pa_st = out->frames[code_pages + data_pages + stack_pages - 1];
+        *(uint64_t *)(uintptr_t)(pa_st + WLF_PAGE_SIZE - 8) = loop_va;
+
+        out->api_va  = api_va;
+        out->loop_va = loop_va;
+        out->buf_va  = buf_va;
     }
 
     out->base_va     = base_va;
@@ -284,11 +388,10 @@ int wlf_user_run(wlf_user_t *u) {
          * baglaminda guvenli olmasi (TSS.rsp0, preemption) B2'nin isi;
          * kanitlanmis ring3.c yolu da ayni sekilde 0x2 kullaniyor.
          *
-         * RDI = 0: B3'te buraya kullanici belleğindeki wolf_api_t
-         * trampoline tablosu gelecek. Simdilik 0, libWolf uygulamalari
-         * wolf_ready()=0 gorup durustce hata koduyla cikar; cekirdege
-         * sizmaz. Ham syscall kullanan self-contained imajlar calisir. */
-        enter_user_arg(u->entry_va, u->stack_top, 0x2, 0);
+         * RDI = kullanici alanindaki wolf_api_t trampoline tablosu (B3).
+         * Tablo yoksa (eski yukleyici) 0 gecer: libWolf uygulamalari
+         * wolf_ready()=0 gorup durustce hata koduyla cikar. */
+        enter_user_arg(u->entry_va, u->stack_top, 0x2, u->api_va);
         __asm__ volatile("ud2");             /* iretq donmez */
     }
 

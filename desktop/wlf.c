@@ -340,6 +340,8 @@ int wlf_scan_one(const char *full_path) {
 static int wlf_run_native(dyn_app_t *d, const uint8_t *image, uint32_t size,
                           lv_obj_t *body, asi_t *asi) {
     (void)asi;
+    if (g_asi && g_asi->wlf && g_asi->wlf->run_image_body)
+        return g_asi->wlf->run_image_body(image, size, body);
     if (g_asi && g_asi->wlf && g_asi->wlf->run_image)
         return g_asi->wlf->run_image(image, size);
 

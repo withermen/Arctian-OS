@@ -240,6 +240,15 @@ static lv_obj_t *mk_box(lv_obj_t *parent, int x, int y, int w, int h, int click)
     return o;
 }
 
+/* B3: izole uygulama oturumuysa olayi kullanici olay dongusune tasi;
+ * degilse 0 doner ve dogrudan cagri yapilir (ayni adres alanli yol). */
+static int ev_isolated(void *body, wolf_event_fn cb, void *user, int wid) {
+    if (g_asi && g_asi->wlf && g_asi->wlf->event_push)
+        return g_asi->wlf->event_push(body, (uint64_t)(uintptr_t)cb,
+                                      (uint64_t)(uintptr_t)user, wid, 0);
+    return 0;
+}
+
 static void ev_click_cb(lv_event_t *e) {
     wolf_sess_t *sess = (wolf_sess_t *)lv_event_get_user_data(e);
     if (!sess || sess->dead) return;
@@ -247,6 +256,7 @@ static void ev_click_cb(lv_event_t *e) {
     int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     for (int i = 0; i < s_ev_click_n; i++) {
         if (s_ev_click[i].wid == wid && s_ev_click[i].cb) {
+            if (ev_isolated(sess->body, s_ev_click[i].cb, s_ev_click[i].user, wid)) return;
             s_ev_click[i].cb(wid, s_ev_click[i].user);
             return;
         }
@@ -260,6 +270,7 @@ static void ev_enter_cb(lv_event_t *e) {
     int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     for (int i = 0; i < s_ev_enter_n; i++) {
         if (s_ev_enter[i].wid == wid && s_ev_enter[i].cb) {
+            if (ev_isolated(sess->body, s_ev_enter[i].cb, s_ev_enter[i].user, wid)) return;
             s_ev_enter[i].cb(wid, s_ev_enter[i].user);
             return;
         }
@@ -273,6 +284,7 @@ static void ev_change_cb(lv_event_t *e) {
     int wid = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
     for (int i = 0; i < s_ev_change_n; i++) {
         if (s_ev_change[i].wid == wid && s_ev_change[i].cb) {
+            if (ev_isolated(sess->body, s_ev_change[i].cb, s_ev_change[i].user, wid)) return;
             s_ev_change[i].cb(wid, s_ev_change[i].user);
             return;
         }
@@ -1735,7 +1747,11 @@ static void timer_fire(lv_timer_t *t) {
     if (sess < 0 || sess >= WOLF_MAX_SESS) return;
     s_cur = &s_sess[sess];          /* geri cagri dogru oturumda kosar */
     if (s_cur->dead || !s_timer[k].used) return;
-    if (s_timer[k].cb) s_timer[k].cb(timer_make_id(s_cur, k), s_timer[k].user);
+    if (s_timer[k].cb) {
+        if (ev_isolated(s_cur->body, s_timer[k].cb, s_timer[k].user,
+                        timer_make_id(s_cur, k))) return;
+        s_timer[k].cb(timer_make_id(s_cur, k), s_timer[k].user);
+    }
 }
 
 static wolf_id h_timer(uint32_t period_ms, wolf_event_fn cb, void *user) {
@@ -1976,6 +1992,10 @@ static void sess_release(wolf_sess_t *s) {
     s->anim_n = 0;
     s->on_resize = 0;
     s->on_resize_user = 0;
+    /* B3: izole uygulamanin olay dongusunu bitir (pencere X ile kapanirsa
+     * da proxy gorev sonsuz beklemede kalmasin). */
+    if (g_asi && g_asi->wlf && g_asi->wlf->event_push)
+        g_asi->wlf->event_push(s->body, 0, 0, 0, 1);
     s->dead = 1;
     s->body = 0;
     s->root = 0;
@@ -2154,7 +2174,8 @@ static void host_relayout(lv_obj_t *body) {
     if (!s || !s->on_resize) return;
     wolf_sess_t *keep = s_cur;
     s_cur = s;
-    s->on_resize(0, s->on_resize_user);
+    if (!ev_isolated(s->body, s->on_resize, s->on_resize_user, 0))
+        s->on_resize(0, s->on_resize_user);
     s_cur = keep;
 }
 
@@ -2204,6 +2225,18 @@ wolf_api_t *wlf_api_get(lv_obj_t *body) {
     }
     if (!s_api_ready) { api_fill(); s_api_ready = 1; }
     return &s_api;
+}
+
+/* B3: izole uygulama cikisinda penceresini kapat (asi app_exited). */
+void wlf_host_close_body(void *body) {
+    wolf_sess_t *s = 0;
+    for (int i = 0; i < WOLF_MAX_SESS; i++)
+        if (!s_sess[i].dead && s_sess[i].body == body) { s = &s_sess[i]; break; }
+    if (!s) return;
+    wolf_sess_t *keep = s_cur;
+    s_cur = s;
+    h_win_close();
+    s_cur = keep;
 }
 
 void wlf_host_error(const char *msg) {

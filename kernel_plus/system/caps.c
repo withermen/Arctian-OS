@@ -1,4 +1,5 @@
 #include "caps.h"
+#include "wolf_bridge.h"
 #include "proc.h"
 #include "sched.h"
 #include "serial.h"
@@ -445,6 +446,8 @@ void caps_init(asi_t *asi) {
      * fd tablollari da pid'e gore ayristiriliyor. */
     arctian_set_pid_fn(proc_getpid);
     arctian_set_ticks_fn(clock_ms);
+    arctian_set_wolf_call_fn(wolf_bridge_call);
+    arctian_set_wolf_wait_fn(wolf_bridge_wait);
 }
 
 int caps_selftest(void) {

@@ -24,11 +24,15 @@ static arctian_cap_check_fn s_cap_check = 0;
 static arctian_subject_fn   s_subject_fn = 0;
 static arctian_pid_fn       s_pid_fn = 0;
 static arctian_ticks_fn     s_ticks_fn = 0;
+static arctian_wolf_call_fn s_wolf_call_fn = 0;
+static arctian_wolf_wait_fn s_wolf_wait_fn = 0;
 
 void arctian_set_cap_check(arctian_cap_check_fn fn) { s_cap_check = fn; }
 void arctian_set_subject_fn(arctian_subject_fn fn) { s_subject_fn = fn; }
 void arctian_set_pid_fn(arctian_pid_fn fn) { s_pid_fn = fn; }
 void arctian_set_ticks_fn(arctian_ticks_fn fn) { s_ticks_fn = fn; }
+void arctian_set_wolf_call_fn(arctian_wolf_call_fn fn) { s_wolf_call_fn = fn; }
+void arctian_set_wolf_wait_fn(arctian_wolf_wait_fn fn) { s_wolf_wait_fn = fn; }
 
 static int fd_tab(void) {
     if (!s_pid_fn) return 0;
@@ -167,6 +171,20 @@ void syscall_dispatch(registers_t *regs) {
             if (wlf_exit_hook && wlf_exit_hook((uint32_t)regs->rdi)) return;
             serial_puts("[syscall] exit\n");
             ret = 0;
+            break;
+        }
+        case SYS_WOLF_CALL: {
+            /* B3: trampoline stub'i rax = SYS_WOLF_CALL + indeks ile gelir;
+             * C argumanlari rdi,rsi,rdx,r10,r8,r9 (stub rcx->r10 tasir). */
+            uint32_t idx = (uint32_t)(num - SYS_WOLF_CALL);
+            ret = s_wolf_call_fn
+                ? s_wolf_call_fn(idx, regs->rdi, regs->rsi, regs->rdx,
+                                 regs->r10, regs->r8, regs->r9)
+                : -1;
+            break;
+        }
+        case SYS_WOLF_WAIT: {
+            ret = s_wolf_wait_fn ? s_wolf_wait_fn(regs->rdi) : -1;
             break;
         }
         default:

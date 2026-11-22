@@ -59,6 +59,10 @@ typedef struct {
     uint32_t  entry_off;
     uint32_t  load_addr;     /* basliktaki baglama adresi (bilgi) */
     uint32_t  nx;            /* 1: veri/yigin NX olarak isaretlendi */
+    /* B3: kullanici alanindaki GUI kopru sayfalari */
+    uint64_t  api_va;        /* wolf_api_t + syscall trampoline stublari */
+    uint64_t  loop_va;       /* wolf_main donusunde calisan olay dongusu */
+    uint64_t  buf_va;        /* olay tamponu + ret string tamponu (W+NX) */
 } wlf_user_t;
 
 /** Imaji yukler ve giris adresini dondurur. Hatali baslikta 0 doner ve

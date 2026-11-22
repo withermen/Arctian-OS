@@ -65,6 +65,8 @@
 #include "storage.h"
 #include "alloc.h"
 #include "paging.h"
+#include "wolf_bridge.h"
+#include "wolf.h"
 
 asi_t *g_asi = 0;
 
@@ -311,6 +313,18 @@ static const char *net_https_get(const char *url, uint32_t *len_out) {
     if (net_perm()) { if (len_out) *len_out = 0; return 0; }
     return https_fetch_body(url, len_out);
 }
+static const char *net_http_request(const char *method, const char *url,
+                                    const char *content_type, const char *extra_headers,
+                                    const void *body, uint32_t body_len,
+                                    int *status_out, uint32_t *len_out) {
+    if (net_perm()) {
+        if (status_out) *status_out = 0;
+        if (len_out) *len_out = 0;
+        return 0;
+    }
+    return https_request(method, url, content_type, extra_headers,
+                         body, body_len, status_out, len_out);
+}
 static const char *net_last_url(void) {
     return https_fetch_last_url();
 }
@@ -489,6 +503,31 @@ static int wlf_run_image_fn(const void *image, uint32_t size) {
     }
     rc = wlf_user_run(&u);
     serial_printf("[wlf] izole calistirma bitti: kod=%d\n", rc);
+    return rc;
+}
+
+/* B3: GUI koprulu izole calistirma. Masaustu govdeyi verir; api tablosu
+ * masaustunden alinir, trampoline sayfalari wlf_user_start'ta kurulur. */
+static int wlf_run_image_body_fn(const void *image, uint32_t size, void *body) {
+    wlf_user_t u;
+    int rc;
+
+    if (!image || size < WLF_HEADER_SIZE) return -1;
+    wolf_api_t *api = 0;
+    if (g_asi && g_asi->wlf && g_asi->wlf->api_for_body)
+        api = (wolf_api_t *)g_asi->wlf->api_for_body(body);
+    if (!api) return wlf_run_image_fn(image, size);
+    if (!wlf_user_start(image, size, &u)) {
+        serial_printf("[wlf] izole yukleme reddedildi: status=%d\n", (int)u.status);
+        return u.status;
+    }
+    wolf_bridge_attach(body, api, u.buf_va);
+    rc = wlf_user_run(&u);
+    wolf_bridge_detach();
+    wlf_user_free(&u);
+    if (g_asi && g_asi->wlf && g_asi->wlf->app_exited)
+        g_asi->wlf->app_exited(body);
+    serial_printf("[wlf] izole calistirma bitti (B3): kod=%d\n", rc);
     return rc;
 }
 
@@ -915,6 +954,7 @@ void kernel_plus_main(void *arg) {
     s_net.download = net_download;
     s_net.dl_size = net_dl_size;
     s_net.download_raw = net_download_raw;
+    s_net.http_request = net_http_request;
     s_net.submit = net_submit;
     s_net.busy = net_busy;
     s_net.service = net_service;
@@ -1007,6 +1047,9 @@ void kernel_plus_main(void *arg) {
     g_asi->lab = &s_lab;
     g_asi->audio = &s_audio;
     s_wlf.run_image = wlf_run_image_fn;
+    s_wlf.run_image_body = wlf_run_image_body_fn;
+    s_wlf.event_push = wolf_bridge_event_push;
+    s_wlf.broker_drain = wolf_bridge_drain;
     g_asi->wlf = &s_wlf;
 
     caps_init(g_asi);
