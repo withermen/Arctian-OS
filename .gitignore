@@ -54,6 +54,7 @@ tools/*
 !tools/bin2c.py
 !tools/arctianpack.py
 !tools/rust_compile_stub.sh
+!tools/build-release.sh
 tools/keys/
 *.pem
 *.key
