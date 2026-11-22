@@ -4,6 +4,25 @@
 #define RTC_INDEX_PORT 0x70
 #define RTC_DATA_PORT  0x71
 
+/* CMOS index/data ikilisi paylasimli: eszamanli okuyucular (kilit saati,
+ * gorev cubugu, terminal, NTP) index'i birbirine ezdirip YANLIS register
+ * okuyordu (yil yerine saniye -> 2025 -> gun adi kaymasi). Kilit tum
+ * register islemini kapsar; kesmeler kapali tutulur (UIP bekleme kisa). */
+static volatile int s_rtc_lock;
+
+static inline uint64_t rtc_lock(void) {
+    uint64_t f;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f) :: "memory");
+    while (__sync_lock_test_and_set(&s_rtc_lock, 1))
+        __asm__ volatile("pause");
+    return f;
+}
+
+static inline void rtc_unlock(uint64_t f) {
+    __sync_lock_release(&s_rtc_lock);
+    if (f & 0x200ull) __asm__ volatile("sti" ::: "memory");
+}
+
 static uint8_t rtc_read_reg(uint8_t reg) {
     outb(RTC_INDEX_PORT, reg);
     return inb(RTC_DATA_PORT);
@@ -18,6 +37,7 @@ static uint8_t rtc_bin_to_bcd(uint8_t v) {
 }
 
 bool rtc_read_time(rtc_time_t *out) {    if (!out) return false;
+    uint64_t lf = rtc_lock();
 
     uint8_t last_second, last_minute, last_hour, last_day, last_month, last_year;
     uint8_t status_b;
@@ -27,7 +47,7 @@ bool rtc_read_time(rtc_time_t *out) {    if (!out) return false;
         while ((rtc_read_reg(0x0A) & 0x80) && guard-- > 0) {
             /* wait until update-in-progress clears */
         }
-        if (guard <= 0) return false;
+        if (guard <= 0) { rtc_unlock(lf); return false; }
 
         last_second = rtc_read_reg(0x00);
         last_minute = rtc_read_reg(0x02);
@@ -70,6 +90,7 @@ bool rtc_read_time(rtc_time_t *out) {    if (!out) return false;
     out->day    = last_day;
     out->month  = last_month;
     out->year   = (uint16_t)(2000 + last_year);
+    rtc_unlock(lf);
     return true;
 }
 
@@ -77,6 +98,7 @@ bool rtc_read_time(rtc_time_t *out) {    if (!out) return false;
  * register B: 0x04 = binary, 0x02 = 24 saat modu. */
 void rtc_set_time(const rtc_time_t *t) {
     if (!t) return;
+    uint64_t lf = rtc_lock();
     uint8_t status_b = rtc_read_reg(0x0B);
     int guard = 100000;
     while ((rtc_read_reg(0x0A) & 0x80) && guard-- > 0) { }
@@ -99,6 +121,7 @@ void rtc_set_time(const rtc_time_t *t) {
     outb(RTC_INDEX_PORT, 0x07); outb(RTC_DATA_PORT, day);
     outb(RTC_INDEX_PORT, 0x08); outb(RTC_DATA_PORT, month);
     outb(RTC_INDEX_PORT, 0x09); outb(RTC_DATA_PORT, year);
+    rtc_unlock(lf);
 }
 
 void rtc_format_time(char *buf, int buf_size) {
