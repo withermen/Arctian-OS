@@ -81,7 +81,6 @@ INCLUDES = -Iinclude/arctian -Imain_kernel -Ikernel_plus/drivers -Ikernel_plus/n
            -Idesktop/port -Idesktop/theme \
            -Iinstall -Ilib -Ithird_party -Ithird_party/lvgl \
            -Ithird_party/quickjs \
-           -Ithird_party/lexbor/source \
            -Ithird_party/mbedtls/include -DLV_CONF_INCLUDE_SIMPLE
 
 
@@ -269,20 +268,9 @@ $(BUILD)/quickjs/%.o: $(QUICKJS_DIR)/%.c
 
 DESKTOP_OBJS += $(QUICKJS_OBJS)
 
-LEXBOR_DIR    = third_party/lexbor
-LEXBOR_OBJ    = $(BUILD)/lexbor/lexbor_single.o
-LEXBOR_STUB   = $(BUILD)/lexbor/lex_posix_stub.o
-LEXBOR_CFLAGS = $(filter-out -Wall -Wextra,$(COMMON)) -w -O1
-
-$(LEXBOR_OBJ): $(LEXBOR_DIR)/lexbor_single.c
-	@mkdir -p $(dir $@)
-	$(CC) $(LEXBOR_CFLAGS) -c -o $@ $<
-
-$(LEXBOR_STUB): $(LEXBOR_DIR)/lex_posix_stub.c
-	@mkdir -p $(dir $@)
-	$(CC) $(COMMON) -w -c -o $@ $<
-
-DESKTOP_OBJS += $(LEXBOR_OBJ) $(LEXBOR_STUB)
+# 0.9.1: lexbor (Apache-2.0 HTML ayristirici) kaldirildi. Tek kullanicisi
+# olan deneysel "lexbor" tarayici uygulamasi silindi; yerlesik Tarayici
+# kendi HTML/CSS ayristiricisini kullanir. Kutuphane linklenmiyor.
 
 $(BUILD)/desktop/assets/font_data.c: $(FONT_TTF) tools/bin2c.py
 	@mkdir -p $(dir $@)
