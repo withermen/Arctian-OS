@@ -34,7 +34,9 @@ echo.
 REM Saat damgasi karsilastirmasi icin isaret dosyasi (derleme basi = "simdi")
 set "MARK=%TEMP%\arctian_build_marker"
 type nul > "%MARK%"
-%WSL% bash -lc "cd '%WSL_PROJECT%' && make -j4"
+REM 9P (/mnt/c) uzerinde make D-state hang yapabiliyor; ext4 kopyada derle,
+REM ciktilari repo build/ klasorune geri kopyala (dogrulama asagida aynen calisir).
+%WSL% bash -lc "SRC='%WSL_PROJECT%'; DST=$HOME/arctian-build; mkdir -p $DST; rsync -a --delete --exclude=/build --exclude=/.git --exclude=/browser_gemini --exclude=/.qwen --exclude=/release $SRC/ $DST/; cd $DST && rm -f /tmp/GMfifo* && make -j4 pack && mkdir -p $SRC/build && cp -f build/arctian.iso build/arctian.img $SRC/build/"
 if errorlevel 1 (
     echo.
     echo [HATA] Derleme basarisiz.
