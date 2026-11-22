@@ -45,6 +45,14 @@ ifeq ($(WFL_SELFTEST),1)
 override EXTRA_CFLAGS += -DARCTIAN_WLF_SELFTEST
 endif
 
+# 1.0: cekirdek oz-testleri (sched/proc/caps/afs/lab). Uretim acilisinda
+# kosmazlar: ~1.5 sn maliyet + zamanlayici durumuna dokunma riski.
+# Kanit icin: make pack SELFTEST=1  (tests/* betikleri).
+SELFTEST ?= 0
+ifeq ($(SELFTEST),1)
+override EXTRA_CFLAGS += -DARCTIAN_KERNEL_SELFTESTS
+endif
+
 VERSION_STR := $(shell python3 -c "import json;print(json.load(open('version.json'))['version'])" 2>/dev/null)
 ifeq ($(strip $(VERSION_STR)),)
 VERSION_STR := 0.0
@@ -80,7 +88,6 @@ INCLUDES = -Iinclude/arctian -Imain_kernel -Ikernel_plus/drivers -Ikernel_plus/n
            -Ikernel_plus/system -Idesktop \
            -Idesktop/port -Idesktop/theme \
            -Iinstall -Ilib -Ithird_party -Ithird_party/lvgl \
-           -Ithird_party/quickjs \
            -Ithird_party/mbedtls/include -DLV_CONF_INCLUDE_SIMPLE
 
 
@@ -140,6 +147,13 @@ FONT_PLEX_TTF = design/font/IBMPlexSans-Regular.ttf
 FONT_PLEX_OBJ = $(BUILD)/desktop/assets/font_plex.o
 FONT_PLEX_SB_TTF = design/font/IBMPlexSans-SemiBold.ttf
 FONT_PLEX_SB_OBJ = $(BUILD)/desktop/assets/font_plex_sb.o
+# Manrope (SIL OFL) - giris ekranlari (giris.md sartnamesi)
+FONT_MANROPE_THIN_TTF = design/font/Manrope-Thin.ttf
+FONT_MANROPE_THIN_OBJ = $(BUILD)/desktop/assets/font_manrope_thin.o
+FONT_MANROPE_SB_TTF = design/font/Manrope-SemiBold.ttf
+FONT_MANROPE_SB_OBJ = $(BUILD)/desktop/assets/font_manrope_sb.o
+FONT_MANROPE_BOLD_TTF = design/font/Manrope-Bold.ttf
+FONT_MANROPE_BOLD_OBJ = $(BUILD)/desktop/assets/font_manrope_bold.o
 WALL_PNG  = design/wallpaper/back.png
 WALL_OBJ  = $(BUILD)/desktop/assets/wallpaper_data.o
 LOGO_PNG  = design/logo/logo.png
@@ -176,7 +190,7 @@ LVGL_C = $(shell find third_party/lvgl/src -name '*.c' \
 MAIN_OBJS    = $(patsubst %.c,$(BUILD)/%.o,$(MAIN_C)) $(patsubst %.asm,$(BUILD)/%.o,$(MAIN_ASM)) $(ISR_STUB_OBJ) $(RECOVER_OBJ)
 INSTALL_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(INSTALL_C))
 KP_OBJS      = $(patsubst %.c,$(BUILD)/%.o,$(KP_C)) $(patsubst %.S,$(BUILD)/%.o,$(KP_ASM)) $(BUILD)/main_kernel/ring3_user.o $(ISR_STUB_OBJ) $(RECOVER_OBJ)
-DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
+DESKTOP_OBJS = $(patsubst %.c,$(BUILD)/%.o,$(DESKTOP_C)) $(patsubst %.c,$(BUILD)/%.o,$(LVGL_C)) $(FONT_OBJ) $(FONT_ANTON_OBJ) $(FONT_ABRIL_OBJ) $(FONT_SERIF_OBJ) $(FONT_ARIMO_OBJ) $(FONT_PLEX_OBJ) $(FONT_PLEX_SB_OBJ) $(FONT_MANROPE_THIN_OBJ) $(FONT_MANROPE_SB_OBJ) $(FONT_MANROPE_BOLD_OBJ) $(WALL_OBJ) $(LOGO_OBJ) $(APP_OBJS) $(APPS_REG_OBJ) $(RECOVER_OBJ)
 
 .PHONY: all boot main_kernel install kernel_plus desktop pack qemu qemu-iso clean store-packs FORCE \
         efi test-uefi test-net test-isolation test-smp
@@ -253,20 +267,9 @@ $(MBEDTLS_LIB): $(MBEDTLS_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-# --- QuickJS (modern JS motoru, MIT) ---
-QUICKJS_DIR  = third_party/quickjs
-QUICKJS_CORE = quickjs cutils libregexp libunicode dtoa
-QUICKJS_SRCS = $(addprefix $(QUICKJS_DIR)/,$(addsuffix .c,$(QUICKJS_CORE))) $(QUICKJS_DIR)/quickjs_port.c
-QUICKJS_OBJS = $(patsubst $(QUICKJS_DIR)/%.c,$(BUILD)/quickjs/%.o,$(QUICKJS_SRCS))
-# -Ilib: quickjs_port.c -> asi.h -> "klog.h" (lib/) cekirdek ortak basliklari icerir.
-QUICKJS_CFLAGS = $(filter-out -Wall -Wextra,$(COMMON)) -w -I$(QUICKJS_DIR) -Iinclude/arctian -Ilib \
-                 -DCONFIG_VERSION='"2025-09-13"'
-
-$(BUILD)/quickjs/%.o: $(QUICKJS_DIR)/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(QUICKJS_CFLAGS) -c -o $@ $<
-
-DESKTOP_OBJS += $(QUICKJS_OBJS)
+# --- QuickJS kaldirildi (0.9.1) ---
+# Tarayicinin JS motoru ayri yazilacak. desktop/apps/wolf_engine/main.c
+# yalnizca ABI'yi koruyan bir yer tutucudur; harici kutuphane yok.
 
 # 0.9.1: lexbor (Apache-2.0 HTML ayristirici) kaldirildi. Tek kullanicisi
 # olan deneysel "lexbor" tarayici uygulamasi silindi; yerlesik Tarayici
@@ -325,6 +328,31 @@ $(BUILD)/desktop/assets/font_plex_sb.c: $(FONT_PLEX_SB_TTF) tools/bin2c.py
 	python3 tools/bin2c.py $(FONT_PLEX_SB_TTF) $@ font_plex_sb
 
 $(FONT_PLEX_SB_OBJ): $(BUILD)/desktop/assets/font_plex_sb.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
+
+# Manrope (giris ekranlari)
+$(BUILD)/desktop/assets/font_manrope_thin.c: $(FONT_MANROPE_THIN_TTF) tools/bin2c.py
+	@mkdir -p $(dir $@)
+	python3 tools/bin2c.py $(FONT_MANROPE_THIN_TTF) $@ font_manrope_thin
+
+$(FONT_MANROPE_THIN_OBJ): $(BUILD)/desktop/assets/font_manrope_thin.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
+
+$(BUILD)/desktop/assets/font_manrope_sb.c: $(FONT_MANROPE_SB_TTF) tools/bin2c.py
+	@mkdir -p $(dir $@)
+	python3 tools/bin2c.py $(FONT_MANROPE_SB_TTF) $@ font_manrope_sb
+
+$(FONT_MANROPE_SB_OBJ): $(BUILD)/desktop/assets/font_manrope_sb.c
+	@mkdir -p $(dir $@)
+	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
+
+$(BUILD)/desktop/assets/font_manrope_bold.c: $(FONT_MANROPE_BOLD_TTF) tools/bin2c.py
+	@mkdir -p $(dir $@)
+	python3 tools/bin2c.py $(FONT_MANROPE_BOLD_TTF) $@ font_manrope_bold
+
+$(FONT_MANROPE_BOLD_OBJ): $(BUILD)/desktop/assets/font_manrope_bold.c
 	@mkdir -p $(dir $@)
 	$(CC) $(COMMON) $(INCLUDES) -c -o $@ $<
 

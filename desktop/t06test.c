@@ -534,9 +534,12 @@ static void t_light_theme(void) {
  * JS motorunun `fetch` cagrisi host koprusune ulasiyor mu? Gecersiz
  * URL'de bile cokmemeli ve -1 donmeli. */
 static void t_js_fetch(void) {
+    extern int wolf_engine_eval(const char *src, unsigned len, char *out, unsigned cap);
     extern unsigned wolf_engine_version(void);
-    extern void wolf_engine_set_host(const void *host);
-    t_res("js-motor", wolf_engine_version() != 0);
+    /* QuickJS kaldirildi: motor yok (surum 0), eval cokmeden -3 doner. */
+    char jout[64];
+    int jr = wolf_engine_eval("1+1", 3, jout, sizeof(jout));
+    t_res("js-motor-yok", wolf_engine_version() == 0 && jr == -3);
 
     /* Host koprusu fetch alani var mi (tarayici surumu)? */
     int have = 0;

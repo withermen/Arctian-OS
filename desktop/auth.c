@@ -249,7 +249,20 @@ static void auth_store(void) {
 /* Salt eskiden yalniz saat degerinden uretiliyordu; hesap olusturma anini
  * bilen salt'i aynen hesaplayabilir. Donanim uretebiliyorsa RDRAND kullanilir,
  * uretilemiyorsa saat + tik + yigin adresi birlikte karistirilir. */
+static int auth_have_rdrand(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        uint32_t a, b, c, d;
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1), "c"(0));
+        cached = (int)((c >> 30) & 1u);
+    }
+    return cached;
+}
+
 static uint64_t auth_rdrand(void) {
+    /* RDRAND yoksa (qemu64, eski CPU'lar) yonerge #UD panic uretir;
+     * CPUID once kontrol edilir, fallback karisim new_salt'ta zaten var. */
+    if (!auth_have_rdrand()) return 0;
     uint64_t v = 0;
     unsigned char ok = 0;
     __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));

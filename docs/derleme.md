@@ -21,7 +21,7 @@ sudo apt install -y qemu-system-x86            # denemek istersen
 | `xorriso` | El Torito önyüklenebilir ISO |
 | `qemu-system-x86_64` | çalıştırma / kurulum testi (isteğe bağlı) |
 
-Üçüncü parti bağımlılık gerekmez: LVGL, mbedTLS, QuickJS ve Lexbor depoya **vendored**
+Üçüncü parti bağımlılık gerekmez: LVGL ve mbedTLS depoya **vendored**
 edilmiştir ([third_party/README.md](../third_party/README.md)).
 
 ## Windows: tek adım

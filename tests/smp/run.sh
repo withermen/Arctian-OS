@@ -12,6 +12,9 @@ LOG=/tmp/smp_qemu.log
 
 echo "[smp] kernel_plus derleniyor"
 make -j"$(nproc)" kernel_plus
+echo "[smp] imaj (cekirdek selftestleri acik)"
+# 1.0: oz-testler uretim acilisinda kosmaz; SMP kaniti icin SELFTEST=1.
+make -j"$(nproc)" pack SELFTEST=1 >/dev/null
 
 echo "[smp] trampoline blob kontrolu"
 nasm -f bin -o "$AP_TRAMP" "$TRAMP_ASM"

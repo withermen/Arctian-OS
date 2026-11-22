@@ -80,10 +80,10 @@ tarafından sıfırlanır; `entry_off` adrese eklenip atılır.
 | `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve VMM, modül yükleyici, syscall, ring 3 geçişi (`ring3_user.asm`: `enter_user` / `enter_user_arg`); `.wlf` izole yürütücüsü `wlf_user.c` + `vmm_space.c` **yalnız `kernel_plus`a bağlanır** |
 | `install/` | Kurulum sihirbazı: bölümleme, AFS biçimlendirme, modül kopyalama, önyükleme kaydı |
 | `kernel_plus/` | Sürücüler (`drivers/`), ağ yığını (`net/`), zamanlayıcı/işlem/iplik/senkronizasyon, yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS, açılış animasyonu (`system/bootanim.c`) |
-| `desktop/` | LVGL ile masaüstü kabuğu (dock, pencereler, paneller), gömülü uygulamalar, `.wlf` yükleyici/VM, tarayıcı motorları (Wolf Engine + QuickJS, Lexbor), tema (ADL-Wolf), kurulum sonrası ekranlar |
+| `desktop/` | LVGL ile masaüstü kabuğu (dock, pencereler, paneller), gömülü uygulamalar, `.wlf` yükleyici/VM, tarayıcı motoru (Wolf Engine — JS motoru kendi yazılacak), tema (ADL-Wolf), kurulum sonrası ekranlar |
 | `lib/` | AFS, FAT32, ISO9660, blok katmanı (AHCI/ATA/NVMe), ses/medya kodekleri, PNG/SVG, malloc, `printf`, seri port/klog |
 | `include/arctian/` | Kamu başlıkları: `asi.h`, `app.h`, `wlf.h`, `amod.h`, `dpk.h`, `update.h`, `sig.h`, `slot.h`, `memory_map.h`, ... |
-| `third_party/` | Vendored kütüphaneler: LVGL (arayüz), mbedTLS (TLS), QuickJS (Wolf Engine JS), Lexbor (HTML/CSS). bkz. `third_party/README.md` |
+| `third_party/` | Vendored kütüphaneler: LVGL (arayüz), mbedTLS (TLS). bkz. `third_party/README.md` |
 
 Uygulamalar `lib/` ve çekirdek sembollerini **bağlanma zamanında** değil, paket yüklenirken
 çözümlemez: gömülü uygulamalar `desktop.bin` içine linklenir, `.wlf` paketleri yalnızca

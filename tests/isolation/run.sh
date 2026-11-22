@@ -12,10 +12,11 @@ LOG=/tmp/isolation_qemu.log
 
 echo "[izolasyon] kernel_plus + masaustu derleniyor"
 make -j"$(nproc)" kernel_plus desktop >/dev/null
-echo "[izolasyon] ISO/imaj (selftest bayragiyla)"
-# 0.9.1: B1 selftesti normal acilistan cikarildi; kanit icin ayri bayrakla
-# paketlenir. Boylece son kullanici acilisi hem kisa hem stabil kalir.
-make -j"$(nproc)" pack WFL_SELFTEST=1 >/dev/null
+echo "[izolasyon] ISO/imaj (cekirdek + B1 selftest bayragiyla)"
+# 1.0: cekirdek oz-testleri ve B1 ring 3 selftesti normal acilista kosmaz;
+# kanit icin ayri bayraklarla paketlenir. Boylece son kullanici acilisi hem
+# kisa hem stabil kalir.
+make -j"$(nproc)" pack SELFTEST=1 WFL_SELFTEST=1 >/dev/null
 
 echo "[izolasyon] sembol kontrolu"
 elf=$(ls -t build/obj-*/kernel_plus/kernel_plus.elf | head -1)

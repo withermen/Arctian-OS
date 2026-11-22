@@ -8,9 +8,12 @@ girmeyen test/örnek/belge klasörleri ve üst seviye araçlar çıkarılmışt�
 |---|---|---|---|---|
 | [LVGL](https://github.com/lvgl/lvgl) | 9.6.0 | MIT (`lvgl/LICENCE.txt`) | ~25 MB | masaüstü kabuğu + tüm arayüzler |
 | [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) | 3.6.2 (LTS) | Apache-2.0 (`mbedtls/LICENSE`) | ~8 MB | HTTPS / TLS (`kernel_plus`) |
-| [QuickJS](https://bellard.org/quickjs/) | 2025-09-13 | MIT (`quickjs/LICENSE`) | ~2,3 MB | Wolf Engine tarayıcısının JS motoru |
-| [Lexbor](https://github.com/lexbor/lexbor) | 3.1.0 | Apache-2.0 (`lexbor/LICENSE`) | ~41 MB | Lexbor tarayıcısı (HTML/CSS/selector) |
 | [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git) | `iwlwifi-so-a0-hr-b0-86` | Intel ikili lisans (`firmware/LICENCE.iwlwifi_firmware`) | ~1,4 MB | AX201/AX2xx Wi-Fi sürücüsü (`kernel_plus`) |
+
+Kaldırılanlar (0.9.1): **Lexbor** (Apache-2.0 HTML ayrıştırıcı) ve **QuickJS**
+(MIT JS motoru). Yerleşik Tarayıcı kendi HTML/CSS ayrıştırıcısını kullanır;
+JS motoru sıfırdan yazılacak. `desktop/apps/wolf_engine/main.c` artık yalnızca
+ABI'yi koruyan bir yer tutucudur (harici bağımlılığı yok).
 
 Her kütüphanenin kendi lisans metni alt klasöründe durur; dağıtım sırasında bu dosyalar
 korunmalıdır (Apache-2.0 madde 4(c)).
@@ -51,34 +54,6 @@ Platform bağlantısı repoya aittir: `lib/mbedtls_port.c` eksik libc fonksiyonl
 (`memmove`, `strncmp`, …) ve `mbedtls_hardware_poll` entropi kaynağını sağlar. Tüm
 `library/*.c` dosyaları `libmbedtls.a` olarak derlenip `kernel_plus` içine linklenir.
 
-## `quickjs/` — JavaScript motoru
-
-Bellard'ın QuickJS'inin çekirdek dosyaları olduğu gibi tutulur: `quickjs.c`, `cutils.c`,
-`libregexp.c`, `libunicode.c`, `dtoa.c` + başlıkları ve opcode tabloları. Kaynak koduna
-dokunulmadı.
-
-Üstyapı repoya aittir:
-
-- `quickjs_port.c` — platform köprüsü. `asi.h` üzerinden bellek/arena sağlar
-  (`arctian_js_arena`), libc'te olmayan `pthread`/`time` çağrılarını karşılar.
-- Makefile `QUICKJS_CORE` listesi bu beş dosyayı + port shim'ini derler ve
-  `desktop.bin` içine linkler.
-
-Kullanım yeri: Wolf Engine tarayıcı uygulaması (`desktop/apps/wolf_engine`). Motorun yığını,
-kabuğun sağladığı 64 MB'lık arena içine kurulur (`arctian_js_arena`, `desktop/shell_api.c`).
-`.wlf` paketlerinin `WLF_KIND_SCRIPT` türü QuickJS **değil**, `desktop/wlf_vm.c`'nin
-çalıştırdığı Wolf bytecode'udur.
-
-## `lexbor/` — HTML/CSS ayrıştırıcı
-
-Tarayıcı uygulamasının (`desktop/apps/lexbor`) parser katmanı. İki parça derlemeye girer:
-
-- `lexbor_single.c` — projenin kendi ürettiği tek dosyalık birleştirilmiş derleme (~20 MB);
-  Makefile bunu `-O1 -w` ile derler.
-- `lex_posix_stub.c` — `calloc` gibi POSIX bağımlılıklarını Arctian ayırıcısına bağlayan köprü.
-- `source/` ağacı başlıklar için `-Ithird_party/lexbor/source` ile yola eklenir.
-- `LICENSE` Apache-2.0 metnidir.
-
 ## `firmware/` — Intel Wi-Fi mikro kodu
 
 `iwlwifi-so-a0-hr-b0-86.ucode` — linux-firmware deposundan alınmış, Intel'in ikili
@@ -97,7 +72,6 @@ içindedir.
 ## Güncelleme yaparken
 
 1. Yukarıdaki akış/boyut dengesini bozmadan taze bir kaynak kopyası yerleştir.
-2. `lv_conf.h` ve `mbedtls_config.h` içindeki Arctian ayarlarının, `quickjs_port.c` ve
-   `lex_posix_stub.c` köprülerinin korunduğunu kontrol et.
+2. `lv_conf.h` ve `mbedtls_config.h` içindeki Arctian ayarlarının korunduğunu kontrol et.
 3. Tam bir temiz derleme yap (`build/obj-*` silinmişken `build.bat`) ve ISO'nun QEMU'da
    açıldığını doğrula — LVGL sürüm değişimi kabuğun çizimini doğrudan etkiler.

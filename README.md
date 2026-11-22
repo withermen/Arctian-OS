@@ -4,7 +4,7 @@ x86_64 için sıfırdan yazılmış, modüler bir masaüstü işletim sistemi. K
 kendi çekirdeği, kendi dosya sistemi (AFS), kendi TCP/IP yığını ve LVGL tabanlı bir masaüstü
 kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 
-**Sürüm: 0.9** — tek kaynak [`version.json`](version.json).
+**Sürüm: 0.9.1** — tek kaynak [`version.json`](version.json).
 
 ![Arctian masaüstü](docs/img/masaustu.png)
 
@@ -90,7 +90,7 @@ sdk/           libWolf SDK, wf CLI, örnek uygulamalar
 store/         DuckStore sunucusu (feed + web market) ve dağıtım dosyaları
 tools/         paketleme, imzalama, font/duvar kağıdı üretimi, QEMU yardımcıları
 design/        arayüz şartnamesi, duvar kağıdı, logo ve açılış animasyonu görselleri
-third_party/   LVGL, mbedTLS, QuickJS, Lexbor (vendored — bkz. third_party/README.md)
+third_party/   LVGL, mbedTLS (vendored — bkz. third_party/README.md)
 docs/          mimari, derleme, uygulama geliştirme
 ```
 
@@ -122,15 +122,6 @@ docs/          mimari, derleme, uygulama geliştirme
   = 0 görüp dürüst bir hata koduyla çıkar). Kabuk ve gömülü sistem
   uygulamaları tasarım gereği kabukla aynı adres alanındadır; script (VM)
   `.wlf` uygulamaları makine kodu yürütmeyen yorumlayıcıda çalışır.
-- **UEFI önyükleyici yalnızca QEMU/OVMF üzerinde test edildi.** Gerçek firmware ve
-  dizüstü donanımında denenmedi. Mevcut UEFI kodu bir iskelettir: COM1'e test işareti
-  basar ve GOP mod bilgisini ortak bootinfo sözleşmesine yazar; `ExitBootServices`
-  sonrası çekirdek yükleme henüz yok, açılış BIOS/MBR yoluyla yapılıyor.
-- **SMP desteği QEMU `-smp 4` ile test edildi**, gerçek çok çekirdekli bir makinede
-  denenmedi. MADT/LAPIC keşfi, AP trampoline, per-CPU GDT/TSS ve AP başlatma var
-  (QEMU'da 3/3 AP çevrimiçi); AP'ler henüz kullanıcı iş yükü almıyor, planlayıcı
-  BSP üzerinde çalışıyor. Tek çekirdekli yolda zamanlayıcı tik'iyle işleyen küçük bir
-  planlayıcı vardır (en fazla 8 görev).
 - **Ağ sürücüleri kısmi:** e1000, PCnet, RTL8139/RTL8169 gibi eski PCI adaptörleri
   desteklenir; virtio-net yoktur. Kablosuz tarafta ath9k (AR928x) uçtan uca çalışıyor,
   Intel AX201 ürün yazılımını gerçek gen3 akışıyla yüklüyor ancak tarama ve bağlantı
@@ -138,9 +129,11 @@ docs/          mimari, derleme, uygulama geliştirme
   ibarettir; modern kartların çoğu desteklenmez.
 - **Canlı (RAM) masaüstü yok.** ISO'dan açılış kalıcı kurulum akışına gider; tam
   masaüstü oturumu diske kurulduktan sonra açılır. Kurulum yapmadan denemek için
-  ayrı bir salt-okunur canlı oturum henüz yok.
+  ayrı bir salt-okunur canlı oturum henüz yok. Gelecekte de eklenmeyecektir çünkü
+  yapımcıya göre(Yani bana göre) bu gereksiz birşeydir. Birisi iso yu test ediyorsa 
+  kendi bilgisayarına kurmak istiyor demektir.
 - Windows üzerinde yerel `.wlf` derlemesi yok (ELF bağlayıcısı gerekiyor); Linux/WSL
-  tarafında `wf` ile derlenir.
+  tarafında `wf` ile derlenir.Sebebi ise windows ortamı derleme yapmaya uygun bulunmamıştır.
 - Depodaki imza anahtarı `tools/keys/dev_rsa2048.txt` bir **geliştirme** anahtarıdır;
   yayın öncesi `tools/sig_keygen.py` ile yenisi üretilmelidir.
 - Kod tabanında bilinen hataların tam listesi: [docs/bilinen-hatalar.md](docs/bilinen-hatalar.md).
@@ -150,6 +143,6 @@ docs/          mimari, derleme, uygulama geliştirme
 
 CC BY 4.0 (Atıf 4.0 Uluslararası) — tam metin: [LICENSE](LICENSE). Ticari kullanım dahil
 her türlü kullanımda (dağıtım, kopya, değiştirilmiş sürüm) eser sahibinin bildirilmesi
-zorunludur: "Arctian OS — Copyright 2026 Arctian Developers".
-`third_party/` altındaki kütüphaneler (LVGL ve QuickJS MIT; mbedTLS ve Lexbor Apache-2.0)
+zorunludur: "Arctian OS — Copyright 2026 Wither Studio/B. Kerem Örki".
+`third_party/` altındaki kütüphaneler (LVGL MIT; mbedTLS Apache-2.0)
 kendi lisanslarıyla gelir; bkz. [third_party/README.md](third_party/README.md).

@@ -63,6 +63,8 @@
 #include "afs.h"
 #include "diskcrypt.h"
 #include "storage.h"
+#include "alloc.h"
+#include "paging.h"
 
 asi_t *g_asi = 0;
 
@@ -672,10 +674,47 @@ static void net_selftest(void) {
 }
 #endif
 
+static void c_clear(void) { }
+static void c_putc(char c) { char b[2]; b[0] = c; b[1] = 0; serial_puts(b); }
+static void c_puts(const char *s) { if (s) serial_puts(s); }
+static void c_printf(const char *fmt, ...) {
+    /* Cekirdekte vsnprintf yok; klog/serial tarafi da ayni bicimde
+     * calistigi icin metni oldugu gibi seri hatta veriyoruz. Masaustu
+     * tesihs satirlari bu yuzden bicim argumani kullanmamali. */
+    if (fmt) serial_puts(fmt);
+}
+static asi_console_t s_console = { c_clear, c_putc, c_puts, c_printf };
+static asi_console_t *asi_console_bridge(void) { return &s_console; }
+
+/* Unified heap bridge: main_kernel and kernel_plus each link lib/alloc.c with
+ * their own static heap_ptr = HEAP_BASE. Without overriding g_asi->mem here,
+ * desktop allocations collide with kernel_plus's kmalloc() (e.g. sched s_tasks)
+ * at 0x10000020 and corrupt background tasks like netbg. */
+static void *kp_mem_alloc(size_t n)                  { return kmalloc(n); }
+static void  kp_mem_free(void *p)                    { kfree(p); }
+static void  kp_mem_set(void *d, int c, size_t n)    { memset(d, c, n); }
+static void  kp_mem_copy(void *d, const void *s, size_t n) { memcpy(d, s, n); }
+static void  kp_mem_info(asi_meminfo_t *o) {
+    if (!o) return;
+    vmm_meminfo_t v;
+    vmm_mem_info(&v);
+    o->total = v.total_bytes;
+    o->used = v.used_bytes;
+    o->free = v.free_bytes;
+    o->heap_total = (uint64_t)kmalloc_total();
+    o->heap_used = (uint64_t)kmalloc_used();
+}
+static asi_mem_t s_mem = { kp_mem_alloc, kp_mem_free, kp_mem_set, kp_mem_copy, kp_mem_info };
+
 void kernel_plus_main(void *arg) __attribute__((section(".text.entry")));
 void kernel_plus_main(void *arg) {
     g_asi = (asi_t *)arg;
     serial_puts("[kp] start\n");
+    /* Masaustu ve uygulamalar bu kopruden seri hatta log basar.
+     * (wlf_host ve terminal bunu zaten NULL'a karsi koruyarak cagiriyor;
+     * doldurmayinca masaustu hicbir tesihs satiri uretemiyordu.) */
+    g_asi->console = asi_console_bridge();
+    g_asi->mem = &s_mem;
 
     kernel_debug("kernel_plus baslatiliyor");
     klog_init();
@@ -1002,15 +1041,15 @@ void kernel_plus_main(void *arg) {
     }
 #endif
 
+    /* 0.9.1/1.0: Cekirdek oz-testleri normal acilista KOSMAZ.
+     * Her biri ayri gorev/surec olusturup yok ediyor; QEMU'da olculen
+     * maliyet ~1.5 sn ve B1 ornegi gosterdi ki zamanlayici durumunu
+     * bozma riski de var. Kanit icin ayri hedef: make pack SELFTEST=1
+     * (tests/* altindaki betikler bu bayragi kullanir). */
+#ifdef ARCTIAN_KERNEL_SELFTESTS
     sched_selftest();
     proc_selftest();
-    /* 0.9.1: B1 izolasyon selftesti acilistan cikarildi. Ring 3'e girip
-     * cikan bu sinama, ardindan masaustu baslarken zamanlayici gorev
-     * tablosunda bozulmaya (s_current) yol aciyor ve yetki sorgulari
-     * #GP firtinasi baslatiyordu (gozlenen cokme). Kanit artik ayri
-     * kabul testinde: tests/isolation/run.sh (ayni imaj, ayni sembol
-     * kontrolleri). Acilis da bu kadar kisa kalir. */
-#if defined(ARCTIAN_WLF_SELFTEST)
+#ifdef ARCTIAN_WLF_SELFTEST
     wlf_user_selftest();
 #endif
 #ifdef ARCTIAN_SELFTESTS
@@ -1044,6 +1083,9 @@ void kernel_plus_main(void *arg) {
 #endif
     }
     lab_selftest();
+#else
+    serial_puts("[kp] oz-testler atlandi (uretim acilisi)\n");
+#endif
     if (gui) bootanim_advance(80);
 
     /* Desktop'u yukle */
@@ -1070,9 +1112,9 @@ void kernel_plus_main(void *arg) {
      * Cubuk gercek isi gosterir; buradan sonra yalnizca kararma var. */
     if (gui) {
         bootanim_advance(70);
-        /* 0.9.1: 4300 ms sabit bekleme acilisi gereksiz uzatiyordu;
-         * cubuk zaten dolmus durumda, yalnizca kararma birakilir. */
-        bootanim_finish(1200);
+        /* 1.0: cubuk zaten dolmus durumda. Yalnizca kisa kararma birak;
+         * uzun sabit bekleme acilisi gereksiz uzatiyordu. */
+        bootanim_finish(350);
     }
 
     terminal_writestring("kernel_plus: desktop baslatiliyor...\n");
