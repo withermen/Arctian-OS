@@ -48,8 +48,12 @@ desktop.ini
 # ofis paketleri derlemeyle uretilir (sdk/examples'taki ornekler trackli kaldi)
 sdk/office/*/*.wlf
 
-# Gizli imzalama anahtarlari ve gelistirici araclari - depoya/asla girmez
-tools/
+# Gizli imzalama anahtarlari ve gelistirici araclari - depoya/asla girmez.
+# Uc derleme betigi istisna: depodan temiz checkout derlenebilsin diye.
+tools/*
+!tools/bin2c.py
+!tools/arctianpack.py
+!tools/rust_compile_stub.sh
 tools/keys/
 *.pem
 *.key
