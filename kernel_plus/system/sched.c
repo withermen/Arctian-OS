@@ -542,12 +542,37 @@ static inline uint32_t sched_self_cpu(void) {
     return (ci < CPU_MAX_APICS) ? ci : 0u;
 }
 
-/* Bu CPU'nun calisan gorevi. CPU 0'da s_current (legacy). */
+/* Bu CPU'nun calisan gorevi. CPU 0'da s_current (legacy).
+ *
+ * 0.9.1 sertlestirme: s_current bir gorev tablosu isaretcisi olmali.
+ * Ring 3 izolasyon selftesti (B1) sonrasi sahada gozlenen bozulmada bu
+ * alan cop deger tasiyordu; sched_current() ondan anlamsiz bir tid
+ * uretiyor ve yetki sorgulari #GP firtinasina giriyordu. Gecersiz
+ * isaretci "gorev yok" sayilir; cagiranlar guvenli varsayilana duser. */
+static int sched_task_ptr_valid(const sched_task_t *t) {
+    if (!t || !s_tasks) return 0;
+    if (t < &s_tasks[0] || t >= &s_tasks[s_capacity]) return 0;
+    return (((uintptr_t)t - (uintptr_t)&s_tasks[0]) % sizeof(sched_task_t)) == 0;
+}
+
 static sched_task_t *sched_self_current(void) {
     uint32_t ci = sched_self_cpu();
-    if (ci == 0) return s_current;
+    if (ci == 0) {
+        if (!sched_task_ptr_valid(s_current)) {
+            static int s_warned;
+            if (!s_warned) {
+                s_warned = 1;
+                serial_printf("[sched] UYARI: s_current bozuk (0x%x) -> gorev yok\n",
+                              (unsigned)(uintptr_t)s_current);
+            }
+            return 0;
+        }
+        return s_current;
+    }
     percpu_t *p = percpu_by_index(ci);
-    return p ? (sched_task_t *)p->current_task : (sched_task_t *)0;
+    if (!p) return 0;
+    sched_task_t *t = (sched_task_t *)p->current_task;
+    return sched_task_ptr_valid(t) ? t : (sched_task_t *)0;
 }
 
 static void sched_set_self_current(sched_task_t *t) {

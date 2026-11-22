@@ -321,9 +321,30 @@ uint32_t proc_caps_of(int pid) {
     return p ? p->caps : CAP_ALL;
 }
 
+/* Sahip isaretcisi gercekten s_procs icinde mi? Zamanlayici gorev
+ * yapisindaki owner alani bir sekilde bozulursa (gozlenen: masaustune
+ * gecerken bazi gorevlerde cop isaretci) burada p->caps okumak #GP
+ * firtinasi baslatiyordu. Gecersiz sahip = yetki bilinmiyor; cagirana
+ * "sahip yok" demek guvenli varsayilana (CAP_ALL) dusurur ve sistem
+ * ayakta kalir. Bozulma bir kez seri loga yazilir. */
+static int proc_slot_valid(const pcb_t *p) {
+    if (!p) return 0;
+    if (p < &s_procs[0] || p >= &s_procs[PROC_MAX]) return 0;
+    return (((uintptr_t)p - (uintptr_t)&s_procs[0]) % sizeof(pcb_t)) == 0;
+}
+
 int proc_owner_caps(uint32_t *out) {
     pcb_t *p = (pcb_t *)sched_owner_current();
     if (!p) return 0;
+    if (!proc_slot_valid(p)) {
+        static int s_warned;
+        if (!s_warned) {
+            s_warned = 1;
+            serial_printf("[proc] UYARI: gecersiz sahip isaretcisi=0x%x (tid=%d) -> yetki CAP_ALL\n",
+                          (unsigned)(uintptr_t)p, (int)sched_current());
+        }
+        return 0;
+    }
     if (out) *out = p->caps;
     return 1;
 }

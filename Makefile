@@ -37,6 +37,14 @@ ifeq ($(T07_TEST),1)
 override EXTRA_CFLAGS += -DARCTIAN_07_TEST
 endif
 
+# 0.9.1: B1 ring 3 izolasyon selftesti. Normal acilista KAPALI: masaustu
+# oncesi ring 3 gecisi zamanlayici gorev tablosunda bozulmaya yol acabiliyor.
+# Kanit icin: make pack WFL_SELFTEST=1  (tests/isolation/run.sh bunu kullanir)
+WFL_SELFTEST ?= 0
+ifeq ($(WFL_SELFTEST),1)
+override EXTRA_CFLAGS += -DARCTIAN_WLF_SELFTEST
+endif
+
 VERSION_STR := $(shell python3 -c "import json;print(json.load(open('version.json'))['version'])" 2>/dev/null)
 ifeq ($(strip $(VERSION_STR)),)
 VERSION_STR := 0.0

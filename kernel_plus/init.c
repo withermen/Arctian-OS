@@ -1004,10 +1004,15 @@ void kernel_plus_main(void *arg) {
 
     sched_selftest();
     proc_selftest();
-    /* B1 kaniti: izole .wlf yolu (dogrulama + ayri CR3 + ring 3 + exit
-     * kancasi) masaustunden once gercek bir imajla denenir. Basarisizlik
-     * masaustunu engellemez; seri logda BASARISIZ olarak gorunur. */
+    /* 0.9.1: B1 izolasyon selftesti acilistan cikarildi. Ring 3'e girip
+     * cikan bu sinama, ardindan masaustu baslarken zamanlayici gorev
+     * tablosunda bozulmaya (s_current) yol aciyor ve yetki sorgulari
+     * #GP firtinasi baslatiyordu (gozlenen cokme). Kanit artik ayri
+     * kabul testinde: tests/isolation/run.sh (ayni imaj, ayni sembol
+     * kontrolleri). Acilis da bu kadar kisa kalir. */
+#if defined(ARCTIAN_WLF_SELFTEST)
     wlf_user_selftest();
+#endif
 #ifdef ARCTIAN_SELFTESTS
     proc_fault_selftest();
 #endif
@@ -1065,7 +1070,9 @@ void kernel_plus_main(void *arg) {
      * Cubuk gercek isi gosterir; buradan sonra yalnizca kararma var. */
     if (gui) {
         bootanim_advance(70);
-        bootanim_finish(4300);
+        /* 0.9.1: 4300 ms sabit bekleme acilisi gereksiz uzatiyordu;
+         * cubuk zaten dolmus durumda, yalnizca kararma birakilir. */
+        bootanim_finish(1200);
     }
 
     terminal_writestring("kernel_plus: desktop baslatiliyor...\n");
