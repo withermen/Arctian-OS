@@ -73,6 +73,7 @@ static lv_obj_t   *s_ta_name, *s_ta_pw1, *s_ta_pw2, *s_ta_login;
 static char        s_pending[32];
 static char        s_target[32];
 static const char *s_error;
+static const char *s_status_txt;     /* ag durumu: notr metin, hata degil */
 static int         s_sel_idx;        /* ekran 2: secili avatar */
 static int         s_want_pw;        /* ekran 1: "Evet" secildi mi */
 
@@ -148,11 +149,15 @@ static const char *MONTHS[] = { "Ocak", "Subat", "Mart", "Nisan", "Mayis",
 static const char *DAYS[] = { "Pazar", "Pazartesi", "Sali", "Carsamba",
                               "Persembe", "Cuma", "Cumartesi" };
 
+/* Saat onbellegi dosya kapsaminda: screen_begin yeni etiketler olusturur,
+ * onbellek sifirlanmazsa "ayni dakika" diye bos etiket birakilir. */
+static uint64_t s_clk_last_ms;
+static char     s_clk_prev[8];
+
 static void update_clock(void) {
-    static uint64_t last_ms;
     uint64_t now = (A && A->time && A->time->ticks_ms) ? A->time->ticks_ms() : 0;
-    if (last_ms && now - last_ms < 500u) return;
-    last_ms = now;
+    if (s_clk_last_ms && now - s_clk_last_ms < 500u) return;
+    s_clk_last_ms = now;
 
     asi_datetime_t dt;
     if (!A || !A->time || !A->time->now || !A->time->now(&dt)) return;
@@ -165,10 +170,9 @@ static void update_clock(void) {
     b[4] = (char)('0' + dt.minute % 10);
     b[5] = 0;
     if (s_clock) {
-        static char prev[8];
-        int same = (prev[0]==b[0] && prev[1]==b[1] && prev[2]==b[2] &&
-                    prev[3]==b[3] && prev[4]==b[4]);
-        if (!same) { for (int i = 0; i < 8; i++) prev[i] = b[i]; lv_label_set_text(s_clock, b); }
+        int same = (s_clk_prev[0]==b[0] && s_clk_prev[1]==b[1] && s_clk_prev[2]==b[2] &&
+                    s_clk_prev[3]==b[3] && s_clk_prev[4]==b[4]);
+        if (!same) { for (int i = 0; i < 8; i++) s_clk_prev[i] = b[i]; lv_label_set_text(s_clock, b); }
     }
 
     if (s_date) {
@@ -315,12 +319,16 @@ static void make_focusable(lv_obj_t *o);
 static void bar_btn_cb(lv_event_t *e) {
     int id = (int)(intptr_t)lv_event_get_user_data(e);
     if (id == 1) {                 /* ag: durum metni */
-        const char *s = "Ag: bagli";
-        if (A && A->net && A->net->link_type) {
-            int t = A->net->link_type();
-            if (t == 0) s = "Ag: baglanti yok";
+        const char *s = "Ag: baglanti yok";
+        if (A && A->net) {
+            int up = (A->net->link_type && A->net->link_type() != 0);
+            /* Bazi suruculerde link bayragi kalkmaz ama DHCP IP atar;
+             * configured() gercek durumu soyler. */
+            if (!up && A->net->configured) up = A->net->configured();
+            if (up) s = "Ag: bagli";
         }
-        if (s_error == 0) { s_error = s; s_rebuild = 1; }
+        s_status_txt = s;
+        s_rebuild = 1;
     } else if (id == 2) {          /* TR: klavye duzeni dongusu */
         static const char *l[] = { "trq", "trf", "en" };
         static int k;
@@ -371,6 +379,8 @@ static void screen_begin(void) {
     s_ta_name = s_ta_pw1 = s_ta_pw2 = s_ta_login = 0;
     s_clock = s_date = s_shade_img = 0;
     s_ic_n = 0;                       /* ikon tamponlari cocuklarla birlikte silindi */
+    s_clk_last_ms = 0;                /* yeni etiketler ilk turda dolsun */
+    s_clk_prev[0] = 0;
 
     build_shade();
 
@@ -391,8 +401,10 @@ static void screen_begin(void) {
 }
 
 static void error_label(void) {
-    if (!s_error) return;
-    lv_obj_t *l = add_label(s_root, s_error, F_Q, C_ERROR, LV_OPA_COVER);
+    const char *txt = s_error ? s_error : s_status_txt;
+    if (!txt) return;
+    lv_obj_t *l = add_label(s_root, txt, F_Q,
+                            s_error ? C_ERROR : C_INK, LV_OPA_COVER);
     lv_obj_set_width(l, LV_PCT(100));
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(l, 0, SY(600));
@@ -404,6 +416,13 @@ static void on_field_click(lv_event_t *e) {
     if (!s_group || !ta) return;
     if (lv_obj_get_group(ta) != s_group) lv_group_add_obj(s_group, ta);
     lv_group_focus_obj(ta);
+}
+
+/* one_line + SCROLLABLE kapali: otomatik imlec takibi yok. Deger
+ * degistikce saga kaydir: imlec (sonda) gorunur kalir, "kayma" olmaz. */
+static void on_field_changed(lv_event_t *e) {
+    lv_obj_t *ta = lv_event_get_target(e);
+    lv_obj_scroll_to_x(ta, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
 static void on_field_state(lv_event_t *e) {
@@ -452,6 +471,7 @@ static lv_obj_t *make_capsule(int y, const char *icon_svg, const char *ph,
     lv_obj_remove_flag(ta, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(ta, on_field_state, LV_EVENT_FOCUSED, 0);
     lv_obj_add_event_cb(ta, on_field_state, LV_EVENT_DEFOCUSED, 0);
+    lv_obj_add_event_cb(ta, on_field_changed, LV_EVENT_VALUE_CHANGED, 0);
     lv_obj_add_event_cb(cap, on_field_click, LV_EVENT_CLICKED, ta);
 
     /* ok dugmesi: x774 y+8 44x44 r22 dolgu #2B2438 */

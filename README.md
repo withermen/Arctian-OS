@@ -4,7 +4,7 @@ x86_64 için sıfırdan yazılmış, modüler bir masaüstü işletim sistemi. K
 kendi çekirdeği, kendi dosya sistemi (AFS), kendi TCP/IP yığını ve LVGL tabanlı bir masaüstü
 kabuğu vardır. Üçüncü parti bir mikroişletimci veya libc kullanılmaz.
 
-**Sürüm: 0.9.1** — tek kaynak [`version.json`](version.json).
+**Sürüm: 0.9.2** — tek kaynak [`version.json`](version.json).
 
 ![Arctian masaüstü](docs/img/masaustu.png)
 

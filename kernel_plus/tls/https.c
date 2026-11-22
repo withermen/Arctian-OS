@@ -9,6 +9,7 @@
 #include "serial.h"
 #include "http.h"
 #include "clock.h"
+#include "alloc.h"
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_ciphersuites.h"
@@ -20,12 +21,33 @@
 #include "psa/crypto.h"
 
 #define TLS_HEAP_SIZE   (1024 * 1024)
-/* Govde tamponu: 192 KB buyuk sayfalari/indirmeleri kesiyordu.
- * 320 KB pratik ust sinir; asan tampon cekirdek BSS'inde duruyor. */
-#define HTTPS_BUF_MAX   (320 * 1024)
+/* Govde tamponunun sabit ust siniri yok: yanit geldikce geometrik buyur
+ * (kmalloc + kopya + kfree). Tek sinir bos heap; yetmezse istek sessiz
+ * kesme yerine durust hata koduyla (-5) biter. */
 
 static unsigned char tls_heap[TLS_HEAP_SIZE];
-static char https_buf[HTTPS_BUF_MAX];
+static char *https_buf;
+static uint32_t https_buf_cap;
+
+
+static int https_grow(uint32_t need) {
+    uint32_t nc = https_buf_cap ? https_buf_cap : 64u * 1024u;
+    while (nc < need) {
+        if (nc > 0x40000000u) return -1;
+        nc *= 2;
+    }
+    size_t room = kmalloc_total() - kmalloc_used() + https_buf_cap;
+    if ((size_t)nc > room) return -1;
+    char *p = (char *)kmalloc(nc);
+    if (!p) return -1;
+    if (https_buf) {
+        memcpy(p, https_buf, https_buf_cap);
+        kfree(https_buf);
+    }
+    https_buf = p;
+    https_buf_cap = nc;
+    return 0;
+}
 
 static mbedtls_entropy_context  s_entropy;
 static mbedtls_ctr_drbg_context s_drbg;
@@ -452,14 +474,16 @@ const char *https_get(const char *host, uint16_t port, const char *path,
     int hdr_end = -1;
     int has_cl = 0;
     uint32_t content_len = 0;
-    uint64_t rd_deadline = clock_ms() + 12000;   /* son bayttan beri 12 sn */
+    uint64_t rd_deadline = clock_ms() + 20000;   /* son bayttan beri 20 sn */
     if (ret >= 0) {
         for (;;) {
-            unsigned char tmp[2048];
+            unsigned char tmp[4096];
             ret = mbedtls_ssl_read(&ssl, tmp, sizeof(tmp));
             if (ret > 0) {
-                rd_deadline = clock_ms() + 12000;
-                append(https_buf, HTTPS_BUF_MAX, &total, (const char *)tmp, (uint32_t)ret);
+                rd_deadline = clock_ms() + 20000;
+                if (total + (uint32_t)ret + 1u > https_buf_cap &&
+                    https_grow(total + (uint32_t)ret + 1u) != 0) { ret = -5; break; }
+                append(https_buf, https_buf_cap, &total, (const char *)tmp, (uint32_t)ret);
 
                 if (hdr_end < 0) {
                     for (uint32_t i = 0; i + 3 < total; i++) {
@@ -495,19 +519,24 @@ const char *https_get(const char *host, uint16_t port, const char *path,
 
                 if (hdr_end > 0 && has_cl &&
                     total >= (uint32_t)hdr_end + content_len) break;
-                if (hdr_end > 0 && total >= 5 &&
+                if (hdr_end > 0 && !has_cl && total >= 5 &&
                     https_buf[total - 5] == '0' && https_buf[total - 4] == '\r' &&
                     https_buf[total - 3] == '\n' && https_buf[total - 2] == '\r' &&
                     https_buf[total - 1] == '\n') break;
-                if (total >= HTTPS_BUF_MAX - 1) break;
                 continue;
             }
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE ||
+                ret == MBEDTLS_ERR_SSL_TIMEOUT) {
                 if ((int64_t)(clock_ms() - rd_deadline) >= 0) { ret = -101; break; }
                 continue;
             }
             break; /* 0, close notify veya hata */
         }
+    }
+    if (total == 0 || (has_cl && hdr_end > 0 && total < (uint32_t)hdr_end + content_len) ||
+        total >= 65536u) {
+        serial_printf("[https] done total=%u cl=%d ret=%d cap=%u\n",
+                      total, has_cl ? (int)content_len : -1, ret, https_buf_cap);
     }
 
     {
@@ -527,7 +556,7 @@ const char *https_get(const char *host, uint16_t port, const char *path,
     mbedtls_ssl_free(&ssl);
     tcp_close(conn);
 
-    if (total == 0) return 0;
+    if (total == 0 || ret == -5) return 0;
     https_buf[total] = 0;
     if (len_out) *len_out = total;
     return https_buf;
@@ -805,10 +834,10 @@ void https_last_error(char *buf, int cap) {
 /* ================================================================== */
 /* 0.8.2: Akisli govde indirme (cekirdek guncellemesi)                 */
 /*                                                                    */
-/* Govde HTTPS_BUF_MAX tamponuna sigmaz (kernel_plus ~900 KB); bu yol  */
-/* yanit geldikce parcalari cagriya devreder ve boylece disk sektorle- */
-/* rine dogrudan yazilabilir. chunked govde desteklenmez (GitHub cikis */
-/* varliklari Content-Length gonderir). Yonlendirmeler takip edilir.   */
+/* Govde tamponu dinamik buyur; bu yol yanit geldikce parcalari cagriya */
+/* devreder: disk sektorlerine dogrudan yazilabilir. chunked govde     */
+/* desteklenmez (GitHub cikis varliklari Content-Length gonderir).     */
+/* Yonlendirmeler takip edilir.                                        */
 /* ================================================================== */
 
 #define STREAM_HIWATER (32u * 1024u)
@@ -924,7 +953,9 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                 ret = mbedtls_ssl_read(&ssl, tmp, sizeof(tmp));
                 if (ret > 0) {
                     rd_deadline = clock_ms() + 30000;
-                    append(https_buf, HTTPS_BUF_MAX, &total, (const char *)tmp, (uint32_t)ret);
+                    if (total + (uint32_t)ret + 1u > https_buf_cap &&
+                        https_grow(total + (uint32_t)ret + 1u) != 0) { err = -5; break; }
+                    append(https_buf, https_buf_cap, &total, (const char *)tmp, (uint32_t)ret);
 
                     if (hdr_end < 0) {
                         for (uint32_t i = 0; i + 3 < total; i++) {
@@ -983,7 +1014,6 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
                             total = rest; body_at = 0;
                         }
                         if (has_cl && delivered >= content_len) { done = 1; break; }
-                        if (total >= HTTPS_BUF_MAX - 1) { err = -5; break; }
                     }
                     continue;
                 }

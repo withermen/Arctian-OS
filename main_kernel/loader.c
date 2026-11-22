@@ -32,8 +32,13 @@ int module_load(const module_entry_t *entry) {
     uint32_t sectors = (size + 511u) / 512u;
     uint8_t *dst = (uint8_t *)(uintptr_t)entry->load_addr;
 
+    /* .bss linker'da ALIGN(4K) ile baslar: dosya sonu ile bss baslangici
+     * arasindaki bosluk da SIFIRLANMALI. Yoksa bss'in son ~4 KB'i onceki
+     * icerikle kalir (cop static'ler -> sessiz serial, sporatik kayiplar). */
+    uint32_t gap = (0x1000u - (size & 0xFFFu)) & 0xFFFu;
+
     vmm_map_kernel_range((uint64_t)(uintptr_t)entry->load_addr,
-                         (uint64_t)size + (uint64_t)h->bss_size);
+                         (uint64_t)size + (uint64_t)h->bss_size + gap);
 
     uint32_t done = 0;
     while (done < sectors) {
@@ -51,7 +56,7 @@ int module_load(const module_entry_t *entry) {
     }
 
     if (h->bss_size) {
-        memset(dst + size, 0, h->bss_size);
+        memset(dst + size, 0, (size_t)h->bss_size + gap);
     }
     return 0;
 }
