@@ -8,6 +8,7 @@ static void mem_copy(uint8_t *dst, const uint8_t *src, uint32_t n) {
 
 void pipe_init(pipe_t *p, uint32_t cap) {
     if (cap == 0 || cap > PIPE_BUF_MAX) cap = PIPE_BUF_MAX;
+    spin_init(&p->lock);
     p->cap = cap;
     p->head = p->tail = p->count = 0;
     p->closed = 0;
@@ -20,6 +21,7 @@ int pipe_write(pipe_t *p, const void *src, uint32_t n) {
     uint32_t done = 0;
     while (done < n) {
         uint64_t f = sched_irq_save();
+        spin_lock(&p->lock);
         uint32_t space = p->cap - p->count;
         if (space > 0) {
             uint32_t chunk = n - done;
@@ -31,13 +33,16 @@ int pipe_write(pipe_t *p, const void *src, uint32_t n) {
             p->count += chunk;
             done += chunk;
             int w = waitq_pop(&p->rd_wq);
+            spin_unlock(&p->lock);
             if (w >= 0) sched_wake(w);
             sched_irq_restore(f);
             continue;
         }
-        if (p->closed) { sched_irq_restore(f); return (int)done; }
+        if (p->closed) { spin_unlock(&p->lock); sched_irq_restore(f); return (int)done; }
         waitq_add(&p->wr_wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&p->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
     return (int)done;
@@ -48,6 +53,7 @@ int pipe_read(pipe_t *p, void *dst, uint32_t n) {
     uint32_t done = 0;
     while (done < n) {
         uint64_t f = sched_irq_save();
+        spin_lock(&p->lock);
         if (p->count > 0) {
             uint32_t chunk = n - done;
             if (chunk > p->count) chunk = p->count;
@@ -58,30 +64,39 @@ int pipe_read(pipe_t *p, void *dst, uint32_t n) {
             p->count -= chunk;
             done += chunk;
             int w = waitq_pop(&p->wr_wq);
+            spin_unlock(&p->lock);
             if (w >= 0) sched_wake(w);
             sched_irq_restore(f);
             continue;
         }
-        if (p->closed) { sched_irq_restore(f); return (int)done; }
+        if (p->closed) { spin_unlock(&p->lock); sched_irq_restore(f); return (int)done; }
         waitq_add(&p->rd_wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&p->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
     return (int)done;
 }
 
 void pipe_close(pipe_t *p) {
+    int wake_list[WAITQ_MAX * 2];
+    int wn = 0;
     uint64_t f = sched_irq_save();
+    spin_lock(&p->lock);
     p->closed = 1;
     int w;
-    while ((w = waitq_pop(&p->rd_wq)) >= 0) sched_wake(w);
-    while ((w = waitq_pop(&p->wr_wq)) >= 0) sched_wake(w);
+    while ((w = waitq_pop(&p->rd_wq)) >= 0 && wn < WAITQ_MAX * 2) wake_list[wn++] = w;
+    while ((w = waitq_pop(&p->wr_wq)) >= 0 && wn < WAITQ_MAX * 2) wake_list[wn++] = w;
+    spin_unlock(&p->lock);
+    for (int i = 0; i < wn; i++) sched_wake(wake_list[i]);
     sched_irq_restore(f);
 }
 
 void mq_init(mq_t *q, uint32_t msg_size, uint32_t cap) {
     if (msg_size == 0 || msg_size > MQ_MSG_MAX) msg_size = MQ_MSG_MAX;
     if (cap == 0 || cap > MQ_MAX_SLOTS) cap = MQ_MAX_SLOTS;
+    spin_init(&q->lock);
     q->msg_size = msg_size;
     q->cap = cap;
     q->head = q->count = 0;
@@ -93,18 +108,22 @@ void mq_init(mq_t *q, uint32_t msg_size, uint32_t cap) {
 int mq_send(mq_t *q, const void *msg) {
     for (;;) {
         uint64_t f = sched_irq_save();
+        spin_lock(&q->lock);
         if (q->count < q->cap) {
             uint32_t slot = (q->head + q->count) % q->cap;
             mem_copy(q->slots[slot], (const uint8_t *)msg, q->msg_size);
             q->count++;
             int w = waitq_pop(&q->rd_wq);
+            spin_unlock(&q->lock);
             if (w >= 0) sched_wake(w);
             sched_irq_restore(f);
             return 0;
         }
-        if (q->closed) { sched_irq_restore(f); return -1; }
+        if (q->closed) { spin_unlock(&q->lock); sched_irq_restore(f); return -1; }
         waitq_add(&q->wr_wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&q->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
 }
@@ -112,28 +131,37 @@ int mq_send(mq_t *q, const void *msg) {
 int mq_recv(mq_t *q, void *msg) {
     for (;;) {
         uint64_t f = sched_irq_save();
+        spin_lock(&q->lock);
         if (q->count > 0) {
             mem_copy((uint8_t *)msg, q->slots[q->head], q->msg_size);
             q->head = (q->head + 1) % q->cap;
             q->count--;
             int w = waitq_pop(&q->wr_wq);
+            spin_unlock(&q->lock);
             if (w >= 0) sched_wake(w);
             sched_irq_restore(f);
             return 0;
         }
-        if (q->closed) { sched_irq_restore(f); return -1; }
+        if (q->closed) { spin_unlock(&q->lock); sched_irq_restore(f); return -1; }
         waitq_add(&q->rd_wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&q->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
 }
 
 void mq_close(mq_t *q) {
+    int wake_list[WAITQ_MAX * 2];
+    int wn = 0;
     uint64_t f = sched_irq_save();
+    spin_lock(&q->lock);
     q->closed = 1;
     int w;
-    while ((w = waitq_pop(&q->rd_wq)) >= 0) sched_wake(w);
-    while ((w = waitq_pop(&q->wr_wq)) >= 0) sched_wake(w);
+    while ((w = waitq_pop(&q->rd_wq)) >= 0 && wn < WAITQ_MAX * 2) wake_list[wn++] = w;
+    while ((w = waitq_pop(&q->wr_wq)) >= 0 && wn < WAITQ_MAX * 2) wake_list[wn++] = w;
+    spin_unlock(&q->lock);
+    for (int i = 0; i < wn; i++) sched_wake(wake_list[i]);
     sched_irq_restore(f);
 }
 

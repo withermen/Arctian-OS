@@ -38,5 +38,5 @@ kernel_main_asm:
 section .bss
 align 16
 stack_bottom:
-    resb 524288     ; 512KB stack (LVGL + SVG + masaustu)
+    resb 491520     ; 480KB stack (LVGL + SVG + masaustu; 0x200000 siniri icinde)
 stack_top:

@@ -14,6 +14,10 @@ arctian_sched_switch:
     movq %rsp, (%rdi)
     movq (%rsi), %rsp
     fxrstor (%rcx)
+    testq %r8, %r8
+    jz 1f
+    movb $0, (%r8)
+1:
     popq %r15
     popq %r14
     popq %r13

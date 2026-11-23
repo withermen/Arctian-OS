@@ -7,6 +7,8 @@ void waitq_init(waitq_t *q) {
 }
 
 void waitq_add(waitq_t *q, int tid) {
+    for (int i = 0; i < q->n; i++)
+        if (q->tids[i] == tid) return;
     if (q->n < WAITQ_MAX) q->tids[q->n++] = tid;
 }
 
@@ -41,6 +43,7 @@ void spin_unlock(spinlock_t *l) {
 }
 
 void mutex_init(mutex_t *m) {
+    spin_init(&m->lock);
     m->locked = 0;
     m->owner = -1;
     waitq_init(&m->wq);
@@ -48,12 +51,14 @@ void mutex_init(mutex_t *m) {
 
 int mutex_trylock(mutex_t *m) {
     uint64_t f = sched_irq_save();
+    spin_lock(&m->lock);
     int ok = 0;
     if (!m->locked) {
         m->locked = 1;
         m->owner = sched_current();
         ok = 1;
     }
+    spin_unlock(&m->lock);
     sched_irq_restore(f);
     return ok;
 }
@@ -61,36 +66,45 @@ int mutex_trylock(mutex_t *m) {
 void mutex_lock(mutex_t *m) {
     for (;;) {
         uint64_t f = sched_irq_save();
+        spin_lock(&m->lock);
         if (!m->locked) {
             m->locked = 1;
             m->owner = sched_current();
+            spin_unlock(&m->lock);
             sched_irq_restore(f);
             return;
         }
         waitq_add(&m->wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&m->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
 }
 
 void mutex_unlock(mutex_t *m) {
     uint64_t f = sched_irq_save();
+    spin_lock(&m->lock);
     m->locked = 0;
     m->owner = -1;
     int w = waitq_pop(&m->wq);
+    spin_unlock(&m->lock);
     if (w >= 0) sched_wake(w);
     sched_irq_restore(f);
 }
 
 void sem_init(sem_t *s, int value) {
+    spin_init(&s->lock);
     s->count = value;
     waitq_init(&s->wq);
 }
 
 int sem_trywait(sem_t *s) {
     uint64_t f = sched_irq_save();
+    spin_lock(&s->lock);
     int ok = 0;
     if (s->count > 0) { s->count--; ok = 1; }
+    spin_unlock(&s->lock);
     sched_irq_restore(f);
     return ok;
 }
@@ -98,21 +112,27 @@ int sem_trywait(sem_t *s) {
 void sem_wait(sem_t *s) {
     for (;;) {
         uint64_t f = sched_irq_save();
+        spin_lock(&s->lock);
         if (s->count > 0) {
             s->count--;
+            spin_unlock(&s->lock);
             sched_irq_restore(f);
             return;
         }
         waitq_add(&s->wq, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&s->lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
 }
 
 void sem_post(sem_t *s) {
     uint64_t f = sched_irq_save();
+    spin_lock(&s->lock);
     s->count++;
     int w = waitq_pop(&s->wq);
+    spin_unlock(&s->lock);
     if (w >= 0) sched_wake(w);
     sched_irq_restore(f);
 }

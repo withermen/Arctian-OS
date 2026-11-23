@@ -7,6 +7,7 @@
 #define PIPE_BUF_MAX 4096
 
 typedef struct {
+    spinlock_t lock;
     uint8_t buf[PIPE_BUF_MAX];
     uint32_t cap;
     uint32_t head;
@@ -26,6 +27,7 @@ void pipe_close(pipe_t *p);
 #define MQ_MSG_MAX   64
 
 typedef struct {
+    spinlock_t lock;
     uint8_t slots[MQ_MAX_SLOTS][MQ_MSG_MAX];
     uint32_t msg_size;
     uint32_t cap;

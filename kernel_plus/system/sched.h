@@ -40,6 +40,8 @@ uint32_t    sched_task_ticks(sched_tid_t tid);
 uint32_t    sched_total_ticks(void);
 int         sched_selftest(void);
 
+void        sched_prepare_block(void);
+void        sched_commit_block(void);
 void        sched_block_current(void);
 void        sched_wake(sched_tid_t tid);
 void        sched_reap(sched_tid_t tid);

@@ -16,12 +16,14 @@ typedef struct {
 } spinlock_t;
 
 typedef struct {
+    spinlock_t lock;
     volatile int locked;
     volatile int owner;
     waitq_t wq;
 } mutex_t;
 
 typedef struct {
+    spinlock_t lock;
     volatile int count;
     waitq_t wq;
 } sem_t;

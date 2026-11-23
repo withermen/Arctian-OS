@@ -145,8 +145,8 @@ void ap_entry(uint32_t cpu_index) {
      * tik'i (ve ileride resched IPI'si) hlt'den cikarir. pick_local ilk
      * geciste park baglamindan (s_ap_idle) goreve switch eder. */
     for (;;) {
-        sched_pick_local();
-        __asm__ volatile ("sti; hlt" ::: "memory");
+        if (sched_pick_local() >= 0) continue;
+        __asm__ volatile ("sti; hlt; cli" ::: "memory");
     }
 }
 

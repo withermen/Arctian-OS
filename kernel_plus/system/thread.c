@@ -15,6 +15,7 @@ typedef struct {
 } kthread_rec_t;
 
 static kthread_rec_t s_kth[KTHREAD_MAX];
+static spinlock_t s_kth_lock;
 
 static kthread_rec_t *kthread_rec(kthread_t tid) {
     for (int i = 0; i < KTHREAD_MAX; i++)
@@ -25,10 +26,16 @@ static kthread_rec_t *kthread_rec(kthread_t tid) {
 static void kthread_trampoline(void *arg) {
     kthread_rec_t *t = (kthread_rec_t *)arg;
     if (t->fn) t->fn(t->arg);
+    int wake_list[WAITQ_MAX];
+    int wn = 0;
     uint64_t f = sched_irq_save();
+    spin_lock(&s_kth_lock);
     t->done = 1;
     int w;
-    while ((w = waitq_pop(&t->joiners)) >= 0) sched_wake(w);
+    while ((w = waitq_pop(&t->joiners)) >= 0 && wn < WAITQ_MAX)
+        wake_list[wn++] = w;
+    spin_unlock(&s_kth_lock);
+    for (int i = 0; i < wn; i++) sched_wake(wake_list[i]);
     sched_irq_restore(f);
     sched_exit();
 }
@@ -36,25 +43,36 @@ static void kthread_trampoline(void *arg) {
 kthread_t kthread_create(const char *name, void (*fn)(void *), void *arg) {
     if (!fn) return -1;
     uint64_t f = sched_irq_save();
+    spin_lock(&s_kth_lock);
 
     int slot = -1;
     for (int i = 0; i < KTHREAD_MAX; i++)
         if (!s_kth[i].used) { slot = i; break; }
-    if (slot < 0) { sched_irq_restore(f); return -1; }
+    if (slot < 0) { spin_unlock(&s_kth_lock); sched_irq_restore(f); return -1; }
 
     kthread_rec_t *t = &s_kth[slot];
     t->used = 1;
     t->done = 0;
+    t->tid = -1;
     t->fn = fn;
     t->arg = arg;
     waitq_init(&t->joiners);
     int i = 0;
     if (name) for (; name[i] && i < (int)sizeof(t->name) - 1; i++) t->name[i] = name[i];
     t->name[i] = 0;
+    spin_unlock(&s_kth_lock);
 
     sched_tid_t tid = sched_spawn_ex(t->name, kthread_trampoline, t, 0);
-    if (tid < 0) { t->used = 0; sched_irq_restore(f); return -1; }
+    if (tid < 0) {
+        spin_lock(&s_kth_lock);
+        t->used = 0;
+        spin_unlock(&s_kth_lock);
+        sched_irq_restore(f);
+        return -1;
+    }
+    spin_lock(&s_kth_lock);
     t->tid = tid;
+    spin_unlock(&s_kth_lock);
     sched_set_owner(tid, sched_owner_current());
 
     sched_irq_restore(f);
@@ -65,34 +83,45 @@ kthread_t kthread_create(const char *name, void (*fn)(void *), void *arg) {
 int kthread_join(kthread_t tid) {
     for (;;) {
         uint64_t f = sched_irq_save();
+        spin_lock(&s_kth_lock);
         kthread_rec_t *r = kthread_rec(tid);
-        if (!r) { sched_irq_restore(f); return -1; }
+        if (!r) { spin_unlock(&s_kth_lock); sched_irq_restore(f); return -1; }
         if (r->done) {
-            while (sched_state(r->tid) != TASK_DONE) {
-                sched_irq_restore(f);
-                sched_yield();
-                f = sched_irq_save();
-            }
-            sched_reap(r->tid);
+            sched_tid_t rtid = r->tid;
+            spin_unlock(&s_kth_lock);
+            sched_irq_restore(f);
+            while (sched_state(rtid) != TASK_DONE) sched_yield();
+            sched_reap(rtid);
+            f = sched_irq_save();
+            spin_lock(&s_kth_lock);
             r->used = 0;
+            spin_unlock(&s_kth_lock);
             sched_irq_restore(f);
             return 0;
         }
         waitq_add(&r->joiners, sched_current());
-        sched_block_current();
+        sched_prepare_block();
+        spin_unlock(&s_kth_lock);
+        sched_commit_block();
         sched_irq_restore(f);
     }
 }
 
 void kthread_exit(void) {
+    int wake_list[WAITQ_MAX];
+    int wn = 0;
     uint64_t f = sched_irq_save();
+    spin_lock(&s_kth_lock);
     sched_tid_t self = sched_current();
     kthread_rec_t *r = kthread_rec(self);
     if (r) {
         r->done = 1;
         int w;
-        while ((w = waitq_pop(&r->joiners)) >= 0) sched_wake(w);
+        while ((w = waitq_pop(&r->joiners)) >= 0 && wn < WAITQ_MAX)
+            wake_list[wn++] = w;
     }
+    spin_unlock(&s_kth_lock);
+    for (int i = 0; i < wn; i++) sched_wake(wake_list[i]);
     (void)f;
     sched_exit();
 }

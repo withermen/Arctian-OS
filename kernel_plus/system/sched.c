@@ -27,6 +27,7 @@ typedef struct sched_task {
     int32_t next_q;               /* kuyrukta sonraki task indexi, -1 = yok */
     uint8_t in_q;                 /* bir kuyruga bagli mi (tek kuyruk garantisi) */
     uint8_t stack_heap;           /* C4: yigin heap'ten ayrildi (reap'ta kfree) */
+    volatile uint8_t on_cpu;      /* SMP: su an bir CPU'nun yigininda aktif */
     uint32_t bound_cpu;           /* bulundugu kuyruk (CPU indexi) */
 } sched_task_t;
 
@@ -44,8 +45,11 @@ typedef struct {
 } runq_t;
 
 extern void arctian_sched_switch(uint64_t *from_rsp, uint64_t *to_rsp,
-                                 void *from_fpu, void *to_fpu);
+                                 void *from_fpu, void *to_fpu,
+                                 volatile uint8_t *from_on_cpu);
 extern void arctian_task_entry(void);
+
+static spinlock_t s_tasks_lock = SPINLOCK_INIT;
 
 /* Paket 7 yardimcilari (tanitularlari asagida; kendine-yonetim yollari
  * sleep/exit/yield bunlari erken kullaniyor). */
@@ -171,6 +175,11 @@ static int steal_runq_locked(uint32_t self) {
         spin_lock(&vq->lock);
         while ((cand = rq_pop_locked(vq)) >= 0) {
             if (s_tasks[cand].state == TASK_READY) {
+                if (__atomic_load_n(&s_tasks[cand].on_cpu, __ATOMIC_ACQUIRE)) {
+                    /* Hala eski CPU yiginindan inmemis: kuyruga geri koy ve gec. */
+                    rq_push_locked(vq, cand);
+                    break;
+                }
                 s_tasks[cand].state = TASK_CARRY;
                 s_tasks[cand].bound_cpu = self;
                 got = cand;
@@ -196,8 +205,15 @@ void sched_irq_restore(uint64_t flags) {
 }
 
 static void sched_switch_to(sched_task_t *from, sched_task_t *to) {
+    if (to >= &s_tasks[0] && to < &s_tasks[SCHED_TASK_HARD_CAP]) {
+        while (__atomic_load_n(&to->on_cpu, __ATOMIC_ACQUIRE))
+            __asm__ volatile("pause" ::: "memory");
+        __atomic_store_n(&to->on_cpu, 1, __ATOMIC_RELEASE);
+    }
+    volatile uint8_t *rel = (from >= &s_tasks[0] && from < &s_tasks[SCHED_TASK_HARD_CAP])
+                            ? &from->on_cpu : 0;
     if (to->cr3 && to->cr3 != from->cr3) vmm_switch(to->cr3);
-    arctian_sched_switch(&from->rsp, &to->rsp, from->fpu, to->fpu);
+    arctian_sched_switch(&from->rsp, &to->rsp, from->fpu, to->fpu, rel);
 }
 
 static void schedule(void) {
@@ -209,17 +225,18 @@ static void schedule(void) {
     for (uint32_t k = 1; k < cap; k++) {
         int idx = (int)((cur->id + k) % cap);
         sched_task_t *t = &s_tasks[idx];
-        /* Baska bir CPU'nun kuyrugunda duran READY gorevi BSP secmez:
-         * sahibi olan AP'nin tik'i gelir; ikili calisma yarisi olurdu.
-         * Tek CPU sistemi etkilemez (bound_cpu hep 0). */
+        /* Baska bir CPU'ya bagli ya da baska CPU yigininda aktif gorevi
+         * BSP secmez (ikili calisma yarisi). Tek CPU'da bound_cpu=0. */
         if (t->state != TASK_READY) continue;
-        if (t->in_q && t->bound_cpu != 0) continue;
+        if (t->bound_cpu != 0) continue;
+        if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) continue;
         next = t;
         break;
     }
 
     if (!next) {
-        if (cur->state != TASK_RUNNING && s_tasks[0].state == TASK_READY)
+        if (cur->state != TASK_RUNNING && s_tasks[0].state == TASK_READY &&
+            !__atomic_load_n(&s_tasks[0].on_cpu, __ATOMIC_ACQUIRE))
             next = &s_tasks[0];
         if (!next) return;
     }
@@ -242,8 +259,11 @@ void sched_tick(void) {
         sched_task_t *t = &s_tasks[i];
         if (t->state == TASK_BLOCKED &&
             (int32_t)(s_tick - t->wake_tick) >= 0) {
-            t->state = TASK_READY;
-            rq_enqueue_bound(i);   /* AP kuyruklari icin; cpu0 ayna kayd */
+            int exp = TASK_BLOCKED;
+            if (__atomic_compare_exchange_n(&t->state, &exp, TASK_READY, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+                rq_enqueue_bound(i);   /* AP kuyruklari icin; cpu0 ayna kayit */
+            }
         }
     }
 
@@ -272,11 +292,8 @@ void sched_sleep_ms(uint32_t ms) {
     if (!me) return;
     uint64_t f = sched_irq_save();
     me->wake_tick = s_tick + ms;
-    me->state = TASK_BLOCKED;
-    if (sched_self_cpu() == 0) schedule();
-    else sched_pick_local();
-    while (me->state == TASK_BLOCKED)
-        __asm__ volatile("sti; hlt" ::: "memory");
+    __atomic_store_n(&me->state, TASK_BLOCKED, __ATOMIC_RELEASE);
+    sched_commit_block();
     sched_irq_restore(f);
 }
 
@@ -284,9 +301,19 @@ void sched_exit(void) {
     sched_task_t *me = sched_self_current();
     if (!me) return;
     uint64_t f = sched_irq_save();
-    me->state = TASK_DONE;
-    if (sched_self_cpu() == 0) schedule();
-    else sched_pick_local();
+    __atomic_store_n(&me->state, TASK_DONE, __ATOMIC_RELEASE);
+    uint32_t ci = sched_self_cpu();
+    if (ci == 0) {
+        schedule();
+    } else {
+        if (sched_pick_local() < 0) {
+            /* AP'de baska gorev yok: biten gorevin yiginindan inip AP idle
+             * dongusune don; boylece on_cpu=0 olur ve reap guvenle kfree yapar. */
+            percpu_t *p = percpu_by_index(ci);
+            if (p) { p->current_task = 0; p->idle = true; }
+            sched_switch_to(me, &s_ap_idle[ci]);
+        }
+    }
     sched_irq_restore(f);
     for (;;) __asm__ volatile("hlt");
 }
@@ -300,10 +327,16 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     if (!s_ready || !fn) return -1;
     uint64_t f = sched_irq_save();
 
+    spin_lock(&s_tasks_lock);
     int idx = -1;
     for (uint32_t i = 1; i < s_capacity; i++) {
-        if (s_tasks[i].state == TASK_UNUSED) { idx = (int)i; break; }
+        if (s_tasks[i].state == TASK_UNUSED) {
+            idx = (int)i;
+            s_tasks[i].state = TASK_CARRY;   /* baska CPU ayni yuvayi almasin */
+            break;
+        }
     }
+    spin_unlock(&s_tasks_lock);
     if (idx < 0) { sched_irq_restore(f); return -1; }
 
     sched_task_t *t = &s_tasks[idx];
@@ -315,6 +348,7 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
          * durust -1 olarak yansir (eskiden 8. gorev sessizce reddedilirdi;
          * simdi kapasite dolunca da ayni sekilde). */
         if (!ram_gate_ok(SCHED_STACK_SIZE)) {
+            t->state = TASK_UNUSED;
             sched_irq_restore(f);
             serial_printf("[sched] RED %s: RAM esiği (kullanim %u KB)\n",
                           name ? name : "?", (unsigned)(kmalloc_used() / 1024u));
@@ -322,6 +356,7 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
         }
         base = kmalloc(SCHED_STACK_SIZE);
         if (!base) {
+            t->state = TASK_UNUSED;
             sched_irq_restore(f);
             serial_printf("[sched] RED %s: heap tukendi\n", name ? name : "?");
             return -1;
@@ -355,6 +390,7 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     t->next_q = -1;
     t->in_q = 0;
     t->stack_heap = heap_stack;
+    t->on_cpu = 0;
     /* Dagitim: cevrimici CPU'larda round-robin (C3). Tek CPU eski davranis:
      * bound_cpu=0, runq[0] ayna kayit, legacy tarama secici. */
     uint32_t bound = 0;
@@ -399,34 +435,77 @@ uint64_t sched_current_cr3(void) {
     return vmm_current();
 }
 
-void sched_block_current(void) {
+void sched_prepare_block(void) {
+    if (!s_ready) return;
+    sched_task_t *me = sched_self_current();
+    if (!me) return;
+    me->wake_tick = s_tick + 0x40000000u;
+    __atomic_store_n(&me->state, TASK_BLOCKED, __ATOMIC_RELEASE);
+}
+
+void sched_commit_block(void) {
     if (!s_ready) return;
     sched_task_t *me = sched_self_current();
     if (!me) return;
     uint64_t f = sched_irq_save();
-    if (me->state == TASK_RUNNING) {
-        me->state = TASK_BLOCKED;
-        me->wake_tick = s_tick + 0x40000000u;
+    uint32_t ci = sched_self_cpu();
+    if (ci == 0) {
+        if (__atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED)
+            schedule();
+        while (__atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED)
+            __asm__ volatile("sti; hlt; cli" ::: "memory");
+        if (__atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_READY) {
+            spin_lock(&s_runq[0].lock);
+            if (me->in_q && me->bound_cpu == 0) rq_detach_locked(&s_runq[0], me->id);
+            __atomic_store_n(&me->state, TASK_RUNNING, __ATOMIC_RELEASE);
+            spin_unlock(&s_runq[0].lock);
+        }
+    } else {
+        if (__atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED) {
+            if (sched_pick_local() < 0 &&
+                __atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_BLOCKED) {
+                /* AP'de baska gorev yok: yigindan inip AP idle'a don.
+                 * Uyanma (sched_wake) gelince ap_entry bizi geri secer. */
+                percpu_t *p = percpu_by_index(ci);
+                if (p) { p->current_task = 0; p->idle = true; }
+                sched_switch_to(me, &s_ap_idle[ci]);
+            }
+        }
+        if (__atomic_load_n(&me->state, __ATOMIC_ACQUIRE) == TASK_READY) {
+            uint32_t c2 = sched_self_cpu();
+            spin_lock(&s_runq[c2].lock);
+            if (me->in_q && me->bound_cpu == c2) rq_detach_locked(&s_runq[c2], me->id);
+            __atomic_store_n(&me->state, TASK_RUNNING, __ATOMIC_RELEASE);
+            spin_unlock(&s_runq[c2].lock);
+        }
     }
-    if (sched_self_cpu() == 0) schedule();
-    else sched_pick_local();
-    while (me->state == TASK_BLOCKED)
-        __asm__ volatile("sti; hlt" ::: "memory");
+    sched_irq_restore(f);
+}
+
+void sched_block_current(void) {
+    if (!s_ready) return;
+    uint64_t f = sched_irq_save();
+    sched_prepare_block();
+    sched_commit_block();
     sched_irq_restore(f);
 }
 
 void sched_wake(sched_tid_t tid) {
     if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
-    uint64_t f = sched_irq_save();
-    if (s_tasks[tid].state == TASK_BLOCKED) s_tasks[tid].state = TASK_READY;
-    sched_irq_restore(f);
-    rq_enqueue_bound(tid);   /* AP kuyruklari icin; dedupe in_q ile */
+    int exp = TASK_BLOCKED;
+    if (__atomic_compare_exchange_n(&s_tasks[tid].state, &exp, TASK_READY, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        rq_enqueue_bound(tid);   /* AP kuyruklari icin; dedupe in_q ile */
+    }
 }
 
 void sched_reap(sched_tid_t tid) {
     if (tid <= 0 || tid >= SCHED_TASK_HARD_CAP) return;
     uint64_t f = sched_irq_save();
-    if (s_tasks[tid].state == TASK_DONE) {
+    if (__atomic_load_n(&s_tasks[tid].state, __ATOMIC_ACQUIRE) == TASK_DONE) {
+        /* Gorev AP yiginindan tamamen inene kadar bekle (kfree guvenligi). */
+        while (__atomic_load_n(&s_tasks[tid].on_cpu, __ATOMIC_ACQUIRE))
+            __asm__ volatile("pause" ::: "memory");
         uint32_t bc = s_tasks[tid].bound_cpu;
         if (bc < CPU_MAX_APICS && s_tasks[tid].in_q) {
             spin_lock(&s_runq[bc].lock);
@@ -437,11 +516,13 @@ void sched_reap(sched_tid_t tid) {
          * yiginli) gorevlerde stack_heap=0'dir, dokunulmaz. */
         if (s_tasks[tid].stack_heap && s_tasks[tid].stack_base)
             kfree(s_tasks[tid].stack_base);
-        s_tasks[tid].state = TASK_UNUSED;
+        spin_lock(&s_tasks_lock);
         s_tasks[tid].owner = 0;
         s_tasks[tid].name = 0;
         s_tasks[tid].stack_base = 0;
         s_tasks[tid].stack_heap = 0;
+        __atomic_store_n(&s_tasks[tid].state, TASK_UNUSED, __ATOMIC_RELEASE);
+        spin_unlock(&s_tasks_lock);
     }
     sched_irq_restore(f);
 }
@@ -507,6 +588,7 @@ void sched_init(void) {
         s_tasks[i].next_q = -1;
         s_tasks[i].in_q = 0;
         s_tasks[i].stack_heap = 0;
+        s_tasks[i].on_cpu = 0;
         s_tasks[i].bound_cpu = 0;
     }
     for (uint32_t c = 0; c < CPU_MAX_APICS; c++) {
@@ -515,6 +597,7 @@ void sched_init(void) {
         s_ap_idle[c].state = TASK_UNUSED;
     }
     s_tasks[0].state = TASK_RUNNING;
+    s_tasks[0].on_cpu = 1;
     s_tasks[0].name = "main";
     s_tasks[0].cr3 = vmm_current();
     s_current = &s_tasks[0];
@@ -695,11 +778,9 @@ void sched_tick_local(void) {
         serial_printf("[sched] cpu%u lapic tik aliyor\n", ci);
     if ((n % SCHED_SLICE_TICKS) != 0) return;
 
-    if (sched_pick_local() < 0) {
-        sched_task_t *cur = sched_self_current();
-        if (!cur || cur->state != TASK_RUNNING)
-            __asm__ volatile("sti; hlt" ::: "memory");
-    }
+    /* Kesme icinde sti;hlt yapilmaz (yigin tasmasi); bosta olan AP zaten
+     * ap_entry dongusunde hlt bekler. */
+    sched_pick_local();
 }
 
 /* ---- C3: resched IPI + TLB shootdown (vektor 0x41 / 0x42) ----
