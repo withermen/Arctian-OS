@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Arctian OS C++20 (musl + libstdc++ + libgcc_eh, istisna+RTTI, statik PIE ELF64)
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TC="${ARCTIAN_TOOLCHAIN:-$HOME/arctian-toolchain}"
+[ -f "$TC/env.sh" ] || { echo "Once sdk/toolchain/build-toolchain.sh calistirin" >&2; exit 1; }
+source "$TC/env.sh"
+
+if command -v g++ >/dev/null 2>&1; then
+    CXX_BIN="g++"
+    EXTRA_B=()
+else
+    GCC_MAJ="$(gcc -dumpversion | cut -d. -f1)"
+    CXX_BIN="$TC/host/usr/bin/x86_64-linux-gnu-g++-${GCC_MAJ}"
+    [ -x "$CXX_BIN" ] || CXX_BIN="$TC/host/usr/bin/g++-${GCC_MAJ}"
+    EXTRA_B=(-B "$TC/host/usr/libexec/gcc/x86_64-linux-gnu/${GCC_MAJ}")
+fi
+
+SYS="$ARCTIAN_SYSROOT"
+GLIB="$ARCTIAN_GCC_LIB"
+CINC="$ARCTIAN_CXX_INC"
+
+COMPILE_ONLY=0
+for a in "$@"; do
+    case "$a" in -c|-S|-E) COMPILE_ONLY=1 ;; esac
+done
+
+CXXFLAGS=(
+    "${EXTRA_B[@]}"
+    -m64 -std=c++20 -fPIE -fexceptions -frtti -fno-stack-protector -fno-use-linker-plugin
+    -D_GNU_SOURCE -D_REENTRANT
+    -nostdinc -nostdinc++
+    -isystem "$SCRIPT_DIR/include"
+    -isystem "$REPO_ROOT/include/arctian"
+    -isystem "$CINC"
+    -isystem "$CINC/x86_64-alpine-linux-musl"
+    -isystem "$CINC/backward"
+    -isystem "$GLIB/include"
+    -isystem "$SYS/usr/include"
+)
+
+if [ "$COMPILE_ONLY" -eq 1 ]; then
+    exec "$CXX_BIN" "${CXXFLAGS[@]}" "$@"
+else
+    exec "$CXX_BIN" "${CXXFLAGS[@]}" \
+        -nostdlib -static-pie \
+        -Wl,-z,noexecstack \
+        "$SYS/usr/lib/rcrt1.o" \
+        "$SYS/usr/lib/crti.o" \
+        "$GLIB/crtbeginS.o" \
+        "$@" \
+        -L"$SYS/usr/lib" -L"$GLIB" \
+        -Wl,--start-group -lstdc++ -lm -lc -lgcc -lgcc_eh -Wl,--end-group \
+        "$GLIB/crtendS.o" \
+        "$SYS/usr/lib/crtn.o"
+fi

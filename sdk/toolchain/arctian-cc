@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Arctian OS C (musl, statik PIE ELF64) derleyici sarmalayicisi
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+TC="${ARCTIAN_TOOLCHAIN:-$HOME/arctian-toolchain}"
+[ -f "$TC/env.sh" ] || { echo "Once sdk/toolchain/build-toolchain.sh calistirin" >&2; exit 1; }
+source "$TC/env.sh"
+
+CC_BIN="${ARCTIAN_HOST_CC:-gcc}"
+SYS="$ARCTIAN_SYSROOT"
+GLIB="$ARCTIAN_GCC_LIB"
+
+COMPILE_ONLY=0
+for a in "$@"; do
+    case "$a" in -c|-S|-E) COMPILE_ONLY=1 ;; esac
+done
+
+CFLAGS=(
+    -m64 -fPIE -fno-stack-protector
+    -nostdinc
+    -isystem "$SCRIPT_DIR/include"
+    -isystem "$REPO_ROOT/include/arctian"
+    -isystem "$GLIB/include"
+    -isystem "$SYS/usr/include"
+)
+
+if [ "$COMPILE_ONLY" -eq 1 ]; then
+    exec "$CC_BIN" "${CFLAGS[@]}" "$@"
+else
+    exec "$CC_BIN" "${CFLAGS[@]}" \
+        -nostdlib -static-pie \
+        -Wl,-z,noexecstack \
+        "$SYS/usr/lib/rcrt1.o" \
+        "$SYS/usr/lib/crti.o" \
+        "$GLIB/crtbeginS.o" \
+        "$@" \
+        -L"$SYS/usr/lib" -L"$GLIB" \
+        -Wl,--start-group -lc -lgcc -lgcc_eh -Wl,--end-group \
+        "$GLIB/crtendS.o" \
+        "$SYS/usr/lib/crtn.o"
+fi

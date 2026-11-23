@@ -84,6 +84,7 @@ int  tcp_receive(int conn_id, uint8_t *buf, uint16_t buf_size);
 bool tcp_close(int conn_id);
 void tcp_abort(int conn_id);   /* el sikismasiz/zamanasimli slotu serit */
 int  tcp_state(int conn_id);
+uint32_t tcp_rx_avail(int conn_id);
 void tcp_poll(void);
 void tcp_flush_acks(void);
 bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t length);

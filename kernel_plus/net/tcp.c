@@ -448,6 +448,13 @@ int tcp_state(int conn_id) {
     return tcp_connections[conn_id].state;
 }
 
+uint32_t tcp_rx_avail(int conn_id) {
+    if (!tcp_id_ok(conn_id)) return 0;
+    tcp_connection_t *c = &tcp_connections[conn_id];
+    if (c->state == TCP_STATE_CLOSED) return 0;
+    return c->recv_buf_tail - c->recv_buf_head;
+}
+
 /* F3: SYN/SYN-ACK seceneklerinden window scale olcegini oku (-1 = yok). */
 static int tcp_parse_wscale(const uint8_t *packet, uint16_t hdr_len) {
     uint16_t o = 20;

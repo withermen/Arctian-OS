@@ -84,7 +84,7 @@ COMMON = -std=gnu11 -m64 -ffreestanding -nostdlib -nostartfiles -nodefaultlibs \
          $(VERSION_CFLAGS) $(EXTRA_CFLAGS)
 
 INCLUDES = -Iinclude/arctian -Imain_kernel -Ikernel_plus/drivers -Ikernel_plus/net \
-           -Ikernel_plus/tls \
+           -Ikernel_plus/tls -Ikernel_plus/posix \
            -Ikernel_plus/system -Idesktop \
            -Idesktop/port -Idesktop/theme \
            -Iinstall -Ilib -Ithird_party -Ithird_party/lvgl \
@@ -121,9 +121,10 @@ KP_C = kernel_plus/init.c main_kernel/idt.c main_kernel/isr.c main_kernel/paging
        $(wildcard kernel_plus/drivers/*.c) \
        $(wildcard kernel_plus/net/*.c) \
        $(wildcard kernel_plus/tls/*.c) \
-       $(wildcard kernel_plus/system/*.c)
+       $(wildcard kernel_plus/system/*.c) \
+       $(wildcard kernel_plus/posix/*.c)
 
-KP_ASM = $(sort $(wildcard kernel_plus/system/*.S) kernel_plus/drivers/iwl_fw.S)
+KP_ASM = $(sort $(wildcard kernel_plus/system/*.S) $(wildcard kernel_plus/posix/*.S) kernel_plus/drivers/iwl_fw.S)
 
 # --- mbedTLS (TLS 1.3, Apache-2.0) ---
 MBEDTLS_DIR  = third_party/mbedtls

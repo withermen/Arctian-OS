@@ -41,10 +41,20 @@ uint32_t    sched_total_ticks(void);
 int         sched_selftest(void);
 
 void        sched_prepare_block(void);
+void        sched_prepare_sleep_ms(uint32_t ms);
 void        sched_commit_block(void);
 void        sched_block_current(void);
 void        sched_wake(sched_tid_t tid);
 void        sched_reap(sched_tid_t tid);
+
+/* POSIX / Ring-3 TLS + kernel yigin + thread baglami */
+void        sched_set_fs_base(uint64_t fs_base);
+uint64_t    sched_get_fs_base(void);
+void        sched_set_task_fs_base(sched_tid_t tid, uint64_t fs_base);
+void        sched_set_posix_thr(sched_tid_t tid, void *thr);
+void       *sched_posix_thr_current(void);
+uint64_t    sched_kstack_top_current(void);
+void        sched_set_current_cr3(uint64_t cr3);
 
 /* Paket 7: CPU basina run queue.
  * sched_enqueue_cpu: gorevi o CPU'nun kuyruguna tasir (READY ise kuyruga

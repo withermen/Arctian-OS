@@ -125,7 +125,12 @@ static void proc_thread_main(void *arg) {
     proc_exit(0);
 }
 
+extern int posix_fault_handler(int int_no, uint64_t err, uint64_t cr2, uint64_t rip)
+    __attribute__((weak));
+
 static void proc_fault_handler(int int_no, uint64_t err, uint64_t cr2, uint64_t rip) {
+    if (posix_fault_handler && posix_fault_handler(int_no, err, cr2, rip))
+        return;
     (void)err;
     pcb_t *p = (pcb_t *)sched_owner_current();
     if (!p || p->pid <= s_init_pid || p->state != PROC_RUNNING) return;

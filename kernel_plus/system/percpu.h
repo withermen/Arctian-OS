@@ -13,6 +13,8 @@
  * girdisini tutarken runqueue/timer kilidi alma (ters sira deadlock). */
 
 typedef struct {
+    uint64_t syscall_kstack;    /* 0x00: SYSCALL girisinde aktif gorevin kernel yigini */
+    uint64_t syscall_usp;       /* 0x08: SYSCALL girisinde kullanici RSP gecici alani */
     uint32_t apic_id;
     uint32_t index;             /* s_cpu[] icindeki konum, 0 = BSP */
     bool     online;            /* AP boot tamamlandi mi */
@@ -21,6 +23,9 @@ typedef struct {
     uint32_t preempt_count;     /* >0 iken preemption kapali */
     uint32_t spin_locks_held;   /* bu CPU'nun tuttugu kilit sayisi */
 } percpu_t;
+
+_Static_assert(__builtin_offsetof(percpu_t, syscall_kstack) == 0, "syscall_kstack=0");
+_Static_assert(__builtin_offsetof(percpu_t, syscall_usp) == 8, "syscall_usp=8");
 
 void      percpu_init(void);                    /* BSP'yi kaydeder */
 percpu_t *percpu_by_apic(uint32_t apic_id);

@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include "klog.h"
 #include "recover.h"
+#include "posix_gfx.h"
 
 #define ASI_VERSION 2u
 
@@ -479,6 +480,22 @@ typedef struct {
     void  (*app_exited)(void *body);
 } asi_wlf_t;
 
+/* ---- POSIX Ring-3 ELF64 & Grafik Koprusu ---- */
+typedef struct {
+    int  (*spawn_elf_path)(const char *path, char *const argv[], int argc);
+    int  (*spawn_elf_mem)(const char *name, const uint8_t *elf, uint64_t size,
+                          char *const argv[], int argc);
+    int  (*wait_pid)(int pid, int *exit_code_out);
+    void (*gfx_register_desktop)(
+              void *(*on_open)(int win_id, const char *title, uint32_t w, uint32_t h),
+              void  (*on_blit)(void *handle, int win_id, int32_t x, int32_t y, int32_t w, int32_t h),
+              void  (*on_close)(void *handle));
+    int  (*gfx_copy_rect)(int win_id, uint32_t *dst_argb, uint32_t dst_stride_px,
+                          int32_t x, int32_t y, int32_t w, int32_t h);
+    void (*gfx_push_event)(int win_id, const arctian_gfx_event_t *ev);
+    void (*gfx_drain)(void);
+} asi_posix_t;
+
 typedef struct {
     uint32_t        version;   /* ASI_VERSION */
     asi_console_t  *console;
@@ -500,7 +517,8 @@ typedef struct {
     asi_spool_t    *spool;
     asi_log_t      *log;
     asi_dev_t      *dev;
-    asi_wlf_t      *wlf;      /* B2: izole .wlf yurutucu (EN SONA) */
+    asi_wlf_t      *wlf;      /* B2: izole .wlf yurutucu */
+    asi_posix_t    *posix;    /* Ring-3 POSIX/ELF64 + grafik koprusu (EN SONA) */
 } asi_t;
 
 /* kernel_plus tarafindan doldurulur; tum moduller erisir. */

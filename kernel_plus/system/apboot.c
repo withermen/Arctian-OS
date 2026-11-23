@@ -9,6 +9,7 @@
 #include "clock.h"
 #include "serial.h"
 #include "sched.h"
+#include "posix.h"
 
 _Static_assert(offsetof(ap_params_t, cr3) == 0x00, "cr3 0x8F00'da");
 _Static_assert(offsetof(ap_params_t, entry) == 0x08, "entry 0x8F08'de");
@@ -117,6 +118,7 @@ void ap_entry(uint32_t cpu_index) {
     /* IDT devri: vektor 0x40 kapisi olmadan timer yaklasan #GP -> triple
      * fault; lidt'ten once kesme alinamaz (IF=0), sonra alinabilir. */
     __asm__ volatile ("lidt %0" :: "m"(s_idtr) : "memory");
+    posix_syscall_enable_cpu();
 
     /* Kendi yerel APIC'ini kur: INIT/SIPI APIC state'ini sifirlar, APIC_BASE
      * MSR AP'de EN=0 ile gelir. Timer olmadan AP beslenmez; basarisizlikta

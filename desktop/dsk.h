@@ -817,4 +817,6 @@ void dst_putx(uint32_t v);
 void duckstore_selftest(void);
 void update_selftest(void);
 void *arctian_js_arena(unsigned long *out_size);
+void posix_win_init(void);
+void posix_win_poll_input(void);
 void desktop_main(void *arg);

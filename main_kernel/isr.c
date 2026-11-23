@@ -144,7 +144,7 @@ void isr_handler(registers_t *regs) {
         /* Kisa kayit dokumu: #GP gibi sessiz cokmelerde hangi isaretcinin
          * bozuk oldugunu ve cagiran zinciri tek seri satirindan okumak
          * icin. rsp, az once cozumlenen tuzak cercevesiyle ayni yiginda. */
-        if (int_no != 14) {
+        if (int_no != 14 && (regs->cs & 3u) == 0) {
             serial_puts(" rdi=");
             serial_hex(regs->rdi);
             serial_puts(" rsp=");

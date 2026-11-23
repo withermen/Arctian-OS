@@ -67,6 +67,7 @@
 #include "paging.h"
 #include "wolf_bridge.h"
 #include "wolf.h"
+#include "posix.h"
 
 asi_t *g_asi = 0;
 
@@ -488,6 +489,7 @@ static asi_spool_t s_spool;
 static asi_log_t s_log;
 static asi_dev_t s_dev;
 static asi_wlf_t s_wlf;
+static asi_posix_t s_posix;
 
 /* B2: masaustunun verdigi .wlf imajini izole calistirir. Masaustu CPL0'da
  * ve imaj cekirdek bellekte oldugu icin isaretci dogrulamasi gerekmez;
@@ -795,6 +797,7 @@ void kernel_plus_main(void *arg) {
     cpu_detect();
     cpu_dump();
     percpu_init();
+    posix_init();
     uint32_t ap_ok = apboot_start_all();
     serial_printf("[smp] AP online=%u/%u\n", ap_ok,
                   cpu_info()->apic_count > 0 ? cpu_info()->apic_count - 1 : 0);
@@ -1051,6 +1054,14 @@ void kernel_plus_main(void *arg) {
     s_wlf.event_push = wolf_bridge_event_push;
     s_wlf.broker_drain = wolf_bridge_drain;
     g_asi->wlf = &s_wlf;
+    s_posix.spawn_elf_path = posix_spawn_elf_path;
+    s_posix.spawn_elf_mem = posix_spawn_elf_mem;
+    s_posix.wait_pid = posix_wait_pid_kernel;
+    s_posix.gfx_register_desktop = posix_gfx_register_desktop;
+    s_posix.gfx_copy_rect = posix_gfx_copy_rect;
+    s_posix.gfx_push_event = posix_gfx_push_event;
+    s_posix.gfx_drain = posix_gfx_desktop_drain;
+    g_asi->posix = &s_posix;
 
     caps_init(g_asi);
     g_asi->fs = volfs_install(afs_asi());

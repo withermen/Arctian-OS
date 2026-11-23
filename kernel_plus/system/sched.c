@@ -5,8 +5,17 @@
 #include "paging.h"
 #include "spinlock.h"
 #include "percpu.h"
+#include "percpu_gdt.h"
 #include "lapic.h"
 #include "alloc.h"        /* C4: gorev yiginlari heap'ten */
+
+#define MSR_FS_BASE 0xC0000100u
+
+static inline void sched_wrmsr_fs(uint64_t val) {
+    uint32_t lo = (uint32_t)val;
+    uint32_t hi = (uint32_t)(val >> 32);
+    __asm__ volatile("wrmsr" :: "c"(MSR_FS_BASE), "a"(lo), "d"(hi) : "memory");
+}
 
 #define SCHED_STACK_SIZE   (32u * 1024u)
 #define SCHED_SLICE_TICKS  5u
@@ -21,7 +30,10 @@ typedef struct sched_task {
     uint32_t wake_tick;
     uint64_t switches;
     uint64_t cr3;
+    uint64_t kstack_top;          /* TSS.rsp0 & SYSCALL kernel stack */
+    uint64_t fs_base;             /* x86-64 TLS MSR_FS_BASE */
     void *owner;
+    void *posix_thr;              /* POSIX ring-3 thread baglami */
     uint64_t ticks;
     /* Per-CPU run queue baglanti alanlari (paket 7). */
     int32_t next_q;               /* kuyrukta sonraki task indexi, -1 = yok */
@@ -209,6 +221,14 @@ static void sched_switch_to(sched_task_t *from, sched_task_t *to) {
         while (__atomic_load_n(&to->on_cpu, __ATOMIC_ACQUIRE))
             __asm__ volatile("pause" ::: "memory");
         __atomic_store_n(&to->on_cpu, 1, __ATOMIC_RELEASE);
+        uint32_t ci = sched_self_cpu();
+        if (to->kstack_top) {
+            gdt_set_rsp0(ci, to->kstack_top);
+            percpu_t *pc = percpu_by_index(ci);
+            if (pc) pc->syscall_kstack = to->kstack_top;
+        }
+        if (to->fs_base != from->fs_base)
+            sched_wrmsr_fs(to->fs_base);
     }
     volatile uint8_t *rel = (from >= &s_tasks[0] && from < &s_tasks[SCHED_TASK_HARD_CAP])
                             ? &from->on_cpu : 0;
@@ -379,6 +399,9 @@ static sched_tid_t sched_alloc_task(const char *name, void (*fn)(void *), void *
     ((uint32_t *)t->fpu)[6] = 0x1F80u;
 
     t->rsp = (uint64_t)(uintptr_t)fr;
+    t->kstack_top = (uint64_t)top;
+    t->fs_base = 0;
+    t->posix_thr = 0;
     t->state = TASK_READY;
     t->id = idx;
     t->name = name;
@@ -440,6 +463,14 @@ void sched_prepare_block(void) {
     sched_task_t *me = sched_self_current();
     if (!me) return;
     me->wake_tick = s_tick + 0x40000000u;
+    __atomic_store_n(&me->state, TASK_BLOCKED, __ATOMIC_RELEASE);
+}
+
+void sched_prepare_sleep_ms(uint32_t ms) {
+    if (!s_ready) return;
+    sched_task_t *me = sched_self_current();
+    if (!me) return;
+    me->wake_tick = s_tick + (ms ? ms : 1u);
     __atomic_store_n(&me->state, TASK_BLOCKED, __ATOMIC_RELEASE);
 }
 
@@ -540,6 +571,43 @@ void *sched_owner(sched_tid_t tid) {
 void *sched_owner_current(void) {
     sched_task_t *me = sched_self_current();
     return me ? me->owner : 0;
+}
+
+void sched_set_fs_base(uint64_t fs_base) {
+    sched_task_t *me = sched_self_current();
+    if (me) me->fs_base = fs_base;
+    sched_wrmsr_fs(fs_base);
+}
+
+uint64_t sched_get_fs_base(void) {
+    sched_task_t *me = sched_self_current();
+    return me ? me->fs_base : 0;
+}
+
+void sched_set_task_fs_base(sched_tid_t tid, uint64_t fs_base) {
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
+    s_tasks[tid].fs_base = fs_base;
+}
+
+void sched_set_posix_thr(sched_tid_t tid, void *thr) {
+    if (tid < 0 || tid >= SCHED_TASK_HARD_CAP) return;
+    s_tasks[tid].posix_thr = thr;
+}
+
+void *sched_posix_thr_current(void) {
+    sched_task_t *me = sched_self_current();
+    return me ? me->posix_thr : 0;
+}
+
+uint64_t sched_kstack_top_current(void) {
+    sched_task_t *me = sched_self_current();
+    return me ? me->kstack_top : 0;
+}
+
+void sched_set_current_cr3(uint64_t cr3) {
+    sched_task_t *me = sched_self_current();
+    if (me) me->cr3 = cr3;
+    if (cr3) vmm_switch(cr3);
 }
 
 sched_tid_t sched_current(void) {

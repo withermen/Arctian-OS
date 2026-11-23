@@ -3062,6 +3062,110 @@ static void sh_run(asi_t *asi, const char *raw) {
     term_flush();
 }
 
+static void cmd_dl(asi_t *asi, const char *arg) {
+    if (!asi || !asi->net || !asi->net->download || !asi->fs || !asi->mem) {
+        term_puts("Ag/FS servisi yok\n");
+        return;
+    }
+    while (*arg == ' ') arg++;
+    char url[256], outp[192];
+    int ui = 0, oi = 0;
+    while (*arg && *arg != ' ' && ui < 255) url[ui++] = *arg++;
+    url[ui] = 0;
+    while (*arg == ' ') arg++;
+    while (*arg && *arg != ' ' && oi < 191) outp[oi++] = *arg++;
+    outp[oi] = 0;
+    if (!url[0] || !outp[0]) {
+        term_puts("Kullanim: dl <url> <dosya>\n");
+        return;
+    }
+    uint32_t cap = 4u * 1024u * 1024u;
+    void *buf = asi->mem->alloc(cap);
+    if (!buf) { term_puts("Bellek yetersiz\n"); return; }
+    uint32_t len = 0;
+    int rc = asi->net->download(url, buf, cap, &len);
+    if (rc != 0) {
+        asi->mem->free(buf);
+        term_puts("Indirme hatasi\n");
+        return;
+    }
+    /* Yol -> dizin + ad */
+    int sl = -1;
+    for (int i = 0; outp[i]; i++) if (outp[i] == '/') sl = i;
+    char dir[192], nm[96];
+    if (sl >= 0) {
+        int dl = sl;
+        if (dl == 2 && outp[1] == ':') dl = 3;
+        for (int i = 0; i < dl && i < 191; i++) dir[i] = outp[i];
+        dir[dl] = 0;
+        cstr_copy(nm, sizeof(nm), outp + sl + 1);
+    } else {
+        cstr_copy(dir, sizeof(dir), g_cwd);
+        cstr_copy(nm, sizeof(nm), outp);
+    }
+    void *h = asi->fs->create_in(dir, nm, 0);
+    if (!h || asi->fs->write(h, buf, len) != 0) {
+        asi->mem->free(buf);
+        term_puts("Kayit hatasi\n");
+        return;
+    }
+    asi->mem->free(buf);
+    term_puts("Indirildi: "); term_puts(outp);
+    term_puts(" ("); term_put_uint(len); term_puts(" bayt)\n");
+}
+
+static void cmd_elfrun(asi_t *asi, const char *arg) {
+    if (!asi || !asi->posix || !asi->posix->spawn_elf_path) {
+        term_puts("POSIX/ELF64 yukleyici yok\n");
+        return;
+    }
+    while (*arg == ' ') arg++;
+    if (!arg[0]) {
+        term_puts("Kullanim: elfrun <dosya.elf> [arg1 ...]\n");
+        return;
+    }
+    char buf[256];
+    cstr_copy(buf, sizeof(buf), arg);
+    char *argv[16];
+    int argc = 0;
+    char *p = buf;
+    while (*p && argc < 15) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        argv[argc++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = 0;
+    }
+    argv[argc] = 0;
+    if (argc == 0) return;
+
+    char full[192];
+    if (argv[0][0] == '/' || (argv[0][1] == ':' && argv[0][2] == '/')) {
+        cstr_copy(full, sizeof(full), argv[0]);
+    } else {
+        cstr_copy(full, sizeof(full), g_cwd);
+        int l = slen(full);
+        if (l > 0 && full[l - 1] != '/' && l + 1 < (int)sizeof(full)) {
+            full[l++] = '/'; full[l] = 0;
+        }
+        int i = 0;
+        while (argv[0][i] && l + 1 < (int)sizeof(full)) full[l++] = argv[0][i++];
+        full[l] = 0;
+    }
+    argv[0] = full;
+
+    int pid = asi->posix->spawn_elf_path(full, argv, argc);
+    if (pid < 0) {
+        term_puts("ELF baslatilamadi: ");
+        term_puts(full);
+        term_putc('\n');
+        return;
+    }
+    term_puts("ELF baslatildi (PID ");
+    term_put_uint((uint32_t)pid);
+    term_puts(")\n");
+}
+
 static void cmd_shelltest(void) {
     char buf[1024];
     int ok = 1;
@@ -3171,6 +3275,7 @@ static void term_exec(asi_t *asi, const char *cmd) {
         term_puts("  tree [derinlik]      klasor agaci\n");
         term_puts("  stat <dosya>         boyut/tur/izin bilgisi\n");
         term_puts("  wf ...               Wolf uygulama platformu (.wlf) — wf help\n");
+        term_puts("  elfrun <elf> [arg]   Ring-3 POSIX ELF64 ikilisi calistir\n");
         term_puts("  touch <dosya>        bos dosya olustur\n");
         term_puts("  trash <dosya>        Cop Kutusu'na tasi (geri alinabilir)\n");
         term_puts("  cd <klasor>          klasor degistir\n");
@@ -3304,6 +3409,10 @@ static void term_exec(asi_t *asi, const char *cmd) {
         cmd_wolfdok(arg);
     } else if (str_eq(name, "wf")) {
         cmd_wf(arg);
+    } else if (str_eq(name, "dl")) {
+        cmd_dl(asi, arg);
+    } else if (str_eq(name, "elfrun")) {
+        cmd_elfrun(asi, arg);
     } else if (str_eq(name, "pkg")) {
         cmd_pkg(arg);
     } else if (str_eq(name, "date")) {

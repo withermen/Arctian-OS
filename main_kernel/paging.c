@@ -30,23 +30,70 @@ static void zero_frame(uint64_t phys) {
     for (int i = 0; i < 512; i++) p[i] = 0;
 }
 
+static volatile uint32_t s_vmm_lock;
+
+static inline uint64_t vmm_lock_acq(void) {
+    uint64_t f;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(f) :: "memory");
+    while (__atomic_exchange_n(&s_vmm_lock, 1u, __ATOMIC_ACQUIRE))
+        __asm__ volatile("pause" ::: "memory");
+    return f;
+}
+
+static inline void vmm_lock_rel(uint64_t f) {
+    __atomic_store_n(&s_vmm_lock, 0u, __ATOMIC_RELEASE);
+    if (f & 0x200ull) __asm__ volatile("sti" ::: "memory");
+}
+
+static inline uint16_t *vmm_refs(void) {
+    return (uint16_t *)(uintptr_t)VMM_REFCOUNT_ADDR;
+}
+
+static inline int vmm_frame_idx(uint64_t phys) {
+    if (phys < (uint64_t)VMM_FRAMES_BASE) return -1;
+    uint64_t idx = (phys - (uint64_t)VMM_FRAMES_BASE) >> 12;
+    if (idx >= 32768u) return -1;
+    return (int)idx;
+}
+
 uint64_t vmm_alloc_frame(void) {
     vmm_state_t *st = VMM_STATE;
     if (!st->ready) return 0;
+    uint64_t f = vmm_lock_acq();
+    uint64_t p = 0;
     if (st->free_head) {
-        uint64_t p = st->free_head;
+        p = st->free_head;
         st->free_head = *(uint64_t *)(uintptr_t)p;
         st->frames_free--;
         st->frames_used++;
-        zero_frame(p);
-        return p;
+    } else if (st->next_frame + 0x1000 <= st->pool_end) {
+        p = st->next_frame;
+        st->next_frame += 0x1000;
+        st->frames_used++;
     }
-    if (st->next_frame + 0x1000 > st->pool_end) return 0;
-    uint64_t p = st->next_frame;
-    st->next_frame += 0x1000;
-    st->frames_used++;
-    zero_frame(p);
+    if (p) {
+        int idx = vmm_frame_idx(p);
+        if (idx >= 0) vmm_refs()[idx] = 1;
+    }
+    vmm_lock_rel(f);
+    if (p) zero_frame(p);
     return p;
+}
+
+void vmm_frame_ref(uint64_t phys) {
+    vmm_state_t *st = VMM_STATE;
+    if (!st->ready || !phys || (phys & 0xFFFull)) return;
+    int idx = vmm_frame_idx(phys);
+    if (idx < 0) return;
+    uint64_t f = vmm_lock_acq();
+    if (vmm_refs()[idx] < 0xFFFEu) vmm_refs()[idx]++;
+    vmm_lock_rel(f);
+}
+
+uint16_t vmm_frame_refcount(uint64_t phys) {
+    int idx = vmm_frame_idx(phys);
+    if (idx < 0) return 0;
+    return vmm_refs()[idx];
 }
 
 void vmm_free_frame(uint64_t phys) {
@@ -54,10 +101,21 @@ void vmm_free_frame(uint64_t phys) {
     if (!st->ready || !phys) return;
     if (phys < (uint64_t)VMM_FRAMES_BASE || phys >= st->pool_end) return;
     if (phys & 0xFFFull) return;
+    uint64_t f = vmm_lock_acq();
+    int idx = vmm_frame_idx(phys);
+    if (idx >= 0) {
+        if (vmm_refs()[idx] > 1) {
+            vmm_refs()[idx]--;
+            vmm_lock_rel(f);
+            return;
+        }
+        vmm_refs()[idx] = 0;
+    }
     *(uint64_t *)(uintptr_t)phys = st->free_head;
     st->free_head = phys;
     st->frames_free++;
     if (st->frames_used) st->frames_used--;
+    vmm_lock_rel(f);
 }
 
 void vmm_mem_info(vmm_meminfo_t *out) {
@@ -87,6 +145,8 @@ void vmm_init(void) {
     }
 
     zero_frame(VMM_STATE_ADDR);
+    for (uint64_t a = (uint64_t)VMM_REFCOUNT_ADDR; a < (uint64_t)VMM_FRAMES_BASE; a += 0x1000)
+        zero_frame(a);
     st->magic = VMM_MAGIC;
     st->next_frame = (uint64_t)VMM_FRAMES_BASE;
     st->pool_end = (uint64_t)VMM_POOL_BASE + (uint64_t)VMM_POOL_SIZE;
@@ -187,6 +247,45 @@ int vmm_unmap(vmm_space_t sp, uint64_t va) {
      * (boot) imajda sembol NULL, tek CPU'da gerek yok. */
     if (smp_tlb_shootdown_all) smp_tlb_shootdown_all();
     return 0;
+}
+
+int vmm_protect(vmm_space_t sp, uint64_t va, uint64_t flags) {
+    if (!sp || (va & 0xFFFull)) return -1;
+    uint64_t *pml4 = tbl(sp);
+    int i4 = (int)((va >> 39) & 0x1FF);
+    int i3 = (int)((va >> 30) & 0x1FF);
+    int i2 = (int)((va >> 21) & 0x1FF);
+    int i1 = (int)((va >> 12) & 0x1FF);
+
+    if (!(pml4[i4] & VMM_PTE_P) || (pml4[i4] & VMM_PTE_HUGE)) return -1;
+    uint64_t *pdpt = tbl(pml4[i4] & VMM_ADDR_MASK);
+    if (!(pdpt[i3] & VMM_PTE_P) || (pdpt[i3] & VMM_PTE_HUGE)) return -1;
+    uint64_t *pd = tbl(pdpt[i3] & VMM_ADDR_MASK);
+    if (!(pd[i2] & VMM_PTE_P) || (pd[i2] & VMM_PTE_HUGE)) return -1;
+    uint64_t *pt = tbl(pd[i2] & VMM_ADDR_MASK);
+    if (!(pt[i1] & VMM_PTE_P)) return -1;
+    uint64_t pa = pt[i1] & VMM_ADDR_MASK;
+    pt[i1] = pa | flags | VMM_PTE_P;
+    invlpg(va);
+    if (smp_tlb_shootdown_all) smp_tlb_shootdown_all();
+    return 0;
+}
+
+uint64_t vmm_get_pte(vmm_space_t sp, uint64_t va) {
+    if (!sp) return 0;
+    uint64_t *pml4 = tbl(sp);
+    uint64_t e = pml4[(int)((va >> 39) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || (e & VMM_PTE_HUGE)) return 0;
+    uint64_t *pdpt = tbl(e & VMM_ADDR_MASK);
+    e = pdpt[(int)((va >> 30) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || (e & VMM_PTE_HUGE)) return 0;
+    uint64_t *pd = tbl(e & VMM_ADDR_MASK);
+    e = pd[(int)((va >> 21) & 0x1FF)];
+    if (!(e & VMM_PTE_P) || (e & VMM_PTE_HUGE)) return 0;
+    uint64_t *pt = tbl(e & VMM_ADDR_MASK);
+    e = pt[(int)((va >> 12) & 0x1FF)];
+    if (!(e & VMM_PTE_P)) return 0;
+    return e;
 }
 
 void vmm_switch(vmm_space_t sp) {

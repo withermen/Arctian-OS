@@ -103,6 +103,23 @@ int vmm_space_unmap_user(vmm_space_t sp, uint64_t va) {
     return vmm_unmap(sp, va);
 }
 
+int vmm_space_protect_user(vmm_space_t sp, uint64_t va, uint64_t flags) {
+    uint64_t pte_flags;
+    if (!sp || (va & 0xFFFull)) return -1;
+    if (!vmm_space_user_range(va, 0x1000)) return -1;
+    pte_flags = flags & (VMM_PTE_W | VMM_PTE_PWT | VMM_PTE_PCD | VMM_PTE_NX);
+    if ((pte_flags & VMM_PTE_NX) && !vmm_space_nx_ok())
+        pte_flags &= ~VMM_PTE_NX;
+    pte_flags |= VMM_PTE_P | VMM_PTE_U;
+    return vmm_protect(sp, va, pte_flags);
+}
+
+uint64_t vmm_space_get_user_pte(vmm_space_t sp, uint64_t va) {
+    if (!sp || (va & 0xFFFull)) return 0;
+    if (!vmm_space_user_range(va, 0x1000)) return 0;
+    return vmm_get_pte(sp, va);
+}
+
 void vmm_space_destroy(vmm_space_t sp) {
     vmm_state_t *st = VMM_STATE;
     uint64_t *pml4;

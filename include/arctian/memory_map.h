@@ -67,8 +67,9 @@
 #define VMM_USER_BASE           0x0000008000000000ull
 #define VMM_USER_PML4_INDEX     1u
 #define VMM_POOL_BASE           0x0A000000u
-#define VMM_POOL_SIZE           (64u * 1024u * 1024u)
+#define VMM_POOL_SIZE           (96u * 1024u * 1024u)
 #define VMM_STATE_ADDR          0x0A000000u
-#define VMM_FRAMES_BASE         0x0A001000u
+#define VMM_REFCOUNT_ADDR       0x0A001000u   /* 64 KB: 32768 x uint16_t refcount */
+#define VMM_FRAMES_BASE         0x0A011000u
 
 #endif /* ARCTIAN_MEMORY_MAP_H */
