@@ -3,10 +3,63 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
-## 0.9 (devam ediyor) — UEFI iskeleti, DPI ölçekleme ve SMP
+## 0.9.2 (geliştirme devam ediyor) — POSIX/C++20, B3 İzolasyonu ve Ağ Hızlandırma
 
-Bu bölüm 0.9 dalgasında tamamlanan altyapıyı toplar; sürüm yayınlanana kadar
-maddeler değişebilir. Test kapsamı için [docs/0.9-durum.md](docs/0.9-durum.md).
+Sürüm `version.json` üzerinden `0.9.2`'dedir (1.0 yayınlanmadan önce altyapı ve belgelendirme
+tamamlanmaktadır). Güncel durum tablosu: [docs/1.0-durum.md](docs/1.0-durum.md) ve
+[docs/1.0-yol-haritasi.md](docs/1.0-yol-haritasi.md).
+
+**Ring-3 POSIX & C++20 Alt Sistemi (`kernel_plus/posix/`, `sdk/toolchain/`)**
+
+- `SYSCALL/SYSRET` (`EFER.SCE`, `STAR`, `LSTAR`, `FMASK`, `KERNEL_GS_BASE`) Linux x86-64 System V ABI
+  dağıtıcısı; mevcut `int 0x80` `.wlf` yolunu bozmadan birlikte çalışır.
+- ELF64 yükleyici (`ET_DYN` statik PIE + `ET_EXEC`), `fork`/`vfork`, `execve`, `wait4`, `exit_group`
+  ve terminalde `elfrun <dosya.elf>` komutu.
+- Sanal bellek: `mmap` (anonim, dosya, `MAP_SHARED` sayfa refcount), `munmap`, `mprotect`
+  (`PROT_EXEC` JIT uyumlu), `brk`.
+- İş parçacıkları & senkronizasyon: `clone`, `arch_prctl(ARCH_SET_FS)` TLS, `futex` (`WAIT`/`WAKE`),
+  `libstdc++` `std::thread`, `mutex`, `condition_variable` ve POSIX `sem_t`.
+- Çapraz araç zinciri (`sdk/toolchain/`): Alpine v3.21 pure-musl 1.2.5 + `libstdc++` 14.2 (C++20,
+  istisnalar ve RTTI destekli) + `arctian-cc` / `arctian-cxx`.
+- Dosya, zaman & olaylar: `openat`, `pipe2`, `dup2`/`dup3`, `fcntl(O_NONBLOCK)`, `getdents64`,
+  `poll`/`ppoll`, `epoll_create1`/`epoll_ctl`/`epoll_wait`, `clock_gettime`, `nanosleep`, `getrandom`.
+- Soket & IPC: `AF_UNIX` (`socketpair`, `SCM_RIGHTS`, `bind`/`listen`/`accept`) ve `AF_INET`
+  TCP (`getaddrinfo`, non-blocking + `epoll`).
+- Paylaşımlı grafik & girdi köprüsü (`posix_gfx.c`, `desktop/posix_win.c`, `arctian/gfx.h`):
+  ARGB8888 `mmap` pencere tamponu, `present_rect` ve fare/klavye/tekerlek/kapanma olay akışı.
+- Doğrulama: `tests/posix/test_suite.cpp` **23/23 PASS**, `EXC=0`.
+
+**`.wlf` B3 Ring-3 GUI İzolasyonu**
+
+- Native GUI `.wlf` uygulamaları ayrı CR3 / Ring-3 alanında çalışır: kullanıcı uzayında
+  94-API `wolf_api_t` trampoline köprüsü, `SYS_WOLF_CALL`/`SYS_WOLF_WAIT`, LVGL masaüstü broker
+  kuyruğu ve `wolf_main` dönüş kancalı olay döngüsü (mevcut paketler yeniden derlenmeden çalışır).
+
+**Ağ Performansı**
+
+- 4 MB HTTP indirme QEMU'da **76 sn (55 KB/sn) → 1,11 sn (3,77 MB/sn, 68× hızlanma)**.
+- TCP: 256 KB dairesel alıcı halkası (sıfır `memmove`), SYN `MSS=1460` + RFC 7323 pencere ölçekleme
+  (`shift=3`), 32-bit `peer_window`, birleştirilmiş ACK.
+- e1000: 128 RX / 32 TX halka, toplu RDT (16'lı) ve ITR=256µs, `netbg` 16 ms yield, bekleme
+  döngülerinde `sched_sleep_ms(1)`.
+- TLS: CPUID leaf1 ECX bit25 AES-NI çalışma zamanı şifre sırası (TCG'de ChaCha20, AES-NI'da AES-GCM).
+
+**SMP, Önyükleme, Giriş & Güvenlik**
+
+- `-smp 4` `mutex`/`sem`/`pipe`/`mq`/`kthread` yarış koşulları kapatıldı (`on_cpu` yığın koruması,
+  AP `s_ap_idle`), `lib/serial.c` IRQ-güvenli spinlock eklendi (`EXC=0`).
+- UEFI Paket 3: OVMF altında GOP + ACPI RSDP (`0x7100`) + ESP'den `KERNEL.ELF` + `ExitBootServices`
+  ile 64-bit çekirdeğe atlama doğrulandı.
+- Giriş ekranları (`giris.md`) Manrope TTF fontlarıyla iki ekran akışına geçirildi; öz-testler
+  `SELFTEST=1` / `WFL_SELFTEST=1` bayraklarına ayrıldı; `rtc.c` CMOS kilidi eklendi.
+- `build.bat` ext4 kopya derleme (`tools/build-release.sh`); QuickJS tamamen kaldırıldı (`wolf_engine`
+  yer tutucu ABI stub'a indirildi); `tools/sig_keygen.py` (`secrets.SystemRandom`) ile RSA-2048
+  anahtar çifti yenilendi.
+
+## 0.9 — UEFI iskeleti, DPI ölçekleme ve SMP
+
+Bu bölüm 0.9 dalgasında tamamlanan altyapıyı toplar. Güncel 1.0 hazırlık durumu için
+[docs/1.0-durum.md](docs/1.0-durum.md) (arşiv: [docs/0.9-durum.md](docs/0.9-durum.md)).
 
 **UEFI ve grafik**
 

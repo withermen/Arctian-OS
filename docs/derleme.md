@@ -2,27 +2,31 @@
 
 ## Gerekenler
 
-Derleme Linux araç zinciri ister (gcc'nin freestanding çıktı vermesi, `ld`/`objcopy` ile
-`elf_x86_64` bağlanması, `xorriso` ile ISO üretimi). Windows'ta desteklenen yol **WSL
-üzerinden Debian**'dır.
+Derleme Linux araç zinciri ister (freestanding `gcc`, `ld`/`objcopy`, `nasm`, `xorriso`).
+Windows'ta desteklenen yol **WSL üzerinden Debian**'dır.
+
+> **Önemli (WSL/9P notu):** Windows diskindeki (`/mnt/c/...`) klasörde doğrudan derleme yapmak
+> yüzlerce nesne dosyasında 9P kilitlenmesine (D-state) yol açabilir. Bu nedenle `build.bat` ve
+> geliştirici derlemeleri WSL içindeki yerel bir ext4 kopyasına (`$HOME/arctian-build`) rsync
+> yaparak derler ve üretilen imajları geri kopyalar.
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential nasm binutils python3 xorriso file
-sudo apt install -y qemu-system-x86            # denemek istersen
+sudo apt install -y build-essential nasm binutils python3 xorriso file rsync
+sudo apt install -y qemu-system-x86 ovmf       # QEMU ve UEFI testi için (isteğe bağlı)
 ```
 
 | Araç | Ne için |
 |---|---|
-| `gcc` (freestanding) | tüm C kodu; `-nostdlib` ile bağlanır |
-| `nasm` | `boot/*.asm` önyükleyici aşamaları |
+| `gcc` (freestanding) | çekirdek ve modül C kodu; `-nostdlib` ile bağlanır |
+| `nasm` | `boot/*.asm` önyükleyici aşamaları ve `isr.asm` / `ring3_user.asm` |
 | `ld`, `objcopy` | modül ELF'leri → düz `.bin`; `--wrap=lv_obj_send_event` |
-| `python3` | paketleyici, imzacı, font/duvar kağıdı üreticileri |
+| `python3` | paketleyici, imzacı, font/duvar kağıdı/uygulama üreticileri |
 | `xorriso` | El Torito önyüklenebilir ISO |
-| `qemu-system-x86_64` | çalıştırma / kurulum testi (isteğe bağlı) |
+| `qemu-system-x86_64` | BIOS/UEFI çalıştırma ve kurulum testi (isteğe bağlı) |
 
-Üçüncü parti bağımlılık gerekmez: LVGL ve mbedTLS depoya **vendored**
-edilmiştir ([third_party/README.md](../third_party/README.md)).
+Üçüncü parti bağımlılık gerekmez: LVGL ve mbedTLS depoya **vendored** edilmiştir
+([third_party/README.md](../third_party/README.md)).
 
 ## Windows: tek adım
 
@@ -30,15 +34,15 @@ edilmiştir ([third_party/README.md](../third_party/README.md)).
 build.bat
 ```
 
-Betik şunları yapar: WSL Debian dağıtımının var olduğunu doğrular, proje kökünü `wslpath` ile
-çevirir, `make -j4` çalıştırır ve **çıktıyı doğrular**: disk imajı var mı, ISO bu derlemeden
-sonra yenilenmiş mi (işaret dosyasıyla karşılaştırır). RC=0 tek başına yeterli sayılmaz; ISO
-eksikse `[HATA]` ile RC=1 döner.
+Betik `tools/build-release.sh` aracılığıyla WSL Debian ortamını doğrular, depoyu yerel ext4
+dizinine (`$HOME/arctian-build`) senkronize eder, `make -j8 pack` çalıştırır ve çıkan
+`build\arctian.iso` / `build\arctian.img` dosyalarını tazelik denetimiyle geri kopyalar.
 
 ## Linux / WSL: doğrudan make
 
 ```sh
-make            # tüm modüller + imaj + ISO  (varsayılan hedef: all -> pack)
+make            # tüm modüller + imaj + ISO (varsayılan hedef: all -> pack)
+make efi        # UEFI önyükleyici imajı (build/BOOTX64.EFI)
 make qemu-iso   # ISO'dan önyükleme (CD-ROM)
 make qemu       # disk imajından önyükleme
 make debug      # kurulum + hesap ekranlarını atlayan geliştirme imajı (arctian-debug.iso)
@@ -56,22 +60,54 @@ build/obj-<hash>/   nesne dosyaları (bayrak kümesinin md5 ön eki)
 Nesne dizini derleme bayraklarına göre adlandırılır (`FLAGS_HASH`): `DEBUG=1` ile `DEBUG=0`
 aynı anda bozulmadan durur, karışık nesnelerden imaj üretilmez.
 
-## Derleme bayrakları
+## Derleme bayrakları ve test hedefleri
 
 | Değişken | Etkisi |
 |---|---|
-| `DEBUG=1` | açılış logları + otomatik kullanıcı (kurulum/hesap ekranları atlanır) |
+| `DEBUG=1` | açılış logları + otomatik kullanıcı (`ARCTIAN_DEBUG_BOOT`, `ARCTIAN_AUTOUSER`) |
+| `SELFTEST=1` | çekirdek `sched`/`proc`/`caps`/`afs`/`lab` + SMP öz-testleri |
+| `WFL_SELFTEST=1` | B1 ring-3 izolasyon öz-testi |
 | `T06_TEST=1` | 0.6 öz-testleri imaja girer |
-| `T07_TEST=1` | 0.7 öz-testleri imaja girer |
+| `T07_TEST=1` | 0.7 güvenlik/imza öz-testleri imaja girer |
+| `NET_TEST=1` | açılışta DNS/TCP/TLS ağ sınaması |
 | `EXTRA_CFLAGS=...` | ek derleme bayrakları |
 
 ```sh
-make pack DEBUG=1 T07_TEST=1     # öz-test imajı; seri porta OK/HATA yazar
-make -j4 DEBUG=0                 # sürüm imaji
+make pack DEBUG=1 SELFTEST=1     # çekirdek + SMP öz-test imajı
+make pack DEBUG=1 T07_TEST=1     # imza/kapı öz-test imajı
+make -j8 DEBUG=0                 # sürüm imajı
+make test-uefi                   # OVMF altında UEFI önyükleme testi
+make test-smp                    # QEMU -smp 4 çok çekirdek testi
+make test-isolation              # B1 ring-3 izolasyon testi
 ```
 
-Sürüm numarası `version.json`'dan okunur ve ayrı bir bayrakla (`VERSION_CFLAGS`) gömülür;
-komut satırından `EXTRA_CFLAGS` verilse bile sürüm `0.0`'a düşmez.
+Sürüm numarası `version.json`'dan okunur ve `VERSION_CFLAGS` ile gömülür; komut satırından
+`EXTRA_CFLAGS` verilse bile sürüm `0.0`'a düşmez.
+
+## C + C++20 POSIX Çapraz Araç Zinciri (`sdk/toolchain/`)
+
+Ring-3 ELF64 POSIX ve C++20 uygulamaları geliştirmek için Alpine v3.21 pure-musl (musl 1.2.5)
+ve `libstdc++` (14.2) statik PIE sysroot'u sudo gerektirmeden kurulabilir:
+
+```sh
+bash sdk/toolchain/build-toolchain.sh    # $HOME/arctian-toolchain altına kurar
+```
+
+Derleme sarmalayıcıları:
+
+```sh
+sdk/toolchain/arctian-cc  -O2 program.c   -o program.elf
+sdk/toolchain/arctian-cxx -O2 program.cpp -o program.elf
+```
+
+Doğrulama paketini derlemek için:
+
+```sh
+sdk/toolchain/arctian-cxx -O2 tests/posix/test_suite.cpp -o test_suite.elf
+sdk/toolchain/arctian-cc  -O2 tests/posix/exec_helper.c  -o exec_helper.elf
+```
+
+Üretilen ELF64 ikilileri Arctian terminalinde `elfrun C:/yol/program.elf` komutuyla çalıştırılır.
 
 ## Üretileni doğrulama
 
@@ -81,24 +117,21 @@ isoinfo -d -i build/arctian.iso        # CD001, boot catalog 0100, BOOTABLE
 ls -l build/arctian.img build/arctian.iso
 ```
 
-Paketleyici her modülü taze `.bin` ile karşılaştırıp LBA konumlarını yazar; imaj boyutu ve ISO
-boyutu ekrana basılır. ISO üretilemezse derleme **durur** (yarım/0 baytlık çıktı bırakmaz).
+ISO üretilemezse paketleyici derlemeyi **dur­durur** (yarım/0 baytlık çıktı bırakmaz).
 
 ## QEMU'da denemek
 
 ```sh
-qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 512M -vga std -serial stdio
-qemu-system-x86_64 -drive file=build/arctian.img,format=raw -m 512M -vga std
+qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 1024M -vga std -serial stdio
+qemu-system-x86_64 -drive file=build/arctian.img,format=raw -m 1024M -vga std -serial stdio
 ```
 
 Kurulum akışını uçtan uca test etmek için:
 
 ```sh
-bash tools/test_install.sh      # ISO + 64MB sanal hedef disk ile QEMU başlatır
-bash tools/run_installed.sh     # kurulu diski (build/target.img) doğrudan açar
+bash tools/test_install.sh      # ISO + sanal hedef disk ile QEMU başlatır
+bash tools/run_installed.sh     # kurulu diski doğrudan açar
 ```
-
-`-serial stdio` verirse açılış logları ve öz-test satırları (`OK` / `HATA`) terminale düşer.
 
 ## Fiziksel diske yazma
 
@@ -108,30 +141,25 @@ python3 tools/arctian_writer.py --disk /dev/sdb --yes
 ```
 
 **Dikkat:** diske yazılacak dosya `build/arctian.img` olmalıdır. ISO'nun LBA 0'ında `0x55AA`
-önyükleme imzası yoktur; disk olarak yazıldığında BIOS onu önyükleyemez.
+disk MBR imzası farklıdır; ham USB/disk olarak `arctian.img` kullanılmalıdır.
 
-## Uygulama ve SDK derleme
+## `.wlf` SDK derleme
 
 ```sh
 cd sdk/examples/merhaba && ../../wf build merhaba     # .wlf üretir
 bash tools/build_wlf_examples.sh                      # tüm örnekler -> build/wlf/
 ```
 
-`wf`, `gcc` + ELF bağlayıcısı kullandığı için **Windows'ta yerel olarak derlemez**; Linux veya
+`wf`, `gcc` + ELF bağlayıcısı kullandığı için **Windows'ta yerel olarak derlenmez**; Linux veya
 WSL tarafında çalıştır (`wf.cmd` WSL'e köprüler). Ayrıntı: [sdk/README.md](../sdk/README.md).
 
 ## Sık karşılaşılan tuzaklar
 
 - **`make` hiçbir şey yapmadan başarılı dönüyorsa:** Makefile başındaki `.DEFAULT_GOAL := all`
-  satırı bunun ilacıdır. `-include $(find ... -name '*.d')` satırı `all:` hedefinden önce
-  durduğunda GNU Make 4.x `.d` dosyasındaki ilk hedefi varsayılan hedef sayar ve hedefsiz
-  çağrılar "is up to date" deyip çıkar. `-include` kapsamı da yalnızca `$(BUILD)` olmalıdır;
-  SDK emulatörünün göreli yollu `.d` dosyaları "No rule to make target" hatası verir.
-- **`build.bat` karakter yutuyorsa (`echo` → `cho`):** betik CRLF satır sonuna sahip olmalıdır;
-  LF-only bir `.bat` cmd içinde satır başlarını yer.
-- **Bayrak değişti ama kod derlenmedi gibi görünüyor:** nesne dizini bayrağa göre
-  adlandırılmıştır (`build/obj-<hash>`); eski dizindeki nesneler kullanılmaz, boşuna `make clean`
-  atma.
-- **ISO yok ama derleme "BAŞARILI" dedi:** `xorriso` kurulu değilse paketleyici hatayı artık
-  yutmaz, derlemeyi durdurur. `apt install xorriso`.
-- **Windows'ta `.wlf` derlenemiyor:** beklenen davranış (ELF bağlayıcısı yok); WSL kullan.
+  satırı ve `-include $(BUILD)/...` kapsamı sayesinde `.d` dosyaları varsayılan hedefi ezmez.
+- **`build.bat` karakter yutuyorsa:** betik CRLF satır sonuna sahip olmalıdır.
+- **Bayrak değişti ama kod derlenmedi gibi görünüyor:** nesne dizini `build/obj-<hash>` olarak
+  bayrağa göre ayrılmıştır; farklı bayraklar birbirini ezmez.
+- **ISO yok ama `xorriso` hatası var:** `apt install xorriso`.
+- **İmza anahtarı değişti:** `python3 tools/sig_keygen.py` sonrasında OS imajını yeniden derleyin ve
+  varsa eski `.wlf` paketlerini `python3 tools/pkg_sign.py` ile yeniden imzalayın.

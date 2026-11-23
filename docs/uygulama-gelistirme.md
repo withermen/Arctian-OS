@@ -5,18 +5,24 @@ isteyen biri için tek kaynak referanstır. Dosya sistemi, medya (ses), ağ,
 grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
 **tüm genel API'leri** ve çalışan **kod örneklerini** içerir.
 
-- Sürüm: **Arctian 0.9** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
+- Sürüm: **Arctian 0.9.2** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
 - Arayüz kiti: **LVGL v9.6** + ASI (Arctian System Interface, sürüm `2`)
-- Mimari: x86_64 (AMD64), 64-bit; uygulamalar `asi_t *asi` köprüsü üzerinden sisteme
-  erişir. Uygulamalar kabukla aynı adres alanında çalışır — izinler bir *politika*
-  sınırıdır, donanımsal izolasyon değildir (bkz. [mimari.md](mimari.md)).
-- Ekran çıkışı: Bochs VBE / VESA çerçeve tamponu; varsayılan **1280×720**, Ayarlar →
-  Ekran'dan çalışma anında **1600×900 / 1920×1080 / 2560×1440**'a değiştirilebilir.
+- Mimari: x86_64 (AMD64), 64-bit. Arctian'da üç uygulama yolu vardır:
+  1. **Gömülü uygulamalar (`desktop/apps/*`)**: `asi_t *asi` ve LVGL üzerinden çalışır; kabukla
+     aynı adres alanındadır (izinler politika sınırıdır).
+  2. **`.wlf` paketleri (`libWolf` / `include/wolf.h`)**: **Ring 3 + ayrı CR3** ile donanımsal
+     olarak yalıtılmıştır; GUI çağrıları `wolf_api_t` trampoline ve `SYS_WOLF_CALL/WAIT` broker
+     kuyruğu üzerinden masaüstüne aktarılır.
+  3. **Ring-3 POSIX ELF64 / C++20 ikilileri (`sdk/toolchain/`)**: `musl 1.2.5 + libstdc++ 14.2`
+     ile derlenen statik PIE ikililer Linux x86-64 `SYSCALL/SYSRET` ABI ve paylaşımlı ARGB8888
+     grafik köprüsü (`arctian/gfx.h`) üzerinden izole süreç olarak çalışır.
+- Ekran çıkışı: Bochs VBE / VESA veya UEFI GOP çerçeve tamponu; varsayılan **1280×720**,
+  Ayarlar → Ekran'dan çalışma anında **1600×900 / 1920×1080 / 2560×1440**'a değiştirilebilir.
 
-> Uygulamalar libc **kullanmaz**. `printf`, `malloc`, `strlen`, `#include <stdio.h>`
-> gibi hiçbir standart C kütüphanesi sembolü yoktur. Bellek için `asi->mem`,
-> metin için `asi->console`, arayüz için LVGL kullanılır. `memcpy`/`memset`/`memmove`/
-> `memcmp`/`strlen` işletim sistemi tarafından sağlanır ve doğrudan çağrılabilir.
+> **Önemli ayrım:** **Gömülü uygulamalar** freestanding C ile yazılır ve libc **kullanmaz**
+> (`printf`, `malloc` yerine `asi->console`, `asi->mem`; `memcpy`/`memset`/`memmove`/`memcmp`/`strlen`
+> çekirdek tarafından sağlanır). **POSIX ELF64 uygulamaları** ise `sdk/toolchain/` ile standart
+> C/C++20 (`<cstdio>`, `<vector>`, `<thread>`, `pthread`, `epoll`, `socket`) kullanabilir.
 
 ---
 
@@ -53,21 +59,26 @@ grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
 
 ## 1. Kavramlar ve çalışma modeli
 
-Arctian'da iki tür uygulama vardır:
+Arctian'da üç tür uygulama vardır:
 
 | Tür | Yeri | Ne zaman | Örnek |
 |-----|------|----------|-------|
 | **Gömülü uygulama** | `desktop/apps/<ad>/` | `make` ile derler, OS'un içine gömülür | `terminal`, `settings`, `filemanager` |
-| **`.wlf` uygulaması** | `C:/apps/<ad>.wlf` | SDK ile derlenir, mağazadan indirilir veya `wf install` ile kurulur | `uidemo`, `sayac`, `pyrt` |
+| **`.wlf` uygulaması** | `C:/apps/<ad>.wlf` | `libWolf` SDK ile derlenir, `wf install` ile kurulur | `merhaba`, `uidemo`, `sayac`, `pyrt` |
+| **POSIX ELF64 (C/C++20)** | `C:/.../*.elf` | `sdk/toolchain/` (`musl` + `libstdc++`) ile statik PIE derlenir, `elfrun` ile koşar | `tests/posix/test_suite.cpp` |
 
-İki türün kaynak arayüzü farklıdır:
+Kaynak arayüzleri:
 
 - **Gömülü uygulama:** `app_entry(lv_obj_t *win, asi_t *asi)` + `app.json`. LVGL ve ASI
-  başlıklarını doğrudan kullanır; desktop modülüne linklenir. Bu belgenin geri kalanı bu
+  başlıklarını doğrudan kullanır; desktop modülüne linklenir. Bu belgenin ana bölümleri bu
   arayüzü anlatır.
 - **`.wlf` uygulaması:** başlık + meta bloğu (`role`, `handles`, …) + `wolf_main(const
-  wolf_api_t *api)`. Arayüzü yalnızca libWolf'tur (`include/wolf.h`); `WLF_BASE`
-  (0x06800000) bölgesine yüklenir. Ayrıntı: [sdk/README.md](../sdk/README.md).
+  wolf_api_t *api)`. Arayüzü `include/wolf.h` (`wolf_api_t` trampoline); çekirdek tarafından
+  ayrı CR3 / Ring 3 alanında yürütülür. Ayrıntı: [sdk/README.md](../sdk/README.md).
+- **POSIX ELF64 uygulaması:** Standart `int main(int argc, char **argv)` girişi; Linux x86-64
+  `SYSCALL` ABI (`fork`, `execve`, `mmap`, `mprotect`, `clone`, `futex`, `epoll`, `AF_UNIX`/`AF_INET`).
+  Pencere açmak için `sdk/toolchain/include/arctian/gfx.h` (`arctian_gfx_create`,
+  `arctian_gfx_mmap`, `arctian_gfx_present`, `arctian_gfx_poll`) kullanılır.
 
 **Önemli mimari gerçekler:**
 
@@ -1670,10 +1681,11 @@ Sistem modülleri (kernel/install/driver/desktop/app) için düz `.bin` başlı�
 Uygulamayı ilgilendiren satırlar: `.wlf` uygulama bölgesi `WLF_BASE = 0x06800000`
 (boyut `WLF_MAX = 8 MB`), eski `.dpk` bölgesi `APP_BASE = 0x04000000` (40 MB).
 
-### 26.6 Wolf Engine JS köprüsü (`include/arctian/wolf.h`)
+### 26.6 Wolf Engine C ABI (`include/arctian/wolf_engine.h`)
 
-Tarayıcı motoru (Rust) için C ABI; DOM erişimi ve `wolf_engine_eval` vb.
-Yalnızca tarayıcı uygulamasını ilgilendirir.
+Eski QuickJS bağlantısı kaldırılmıştır. `desktop/apps/wolf_engine/main.c` artık yalnızca
+geriye dönük sembol/ABI uyumluluğunu koruyan hafif bir yer tutucu kabuktur (`wolf_engine_eval`
+`-3` döner).
 
 ### 26.7 Önyükleme imajı (El Torito / MBR)
 
@@ -1690,5 +1702,5 @@ Yalnızca tarayıcı uygulamasını ilgilendirir.
 
 ---
 
-*Bu belge Arctian 0.9 API yüzeyini (`include/arctian/*.h`, `desktop/*`, LVGL v9.6)
-esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*
+*Bu belge Arctian 0.9.2 API yüzeyini (`include/arctian/*.h`, `desktop/*`, `sdk/toolchain/`,
+LVGL v9.6) esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*
