@@ -4,6 +4,7 @@
 #include "kernel.h"
 #include "net.h"
 #include "tcp.h"
+#include "sched.h"
 #include "dns.h"
 #include "ipv4.h"
 #include "serial.h"
@@ -112,24 +113,41 @@ void https_init(void) {
     static const char *s_alpn[] = { "http/1.1", NULL };
     mbedtls_ssl_conf_alpn_protocols(&s_conf, s_alpn);
 
-    static const int s_ciphersuites[] = {
-        MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
-        MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
-        MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256,
-        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-        MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-        MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-        MBEDTLS_TLS_RSA_WITH_AES_128_GCM_SHA256,
-        MBEDTLS_TLS_RSA_WITH_AES_256_GCM_SHA384,
-        MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA,
-        MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA,
-        0
-    };
+    /* F4: AES-NI varsa AES-GCM donanimda hizli; yoksa (QEMU TCG, eski
+     * CPU) yazilim AES-GCM yavas -> ChaCha20-Poly1305 yazilimda cok daha
+     * hizli. Liste CPUID'e gore kurulur; CBC yedek olarak kalir. */
+    static int s_ciphersuites[16];
+    {
+        uint32_t a, b, c, d;
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                                 : "a"(1), "c"(0));
+        int aesni = (c >> 25) & 1;
+        int n = 0;
+        if (aesni) {
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_AES_128_GCM_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_AES_256_GCM_SHA384;
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256;
+        } else {
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_AES_128_GCM_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS1_3_AES_256_GCM_SHA384;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+            s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
+        }
+        s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA;
+        s_ciphersuites[n++] = MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA;
+        s_ciphersuites[n++] = MBEDTLS_TLS_RSA_WITH_AES_128_CBC_SHA;
+        s_ciphersuites[n++] = MBEDTLS_TLS_RSA_WITH_AES_256_CBC_SHA;
+        s_ciphersuites[n++] = 0;
+    }
     mbedtls_ssl_conf_ciphersuites(&s_conf, s_ciphersuites);
 
     static const uint16_t s_groups[] = {
@@ -200,7 +218,7 @@ static int tls_bio_recv(void *ctx, unsigned char *buf, size_t len) {
             st == TCP_STATE_CLOSE_WAIT)
             return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
         if ((int64_t)(clock_ms() - deadline) >= 0) return MBEDTLS_ERR_SSL_TIMEOUT;
-        for (volatile int w = 0; w < 3000; w++) __asm__ volatile("pause");
+        sched_sleep_ms(1);   /* F2: pause-spin yerine uyku (RX halkasi tasmaz) */
     }
 }
 

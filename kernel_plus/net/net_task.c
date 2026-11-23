@@ -2,6 +2,7 @@
 #include "sched.h"
 #include "sync.h"
 #include "caps.h"
+#include "clock.h"
 
 #define NET_TASK_STACK_SIZE (256 * 1024)
 
@@ -65,7 +66,15 @@ int net_task_submit(void (*fn)(void *), asi_net_done_t done, void *user) {
 }
 
 void net_task_yield_point(void) {
-    if (s_state == NET_TASK_RUNNING) sched_yield();
+    if (s_state != NET_TASK_RUNNING) return;
+    /* F2: her ipv4_poll'da yield yapmak netbg'yi masaustu kare hizina
+     * (16+ ms) kilitliyordu; UI akiciligi icin en fazla 16 ms'de bir ver. */
+    static uint64_t s_last_yield;
+    uint64_t now = clock_ms();
+    if (now - s_last_yield >= 16) {
+        s_last_yield = now;
+        sched_yield();
+    }
 }
 
 void net_task_service(void) {

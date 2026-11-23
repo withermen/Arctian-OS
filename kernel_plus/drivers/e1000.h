@@ -10,7 +10,7 @@ bool e1000_receive_packet(void *ctx, uint8_t *buf, uint16_t *length);
 bool e1000_has_packet(void *ctx);
 bool e1000_link_up(void);
 
-#define E1000_NUM_RX_DESC 32
-#define E1000_NUM_TX_DESC 8
+#define E1000_NUM_RX_DESC 128  /* F2: pencere burstu (64 KB) halkaya sigmali */
+#define E1000_NUM_TX_DESC 32
 
 #endif

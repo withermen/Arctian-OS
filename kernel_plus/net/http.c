@@ -1,9 +1,11 @@
 #include "http.h"
 #include "dns.h"
 #include "tcp.h"
+#include "sched.h"
 #include "kernel.h"
 #include "clock.h"
 #include "https.h"      /* cerez deposu (madde 27) */
+#include <string.h>
 #ifdef ARCTIAN_NET_SELFTEST
 #include "serial.h"
 #endif
@@ -123,14 +125,12 @@ bool http_get(const char *url, http_response_t *response) {
     uint32_t clen = 0;
     uint64_t deadline = clock_ms() + 3000;
     for (;;) {
-        for (int w = 0; w < 3000; w++) { __asm__ volatile("pause"); }
-
-        uint8_t buf[4096];
-        int n = tcp_receive(conn_id, buf, sizeof(buf) - 1);
+        int rem = (HTTP_MAX_RESPONSE - 1) - total;
+        if (rem <= 0) break;
+        uint16_t want = (rem > 16384) ? 16384u : (uint16_t)rem;
+        int n = tcp_receive(conn_id, (uint8_t *)(http_response_buf + total), want);
         if (n < 0) break;
         if (n > 0) {
-            if (total + n >= HTTP_MAX_RESPONSE) n = HTTP_MAX_RESPONSE - total - 1;
-            for (int i = 0; i < n; i++) http_response_buf[total + i] = (char)buf[i];
             total += n;
             deadline = clock_ms() + 3000;
 
@@ -152,11 +152,13 @@ bool http_get(const char *url, http_response_t *response) {
                 http_response_buf[total - 3] == '\n' && http_response_buf[total - 2] == '\r' &&
                 http_response_buf[total - 1] == '\n') break;
             if (total >= HTTP_MAX_RESPONSE - 1) break;
+            continue;
         }
         if (tcp_state(conn_id) == TCP_STATE_TIME_WAIT ||
             tcp_state(conn_id) == TCP_STATE_CLOSE_WAIT ||
             tcp_state(conn_id) == TCP_STATE_CLOSED) break;
         if ((int64_t)(clock_ms() - deadline) >= 0) break;
+        sched_sleep_ms(1);   /* F2: yalniz veri yokken uyu */
     }
 #ifdef ARCTIAN_NET_SELFTEST
     serial_printf("[http] total=%d state=%d\n", total, tcp_state(conn_id));
@@ -384,7 +386,7 @@ int http_head_length(const char *url, uint32_t *out) {
             int st = tcp_state(conn);
             if (st == TCP_STATE_CLOSED || st == TCP_STATE_TIME_WAIT) break;
             if (++idle > 20000L) break;
-            for (volatile int w = 0; w < 20000; w++) __asm__ volatile("pause");
+            sched_sleep_ms(1);   /* F2: pause-spin RX halkasini tasiriyordu */
         }
     }
     tcp_close(conn);
@@ -454,17 +456,16 @@ int http_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out) {
     uint32_t need = 0;       /* Content-Length (bilinmiyorsa 0) */
     uint32_t boff = 0;       /* govde baslangici */
     int have_hdr = 0;
-    static uint8_t s_dl_tmp[32768];
     long idle = 0;
 
     for (;;) {
-        int n = tcp_receive(conn, s_dl_tmp, sizeof(s_dl_tmp));
+        uint32_t rem = cap - total;
+        if (rem == 0) break;
+        uint16_t want = (rem > 65535u) ? 65535u : (uint16_t)rem;
+        int n = tcp_receive(conn, out + total, want);
         if (n < 0) break;
         if (n > 0) {
-            uint32_t c = (uint32_t)n;
-            if (total + c > cap) c = cap - total;
-            for (uint32_t i = 0; i < c; i++) out[total + i] = s_dl_tmp[i];
-            total += c;
+            total += (uint32_t)n;
             idle = 0;
 
             if (!have_hdr) {
@@ -488,11 +489,11 @@ int http_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out) {
                 if (!have_hdr) break;
                 if (need && (total - boff) >= need) break;
                 /* Eksik baytlar icin kisa sure daha bekle (retransmit). */
-                if (++idle > 30000L) break;
+                if (++idle > 3000L) break;
             } else {
                 if (++idle > 100000L) break;
             }
-            for (volatile int w = 0; w < 20000; w++) __asm__ volatile("pause");
+            sched_sleep_ms(1);   /* F2: pause-spin RX halkasini tasiriyordu */
         }
     }
     tcp_close(conn);
@@ -502,7 +503,7 @@ int http_download(const char *url, void *dst, uint32_t cap, uint32_t *len_out) {
     if (status < 200 || status >= 300) return -6;
 
     uint32_t blen = total > boff ? total - boff : 0;
-    for (uint32_t i = 0; i < blen; i++) out[i] = out[boff + i];
+    if (blen > 0 && boff > 0) memmove(out, out + boff, blen);
     if (len_out) *len_out = blen;
     return 0;
 }

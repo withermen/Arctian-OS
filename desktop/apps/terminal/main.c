@@ -1459,7 +1459,14 @@ static void cmd_pkg_pull(const char *args) {
     url[u] = 0;
 
     term_puts("Indiriliyor: "); term_puts(url); term_putc('\n'); term_flush();
+    uint64_t t0 = (g_asi && g_asi->time && g_asi->time->ticks_ms)
+                      ? g_asi->time->ticks_ms() : 0;
     cmd_pkg_install_direct(url);
+    if (t0 && g_asi && g_asi->time && g_asi->time->ticks_ms) {
+        term_puts("Sure: ");
+        term_put_uint((uint32_t)(g_asi->time->ticks_ms() - t0));
+        term_puts(" ms\n");
+    }
 }
 
 static void cmd_pkg(const char *arg) {
@@ -2398,8 +2405,15 @@ static void wf_pull(const char *args) {
 
     term_puts("Indiriliyor: "); term_puts(url); term_putc('\n');
     term_flush();
+    uint64_t t0 = (g_asi && g_asi->time && g_asi->time->ticks_ms)
+                      ? g_asi->time->ticks_ms() : 0;
     char err[128];
     int r = wlf_install_url(url, err, sizeof(err));
+    if (t0 && g_asi && g_asi->time && g_asi->time->ticks_ms) {
+        term_puts("Sure: ");
+        term_put_uint((uint32_t)(g_asi->time->ticks_ms() - t0));
+        term_puts(" ms\n");
+    }
     if (r == 0) {
         term_puts("Kuruldu\n");
         wf_list();

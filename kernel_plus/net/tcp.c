@@ -1,4 +1,6 @@
 #include "tcp.h"
+#include "sched.h"
+#include "alloc.h"
 #include "ipv4.h"
 #include "net.h"
 #include "firewall.h"
@@ -70,6 +72,16 @@ static int tcp_alloc_conn(void) {
              * ilk bildirim gercek degeriyle ezilir. */
             c->peer_window = TCP_MSS;
             c->idle_ms = tcp_now();
+            /* F3: alim tamponunu yuvada yeniden kullan (fragmentasyonu onler) */
+            if (!c->recv_buffer) {
+                c->recv_buffer = (uint8_t *)kmalloc(TCP_RXBUF_SIZE);
+                if (!c->recv_buffer) return -1;
+            }
+            c->wscale_shift = TCP_WSCALE_SHIFT;
+            c->peer_wscale = 0;
+            c->last_adv_win = TCP_RXBUF_SIZE;
+            c->ack_pending = 0;
+            c->ack_pkts = 0;
             return i;
         }
     }
@@ -106,6 +118,25 @@ static uint16_t tcp_calc_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
     return (uint16_t)~sum;
 }
 
+/* F3: dairesel RX tamponu — her tcp_receive'de memmove yok (O(1)). */
+static inline void tcp_rx_write(tcp_connection_t *c, const uint8_t *src, uint32_t len) {
+    uint32_t pos = c->recv_buf_tail & TCP_RXBUF_MASK;
+    uint32_t first = TCP_RXBUF_SIZE - pos;
+    if (first > len) first = len;
+    memcpy(&c->recv_buffer[pos], src, first);
+    if (len > first) memcpy(&c->recv_buffer[0], src + first, len - first);
+    c->recv_buf_tail += len;
+}
+
+static inline void tcp_rx_read(tcp_connection_t *c, uint8_t *dst, uint32_t len) {
+    uint32_t pos = c->recv_buf_head & TCP_RXBUF_MASK;
+    uint32_t first = TCP_RXBUF_SIZE - pos;
+    if (first > len) first = len;
+    memcpy(dst, &c->recv_buffer[pos], first);
+    if (len > first) memcpy(dst + first, &c->recv_buffer[0], len - first);
+    c->recv_buf_head += len;
+}
+
 /* Segment gonderir; seq cagiran tarafindan verilir. Eskiden fonksiyon
  * gonderim sonrasi send_seq'i kendi ilerletiyordu; yeniden gonderimde
  * orijinal seq gerekiyordu ve bu yuzden yeniden gonderim yazilamadi. */
@@ -114,7 +145,13 @@ static bool tcp_send_segment(int conn_id, uint32_t seq, uint8_t flags,
     tcp_connection_t *conn = &tcp_connections[conn_id];
     if (conn->state == TCP_STATE_CLOSED) return false;
 
-    uint16_t tcp_len = 20 + data_len;
+    uint16_t hdr_len = 20;
+    if (flags & TCP_FLAG_SYN) {
+        /* F3: MSS=1460 secenegi (yoksa karsi taraf 536 bayt varsayar!) +
+         * RFC 7323 window scale (destekleniyorsa). */
+        hdr_len = conn->wscale_shift ? 28 : 24;
+    }
+    uint16_t tcp_len = hdr_len + data_len;
     uint8_t segment[1500];
 
     tcp_header_t *hdr = (tcp_header_t *)segment;
@@ -122,18 +159,38 @@ static bool tcp_send_segment(int conn_id, uint32_t seq, uint8_t flags,
     hdr->dst_port  = htons16(conn->remote_port);
     hdr->seq_num   = htonl32(seq);
     hdr->ack_num   = htonl32(conn->recv_ack);
-    hdr->data_offset = 0x50;
+    hdr->data_offset = (uint8_t)(hdr_len << 2);
     hdr->flags     = flags;
     uint32_t used = conn->recv_buf_tail - conn->recv_buf_head;
-    uint16_t win = (used < TCP_RXBUF_SIZE) ? (uint16_t)(TCP_RXBUF_SIZE - used) : 0;
-    hdr->window    = htons16(win);
+    uint32_t avail = (used < TCP_RXBUF_SIZE) ? (TCP_RXBUF_SIZE - used) : 0;
+    /* RFC 7323: SYN/SYN-ACK paketindeki pencere alani ASLA olceklenmez. */
+    uint32_t win = (flags & TCP_FLAG_SYN) ? avail : (avail >> conn->wscale_shift);
+    if (win > 65535u) win = 65535u;
+    hdr->window    = htons16((uint16_t)win);
+    if (flags & TCP_FLAG_SYN) {
+        /* MSS option: kind=2, len=4, value=TCP_MSS (1460) */
+        segment[20] = 2; segment[21] = 4;
+        segment[22] = (uint8_t)(TCP_MSS >> 8);
+        segment[23] = (uint8_t)(TCP_MSS & 0xFF);
+        if (conn->wscale_shift) {
+            /* Window scale option: kind=3, len=3, shift + NOP */
+            segment[24] = 3; segment[25] = 3;
+            segment[26] = conn->wscale_shift; segment[27] = 1;
+        }
+    }
     hdr->urgent_ptr = 0;
     hdr->checksum  = 0;
 
-    for (uint16_t i = 0; i < data_len; i++) segment[20 + i] = data[i];
+    if (data_len > 0 && data) memcpy(segment + hdr_len, data, data_len);
 
     hdr->checksum = htons16(tcp_calc_checksum(conn->local_ip, conn->remote_ip,
                                               segment, tcp_len));
+
+    if (flags & TCP_FLAG_ACK) {
+        conn->ack_pending = 0;
+        conn->ack_pkts = 0;
+        conn->last_adv_win = (flags & TCP_FLAG_SYN) ? win : (win << conn->wscale_shift);
+    }
 
     return ipv4_send(conn->remote_ip, IPV4_PROTO_TCP, segment, tcp_len);
 }
@@ -179,7 +236,7 @@ int tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port) {
         if (conn->state == TCP_STATE_ESTABLISHED) return id;
         if (conn->state == TCP_STATE_CLOSED) return -1;
         if ((int64_t)(clock_ms() - deadline) >= 0) break;
-        for (int w = 0; w < 3000; w++) { __asm__ volatile("pause"); }
+        sched_sleep_ms(1);   /* F2: pause-spin yerine uyku */
     }
     serial_printf("[tcp] connect %d.%d.%d.%d:%d basarisiz (son durum=%d)\n",
                   dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
@@ -257,6 +314,9 @@ bool tcp_send(int conn_id, const uint8_t *data, uint16_t length) {
                 return false;
             }
             tcp_poll();
+            if (conn->state == TCP_STATE_ESTABLISHED &&
+                conn->peer_window <= (conn->send_seq - conn->send_unack))
+                sched_sleep_ms(1);
             continue;
         }
         uint32_t rest = length - offset;
@@ -306,29 +366,26 @@ int tcp_receive(int conn_id, uint8_t *buf, uint16_t buf_size) {
     if (conn->state == TCP_STATE_CLOSED ||
         conn->state == TCP_STATE_TIME_WAIT) return -1;
 
-    tcp_poll();
+    /* F3: RX tamponu cok dolu degilse agi yokla (halka tasmasin). */
+    if ((conn->recv_buf_tail - conn->recv_buf_head) < (TCP_RXBUF_SIZE / 2u))
+        tcp_poll();
 
     uint32_t available = conn->recv_buf_tail - conn->recv_buf_head;
     if (available == 0) return 0;
     if (available > buf_size) available = buf_size;
 
-    memcpy(buf, &conn->recv_buffer[conn->recv_buf_head], available);
+    tcp_rx_read(conn, buf, available);
 
-    conn->recv_buf_head += available;
-    /* Lineer tampon tasmasin: kalan veriyi basa kaydir. */
-    if (conn->recv_buf_head == conn->recv_buf_tail) {
-        conn->recv_buf_head = 0;
-        conn->recv_buf_tail = 0;
-    } else if (conn->recv_buf_head > 0) {
-        uint32_t remain = conn->recv_buf_tail - conn->recv_buf_head;
-        memmove(conn->recv_buffer, &conn->recv_buffer[conn->recv_buf_head], remain);
-        conn->recv_buf_head = 0;
-        conn->recv_buf_tail = remain;
+    /* F3: her okumada gereksiz ACK gonderme; pencere anlamli olcude
+     * acildiysa (veya darsa) karsi tarafi guncelle. */
+    if (conn->state == TCP_STATE_ESTABLISHED || conn->state == TCP_STATE_CLOSE_WAIT) {
+        uint32_t used = conn->recv_buf_tail - conn->recv_buf_head;
+        uint32_t avail = (used < TCP_RXBUF_SIZE) ? (TCP_RXBUF_SIZE - used) : 0;
+        if (avail >= conn->last_adv_win + 32768u ||
+            (conn->last_adv_win < 32768u && avail >= 32768u)) {
+            tcp_send_segment(conn_id, conn->send_seq, TCP_FLAG_ACK, 0, 0);
+        }
     }
-
-    /* Pencereyi guncelle; karsi taraf pencere bekleyip durmasin. */
-    if (conn->state == TCP_STATE_ESTABLISHED || conn->state == TCP_STATE_CLOSE_WAIT)
-        tcp_send_segment(conn_id, conn->send_seq, TCP_FLAG_ACK, 0, 0);
 
     return (int)available;
 }
@@ -364,7 +421,7 @@ bool tcp_close(int conn_id) {
         if (conn->state == TCP_STATE_CLOSED ||
             conn->state == TCP_STATE_TIME_WAIT) return true;
         if ((int64_t)(clock_ms() - deadline) >= 0) break;
-        for (int w = 0; w < 3000; w++) { __asm__ volatile("pause"); }
+        sched_sleep_ms(1);   /* F2: pause-spin yerine uyku */
     }
     conn->state = TCP_STATE_CLOSED;
     return true;
@@ -389,6 +446,35 @@ void tcp_abort(int conn_id) {
 int tcp_state(int conn_id) {
     if (!tcp_id_ok(conn_id)) return -1;
     return tcp_connections[conn_id].state;
+}
+
+/* F3: SYN/SYN-ACK seceneklerinden window scale olcegini oku (-1 = yok). */
+static int tcp_parse_wscale(const uint8_t *packet, uint16_t hdr_len) {
+    uint16_t o = 20;
+    while (o < hdr_len) {
+        uint8_t kind = packet[o];
+        if (kind == 0) break;
+        if (kind == 1) { o++; continue; }
+        if (o + 2 > hdr_len) break;
+        uint8_t len = packet[o + 1];
+        if (len < 2 || o + len > hdr_len) break;
+        if (kind == 3 && len == 3) {
+            uint8_t sh = packet[o + 2];
+            return (int)(sh > 14 ? 14 : sh);
+        }
+        o = (uint16_t)(o + len);
+    }
+    return -1;
+}
+
+void tcp_flush_acks(void) {
+    for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
+        tcp_connection_t *c = &tcp_connections[i];
+        if ((c->state == TCP_STATE_ESTABLISHED || c->state == TCP_STATE_CLOSE_WAIT) &&
+            c->ack_pending) {
+            tcp_send_segment(i, c->send_seq, TCP_FLAG_ACK, 0, 0);
+        }
+    }
 }
 
 bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t length) {
@@ -426,7 +512,16 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                 if (flags & TCP_FLAG_SYN) {
                     conn->recv_ack = seq + 1;
                     conn->recv_seq = seq;
-                    conn->peer_window = htons16(hdr->window);
+                    int pws = tcp_parse_wscale(packet, hdr_len);
+                    if (pws >= 0) {
+                        conn->peer_wscale = (uint8_t)pws;
+                    } else {
+                        /* RFC 7323: karsi taraf wscale gondermediyse her iki yon 0. */
+                        conn->wscale_shift = 0;
+                        conn->peer_wscale = 0;
+                    }
+                    /* SYN-ACK penceresi olceksizdir (RFC 7323). */
+                    conn->peer_window = (uint32_t)htons16(hdr->window);
                     conn->send_seq = ack;
                     conn->send_unack = ack;   /* kendi SYN'umuz onaylandi */
                     conn->state = TCP_STATE_ESTABLISHED;
@@ -440,7 +535,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
 
             if (conn->state == TCP_STATE_SYN_RECEIVED) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = htons16(hdr->window);
+                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
                     tcp_ack_send(conn, ack);   /* SYN okteti dusulur */
                     conn->state = TCP_STATE_ESTABLISHED;
                 }
@@ -449,7 +544,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
 
             if (conn->state == TCP_STATE_FIN_WAIT1) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = htons16(hdr->window);
+                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
                     int fin_acked = ((int32_t)(ack - conn->send_seq) >= 0);
                     tcp_ack_send(conn, ack);
                     if (fin_acked) {
@@ -479,45 +574,79 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
 
             if (conn->state == TCP_STATE_CLOSE_WAIT) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = htons16(hdr->window);
+                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
                     tcp_ack_send(conn, ack);
                 }
                 if (data_len > 0) {
-                    if ((uint32_t)conn->recv_buf_tail + data_len <= TCP_RXBUF_SIZE) {
-                        memcpy(&conn->recv_buffer[conn->recv_buf_tail], data, data_len);
-                        conn->recv_buf_tail += data_len;
-                        conn->recv_ack = seq + data_len;
+                    int32_t diff = (int32_t)(seq - conn->recv_ack);
+                    if (diff <= 0) {
+                        uint32_t ov = (uint32_t)(-diff);
+                        if (ov < data_len) {
+                            uint32_t nl = data_len - ov;
+                            uint32_t used = conn->recv_buf_tail - conn->recv_buf_head;
+                            uint32_t sp = (used < TCP_RXBUF_SIZE)
+                                        ? (TCP_RXBUF_SIZE - used) : 0;
+                            uint32_t take = nl < sp ? nl : sp;
+                            if (take > 0) {
+                                tcp_rx_write(conn, data + ov, take);
+                                conn->recv_ack += take;
+                            }
+                        }
                     }
-                    /* Sigmadiysa recv_ack ilerlemez; karsi taraf tekrar gonderir. */
-                    tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
+                    conn->ack_pending = 1;
+                    if (++conn->ack_pkts >= 8)
+                        tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
                 }
                 return true;
             }
 
             if (conn->state == TCP_STATE_ESTABLISHED) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = htons16(hdr->window);
+                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
                     tcp_ack_send(conn, ack);
                 }
 
-                /* Veriyi FIN'DEN ONCE isle: son segment veri + FIN birlikte
-                 * gelebilir; aksi halde son baytlar kaybolur. */
-                if (data_len > 0 &&
-                    (uint32_t)conn->recv_buf_tail + data_len <= TCP_RXBUF_SIZE) {
-                    memcpy(&conn->recv_buffer[conn->recv_buf_tail], data, data_len);
-                    conn->recv_buf_tail += data_len;
-                    conn->recv_ack = seq + data_len;
+                /* Sira kontrolu (RFC 793): siradisi paketleri tampona kopyalayip
+                 * TLS akisini bozma; yinelenen/kismi ortusen paketleri ayikla. */
+                bool immediate_ack = false;
+                if (data_len > 0) {
+                    int32_t diff = (int32_t)(seq - conn->recv_ack);
+                    if (diff <= 0) {
+                        uint32_t ov = (uint32_t)(-diff);
+                        uint32_t take = 0;
+                        if (ov < data_len) {
+                            uint32_t nl = data_len - ov;
+                            uint32_t used = conn->recv_buf_tail - conn->recv_buf_head;
+                            uint32_t sp = (used < TCP_RXBUF_SIZE)
+                                        ? (TCP_RXBUF_SIZE - used) : 0;
+                            take = nl < sp ? nl : sp;
+                            if (take > 0) {
+                                tcp_rx_write(conn, data + ov, take);
+                                conn->recv_ack += take;
+                            }
+                        }
+                        if (take > 0) {
+                            conn->ack_pending = 1;
+                            if (++conn->ack_pkts >= 8) immediate_ack = true;
+                        } else {
+                            /* Tekrar paket ya da tampon dolu: hemen ACK gonder. */
+                            immediate_ack = true;
+                        }
+                    } else {
+                        /* Siradisi paket: hizli yeniden gonderim icin hemen dup-ACK. */
+                        immediate_ack = true;
+                    }
                 }
 
-                if (flags & TCP_FLAG_FIN) {
+                /* FIN yalnizca onceki tum veriler sirali alindiysa islenir. */
+                if ((flags & TCP_FLAG_FIN) && (seq + data_len == conn->recv_ack)) {
                     conn->recv_ack = seq + data_len + 1;
                     conn->state = TCP_STATE_CLOSE_WAIT;
                     tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
                     return true;
                 }
 
-                if (data_len > 0) {
-                    /* Sigmadiysa recv_ack ilerlemez; karsi taraf tekrar gonderir. */
+                if (immediate_ack || (flags & TCP_FLAG_FIN)) {
                     tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
                 }
                 return true;
@@ -560,7 +689,17 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
             c->retransmit_timer = tcp_now();
             c->last_activity = tcp_ticks;
             c->idle_ms = tcp_now();
-            c->peer_window = TCP_MSS;
+            c->peer_window = (uint32_t)htons16(hdr->window);
+            {
+                uint16_t syn_hlen = (uint16_t)((hdr->data_offset >> 4) * 4);
+                int pws = tcp_parse_wscale(packet, syn_hlen <= length ? syn_hlen : length);
+                if (pws >= 0) {
+                    c->peer_wscale = (uint8_t)pws;
+                } else {
+                    c->wscale_shift = 0;
+                    c->peer_wscale = 0;
+                }
+            }
             c->state = TCP_STATE_SYN_RECEIVED;
             c->is_client = false;
             c->child_id = -1;

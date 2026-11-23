@@ -27,7 +27,9 @@
 #define TCP_RETRANSMIT_TIMEOUT 1000
 #define TCP_WINDOW_SIZE       8192
 #define TCP_MSS               1460
-#define TCP_RXBUF_SIZE        32768   /* alim tamponu (pencere bununla sinirli) */
+#define TCP_RXBUF_SIZE        (256u * 1024u)  /* F3: kmalloc dairesel halka (2^n) */
+#define TCP_RXBUF_MASK        (TCP_RXBUF_SIZE - 1u)
+#define TCP_WSCALE_SHIFT      3   /* F3: pencere olcegi (x8) */
 
 typedef struct {
     uint16_t src_port;
@@ -58,12 +60,17 @@ typedef struct {
     uint32_t last_activity;
     uint8_t  send_buffer[TCP_WINDOW_SIZE];
     uint16_t send_buf_len;
-    uint8_t  recv_buffer[TCP_RXBUF_SIZE];
+    uint8_t *recv_buffer;      /* F3: kmalloc(TCP_RXBUF_SIZE), alloc_conn'da */
     uint32_t recv_buf_head;   /* mutlak offset; bosalinca 0'a doner */
     uint32_t recv_buf_tail;
     bool     is_client;
     int8_t   child_id;        /* dinleyici: bekleyen baglanti (-1 = yok) */
-    uint16_t peer_window;     /* karsi tarafin son bildirdigi pencere (bayt) */
+    uint32_t peer_window;     /* karsi tarafin son bildirdigi pencere (bayt, olcekli) */
+    uint32_t last_adv_win;    /* F3: bizim son bildirdigimiz alim penceresi (bayt) */
+    uint8_t  wscale_shift;    /* F3: bizim SYN'de bildirdigimiz olcek */
+    uint8_t  peer_wscale;     /* F3: karsi tarafin SYN'de bildirdigi olcek */
+    uint8_t  ack_pending;     /* F3: birlestirilmis ACK bekliyor */
+    uint16_t ack_pkts;        /* F3: son ACK'tan beri alinan sirali paket sayisi */
     uint32_t idle_ms;         /* son aktivite (clock_ms kesiti): bekleme
                                * durumlarinda slot toplama icin */
 } tcp_connection_t;
@@ -78,6 +85,7 @@ bool tcp_close(int conn_id);
 void tcp_abort(int conn_id);   /* el sikismasiz/zamanasimli slotu serit */
 int  tcp_state(int conn_id);
 void tcp_poll(void);
+void tcp_flush_acks(void);
 bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t length);
 
 #endif

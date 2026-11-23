@@ -8,8 +8,10 @@
 #include "kernel.h"
 #include "serial.h"
 #include "clock.h"
+#include <string.h>
 
 extern bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t length);
+extern void tcp_flush_acks(void);
 
 ipv4_config_t ipv4_config;
 uint8_t ipv4_broadcast[4] = {255, 255, 255, 255};
@@ -119,7 +121,7 @@ static bool ip_send_frame(const uint8_t dst_mac[6], const uint8_t *my_mac,
     iph[10] = (hdr_csum >> 8) & 0xFF;
     iph[11] = hdr_csum & 0xFF;
 
-    for (uint16_t i = 0; i < data_len; i++) iph[20 + i] = data[i];
+    if (data_len > 0 && data) memcpy(iph + 20, data, data_len);
 
     return net_send_packet(packet, pkt_len);
 }
@@ -448,7 +450,7 @@ static int poll_enter(void) {
 int ipv4_poll_nested(void) { return s_poll_busy != 0; }
 
 static void ipv4_drain(int handle_ip) {
-    for (int n = 0; n < 64; n++) {
+    for (int n = 0; n < 128; n++) {
         uint8_t rx_buf[NET_PKT_MAX];
         uint16_t rx_len = sizeof(rx_buf);
         if (!net_receive_packet(rx_buf, &rx_len)) break;
@@ -481,6 +483,7 @@ static void ipv4_drain(int handle_ip) {
         ip_dispatch(p.src, p.dst, p.proto, msg, mlen);
         frag_release(&s_frag[slot]);
     }
+    if (handle_ip) tcp_flush_acks();
 }
 
 void ipv4_poll(void) {

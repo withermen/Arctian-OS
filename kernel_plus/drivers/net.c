@@ -146,17 +146,14 @@ bool net_receive_packet(uint8_t *buf, uint16_t *length) {
         return true;
     }
 
-    uint8_t temp[NET_PKT_MAX];
-    uint16_t pkt_len = NET_PKT_MAX;
-    bool ok = net_drv.receive_packet(net_drv.driver_ctx, temp, &pkt_len);
-    if (ok && buf && length && *length >= pkt_len) {
-        memcpy(buf, temp, pkt_len);
-        *length = pkt_len;
-    } else if (ok && length) {
-        *length = pkt_len;
-        return false;
-    }
-    return ok;
+    /* F2: cift kopyayi kaldir — surucuden dogrudan cagiranin tamponuna oku. */
+    if (!buf || !length) return false;
+    uint16_t cap = *length;
+    uint16_t pkt_len = cap;
+    bool ok = net_drv.receive_packet(net_drv.driver_ctx, buf, &pkt_len);
+    if (!ok) return false;
+    *length = pkt_len;
+    return pkt_len <= cap;
 }
 
 bool net_has_packet(void) {

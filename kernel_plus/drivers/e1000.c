@@ -96,6 +96,7 @@ typedef struct {
     uint8_t mac[6];
     uint8_t irq;
     uint16_t rx_idx;
+    uint16_t rx_refill_pending;
     uint16_t tx_idx;
     bool active;
 } e1000_dev_t;
@@ -142,6 +143,7 @@ void e1000_init(net_controller_t *nc) {
     e1000.mmio = (volatile uint32_t *)(uintptr_t)e1000.mmio_base;
     e1000.irq = nc->dev.irq;
     e1000.rx_idx = 0;
+    e1000.rx_refill_pending = 0;
     e1000.tx_idx = 0;
 
     uint32_t status = e1000_read_reg(E1000_REG_STATUS);
@@ -234,6 +236,9 @@ void e1000_init(net_controller_t *nc) {
     if (e1000.irq != 0xFF && e1000.irq < 16) {
         e1000_write_reg(E1000_REG_IMC, 0xFFFFFFFF);
         e1000_write_reg(E1000_REG_ICR, 0xFFFFFFFF);
+        /* F2: kesme birlestirme (256 us = max ~3900 IRQ/sn); gercek donanimda
+         * ve VirtualBox'ta paket basina kesme firtinasini onler. */
+        e1000_write_reg(E1000_REG_ITR, 1000);
         e1000_write_reg(E1000_REG_IMS, ICR_RXT0 | ICR_RXDMT0 | ICR_LSC);
 
         isr_install_handler(e1000.irq, e1000_irq_handler);
@@ -273,23 +278,35 @@ bool e1000_receive_packet(void *ctx, uint8_t *buf, uint16_t *length) {
     (void)ctx;
     if (!e1000.active) return false;
 
-    for (int i = 0; i < E1000_NUM_RX_DESC; i++) {
-        if (rx_descs[e1000.rx_idx].status & RX_STAT_DD) {
-            uint16_t pkt_len = rx_descs[e1000.rx_idx].length;
-            if (pkt_len > 0 && buf && length && *length >= pkt_len) {
-                memcpy(buf, rx_buffers[e1000.rx_idx], pkt_len);
-                *length = pkt_len;
-            } else if (length) {
-                *length = pkt_len;
-            }
-            rx_descs[e1000.rx_idx].status = 0;
-            e1000.rx_idx = (e1000.rx_idx + 1) % E1000_NUM_RX_DESC;
+    uint16_t idx = e1000.rx_idx;
+    if (!(rx_descs[idx].status & RX_STAT_DD)) {
+        /* F2: halka bosaldiysa bekleyen RDT guncellemesini topluca yaz. */
+        if (e1000.rx_refill_pending > 0) {
+            e1000.rx_refill_pending = 0;
             e1000_write_reg(E1000_REG_RDT,
-                            (e1000.rx_idx + E1000_NUM_RX_DESC - 1) % E1000_NUM_RX_DESC);
-            return true;
+                            (idx + E1000_NUM_RX_DESC - 1) % E1000_NUM_RX_DESC);
         }
+        return false;
     }
-    return false;
+
+    uint16_t pkt_len = rx_descs[idx].length;
+    if (pkt_len > 0 && buf && length && *length >= pkt_len) {
+        memcpy(buf, rx_buffers[idx], pkt_len);
+        *length = pkt_len;
+    } else if (length) {
+        *length = pkt_len;
+    }
+    rx_descs[idx].status = 0;
+    idx = (idx + 1) % E1000_NUM_RX_DESC;
+    e1000.rx_idx = idx;
+
+    /* F2: her 16 pakette bir RDT MMIO yazimi (VM exit / MMIO maliyeti 16x azalir). */
+    if (++e1000.rx_refill_pending >= 16) {
+        e1000.rx_refill_pending = 0;
+        e1000_write_reg(E1000_REG_RDT,
+                        (idx + E1000_NUM_RX_DESC - 1) % E1000_NUM_RX_DESC);
+    }
+    return true;
 }
 
 bool e1000_has_packet(void *ctx) {
