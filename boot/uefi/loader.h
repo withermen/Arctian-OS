@@ -70,7 +70,11 @@ typedef struct {
     void *CoreTPL;                     /* 01 */
     void *AllocatePages;               /* 02 */
     void *FreePages;                   /* 03 */
-    void *GetMemoryMap;                /* 04 */
+    EFI_STATUS (EFIAPI *GetMemoryMap)(UINTN *MemoryMapSize,
+                                      void *MemoryMap,
+                                      UINTN *MapKey,
+                                      UINTN *DescriptorSize,
+                                      UINT32 *DescriptorVersion); /* 04 */
     EFI_STATUS (EFIAPI *AllocatePool)(UINT32 PoolType, UINTN Size,
                                       void **Buffer);      /* 05 */
     EFI_STATUS (EFIAPI *FreePool)(void *Buffer);           /* 06 */
@@ -95,10 +99,14 @@ typedef struct {
     void *StartImage;                  /* 23 */
     void *Exit;                        /* 24 */
     void *UnloadImage;                 /* 25 */
-    void *ExitBootServices;            /* 26 */
+    EFI_STATUS (EFIAPI *ExitBootServices)(EFI_HANDLE ImageHandle,
+                                          UINTN MapKey);   /* 26 */
     void *GetNextMonotonicCount;       /* 27 */
     void *Stall;                       /* 28 */
-    void *SetWatchdogTimer;            /* 29 */
+    EFI_STATUS (EFIAPI *SetWatchdogTimer)(UINTN Timeout,
+                                          UINT64 WatchdogCode,
+                                          UINTN DataSize,
+                                          CHAR16 *WatchdogData); /* 29 */
     void *ConnectController;           /* 30 */
     void *DisconnectController;        /* 31 */
     void *OpenProtocol;                /* 32 */
@@ -286,10 +294,10 @@ void serial_hex(UINT64 v);
 /* GOP mod bilgisini bootinfo sozlesmesine gore 0x7000'e yazar (gop.c). */
 void gop_report(EFI_SYSTEM_TABLE *st);
 
-/* Paket 2 modulleri (fs.c, memmap.c, rsdp.c). */
+/* Paket 2/3 modulleri (fs.c, rsdp.c, elf_jump.c). */
 void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st);
-void memmap_dump(EFI_SYSTEM_TABLE *st);
 void rsdp_find(EFI_SYSTEM_TABLE *st);
+void uefi_boot_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st);
 
 /* Giris noktasi: entry.asm cagirir (loader.c). */
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST);

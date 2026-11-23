@@ -42,8 +42,19 @@ static const uint8_t *acpi_ensure(uint64_t addr, uint32_t size) {
     return (const uint8_t *)(uintptr_t)addr;
 }
 
-/* RSDP: EBDA (0x40E segmenti) ve 0xE0000-0xFFFFF araliginda aranir. */
+/* RSDP: UEFI yolunda 0x7100 (arctian_uefiinfo_t), BIOS yolunda EBDA ve
+ * 0xE0000-0xFFFFF araliginda aranir. */
+#define ACPI_UEFIINFO_ADDR  0x7100u
+#define ACPI_UEFIINFO_MAGIC 0x49464555u
 static const uint8_t *find_rsdp(void) {
+    const uint32_t *ui = (const uint32_t *)(uintptr_t)ACPI_UEFIINFO_ADDR;
+    if (ui[0] == ACPI_UEFIINFO_MAGIC) {
+        uint64_t r = *(const uint64_t *)(uintptr_t)(ACPI_UEFIINFO_ADDR + 0x28u);
+        if (r) {
+            const uint8_t *p = acpi_ensure(r, 64);
+            if (mem_eq(p, "RSD PTR ", 8) && acpi_checksum(p, 20)) return p;
+        }
+    }
     uint16_t ebda;
     __asm__ volatile ("movw 0x40E, %0" : "=r"(ebda));
     uint32_t base = (uint32_t)ebda << 4;

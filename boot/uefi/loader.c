@@ -189,11 +189,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST) {
         u8[i] = 0;
 
     gop_report(ST);
+    rsdp_find(ST);
     fs_load_kernel(ImageHandle, ST);
 
     ui->magic = ARCTIAN_UEFIINFO_MAGIC;
     ui->struct_size = (uint32_t)sizeof(*ui);
 
     serial_puts("ARCTIAN-UEFI-OK\r\n");  /* test isareti: ConOut'tan bagimsiz */
+
+    /* Paket 3: KERNEL.ELF yuklendiyse ExitBootServices -> long mode -> atla. */
+    uefi_boot_kernel(ImageHandle, ST);
+
     return EFI_SUCCESS;
 }

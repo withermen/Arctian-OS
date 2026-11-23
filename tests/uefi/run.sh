@@ -23,6 +23,9 @@ if ! timeout 300 make efi >build/uefi-build.log 2>&1; then
     exit 1
 fi
 
+# Paket 3: varsa main_kernel.elf'i ESP'ye KERNEL.ELF olarak yerlestir.
+KELF=$(ls -t build/obj-*/main_kernel/main_kernel.elf 2>/dev/null | head -n 1 || true)
+
 # FAT imaji: MBR + tek FAT32 bolmesi. dosfstools yerine mtools (WSL'de hazır).
 rm -f "$IMG"
 dd if=/dev/zero of="$IMG" bs=1M count=32 status=none
@@ -30,8 +33,11 @@ printf 'label: dos\nunit: sectors\nstart=2048, type=c, bootable\n' |
     sfdisk --quiet --wipe never "$IMG"
 MDEV=$IMG@@1048576
 mformat -i "$MDEV" :: >/dev/null
-mmd -i "$MDEV" ::/EFI ::/EFI/BOOT
+mmd -i "$MDEV" ::/EFI ::/EFI/BOOT ::/EFI/ARCTIAN
 mcopy -o -i "$MDEV" build/uefi/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
+if [ -n "$KELF" ] && [ -f "$KELF" ]; then
+    mcopy -o -i "$MDEV" "$KELF" ::/EFI/ARCTIAN/KERNEL.ELF
+fi
 
 # OVMF secimi: tek dosya -bios tercih; yoksa CODE+VARS pflash ikilisi.
 BIOS_ARGS="-bios /usr/share/ovmf/OVMF.fd"
