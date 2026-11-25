@@ -2,8 +2,16 @@
 #include "caps.h"
 #include "sched.h"
 #include "paging.h"
+#include "vmm_space.h"
+#include "alloc.h"
+#include "spinlock.h"
 #include "isr.h"
 #include "serial.h"
+
+#define PROC_CHUNK_SHIFT 5u
+#define PROC_CHUNK_SIZE  (1u << PROC_CHUNK_SHIFT) /* 32 surec / dilim */
+#define PROC_CHUNK_MASK  (PROC_CHUNK_SIZE - 1u)
+#define PROC_MAX_CHUNKS  256u                     /* 8192 surece kadar dinamik */
 
 typedef struct {
     int pid;
@@ -22,9 +30,16 @@ typedef struct {
     sched_tid_t task;
 } pcb_t;
 
-static pcb_t s_procs[PROC_MAX];
+static pcb_t *s_proc_chunks[PROC_MAX_CHUNKS];
+static volatile uint32_t s_proc_num_chunks = 0;
+static volatile int s_proc_cap = 0;
+static spinlock_t s_proc_lock = SPINLOCK_INIT;
 static int s_next_pid = 1;
 static int s_init_pid = 1;
+
+extern int  posix_oom_list_cb(asi_oom_app_t *out, int max_out) __attribute__((weak));
+extern int  posix_oom_kill_cb(int pid) __attribute__((weak));
+extern void posix_oom_freeze_cb(int freeze) __attribute__((weak));
 
 static void name_copy(char *dst, int cap, const char *src) {
     int i = 0;
@@ -35,36 +50,100 @@ static void name_copy(char *dst, int cap, const char *src) {
 }
 
 static pcb_t *proc_slot(int i) {
-    if (i < 0 || i >= PROC_MAX) return 0;
-    return &s_procs[i];
+    int cap = __atomic_load_n(&s_proc_cap, __ATOMIC_ACQUIRE);
+    if (i < 0 || i >= cap) return 0;
+    pcb_t *ch = s_proc_chunks[(uint32_t)i >> PROC_CHUNK_SHIFT];
+    return ch ? &ch[(uint32_t)i & PROC_CHUNK_MASK] : 0;
 }
 
 static pcb_t *proc_find(int pid) {
     if (pid <= 0) return 0;
-    for (int i = 0; i < PROC_MAX; i++)
-        if (s_procs[i].state != PROC_UNUSED && s_procs[i].pid == pid)
-            return &s_procs[i];
+    int cap = __atomic_load_n(&s_proc_cap, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < cap; i++) {
+        pcb_t *p = proc_slot(i);
+        if (p && p->state != PROC_UNUSED && p->pid == pid)
+            return p;
+    }
     return 0;
 }
 
 static pcb_t *proc_current(void) {
     pcb_t *p = (pcb_t *)sched_owner_current();
     if (p) return p;
-    return &s_procs[0];
+    return proc_slot(0);
 }
 
-static int proc_alloc_slot(void) {
-    for (int i = 1; i < PROC_MAX; i++)
-        if (s_procs[i].state == PROC_UNUSED) return i;
-    return -1;
+static void proc_init_slot(pcb_t *p) {
+    p->pid = 0;
+    p->ppid = 0;
+    p->state = PROC_UNUSED;
+    p->exit_code = 0;
+    p->is_app = 0;
+    p->waiting = 0;
+    p->caps = CAP_ALL;
+    p->uid = 0;
+    p->gid = 0;
+    p->name[0] = 0;
+    p->entry = 0;
+    p->arg = 0;
+    p->space = 0;
+    p->task = -1;
+}
+
+static pcb_t *proc_alloc_slot_locked(uint64_t *fl_inout) {
+    for (;;) {
+        int cap = s_proc_cap;
+        for (int i = 1; i < cap; i++) {
+            pcb_t *p = proc_slot(i);
+            if (p && p->state == PROC_UNUSED) {
+                p->state = PROC_BLOCKED; /* gecici yer ayirma */
+                p->pid = -1;
+                return p;
+            }
+        }
+        uint32_t nc = s_proc_num_chunks;
+        if (nc >= PROC_MAX_CHUNKS) return 0;
+
+        spin_unlock(&s_proc_lock);
+        sched_irq_restore(*fl_inout);
+        pcb_t *new_ch = (pcb_t *)kmalloc(sizeof(pcb_t) * PROC_CHUNK_SIZE);
+        *fl_inout = sched_irq_save();
+        if (!new_ch) {
+            spin_lock(&s_proc_lock);
+            return 0;
+        }
+        for (uint32_t j = 0; j < PROC_CHUNK_SIZE; j++) proc_init_slot(&new_ch[j]);
+
+        spin_lock(&s_proc_lock);
+        if (s_proc_num_chunks == nc && s_proc_num_chunks < PROC_MAX_CHUNKS) {
+            s_proc_chunks[s_proc_num_chunks++] = new_ch;
+            __atomic_store_n(&s_proc_cap, (int)(s_proc_num_chunks * PROC_CHUNK_SIZE), __ATOMIC_RELEASE);
+            new_ch[0].state = PROC_BLOCKED;
+            new_ch[0].pid = -1;
+            return &new_ch[0];
+        }
+        spin_unlock(&s_proc_lock);
+        kfree(new_ch);
+        spin_lock(&s_proc_lock);
+    }
+}
+
+static void proc_destroy_space_safe(pcb_t *p) {
+    if (!p || !p->space) return;
+    vmm_state_t *st = VMM_STATE;
+    vmm_space_t sp = p->space;
+    p->space = 0;
+    if (st && st->ready && sp != st->kernel_space && sp != vmm_current()) {
+        vmm_space_destroy(sp);
+    }
 }
 
 static void proc_free(pcb_t *p) {
     if (!p) return;
-    if (p->task >= 0) sched_reap(p->task);
+    if (p->task > 0) sched_reap(p->task);
+    proc_destroy_space_safe(p);
     p->state = PROC_UNUSED;
     p->task = -1;
-    p->space = 0;
     p->entry = 0;
     p->arg = 0;
     p->pid = 0;
@@ -83,15 +162,11 @@ static void proc_thread_main(void *arg);
 static int proc_create(const char *name, void (*entry)(void *), void *arg, int ppid) {
     if (!entry) return -1;
     uint64_t fl = sched_irq_save();
-
-    int slot = proc_alloc_slot();
-    if (slot < 0) { sched_irq_restore(fl); return -1; }
-    pcb_t *p = &s_procs[slot];
-
-    vmm_space_t space = vmm_new_space();
-    if (!space) { sched_irq_restore(fl); return -1; }
-
-    p->pid = s_next_pid++;
+    spin_lock(&s_proc_lock);
+    pcb_t *p = proc_alloc_slot_locked(&fl);
+    if (!p) { spin_unlock(&s_proc_lock); sched_irq_restore(fl); return -1; }
+    int pid = s_next_pid++;
+    p->pid = pid;
     p->ppid = ppid > 0 ? ppid : s_init_pid;
     p->exit_code = 0;
     p->is_app = 0;
@@ -101,15 +176,33 @@ static int proc_create(const char *name, void (*entry)(void *), void *arg, int p
     p->gid = 0;
     p->entry = entry;
     p->arg = arg;
-    p->space = space;
+    p->space = 0;
     p->task = -1;
     name_copy(p->name, sizeof(p->name), name ? name : "proc");
+    spin_unlock(&s_proc_lock);
+
+    vmm_space_t space = vmm_new_space();
+    if (!space) {
+        spin_lock(&s_proc_lock);
+        proc_free(p);
+        spin_unlock(&s_proc_lock);
+        sched_irq_restore(fl);
+        return -1;
+    }
+    p->space = space;
+    p->state = PROC_READY;
 
     sched_tid_t tid = sched_spawn_ex(p->name, proc_thread_main, p, space);
-    if (tid < 0) { proc_free(p); sched_irq_restore(fl); return -1; }
+    if (tid < 0) {
+        spin_lock(&s_proc_lock);
+        proc_free(p);
+        spin_unlock(&s_proc_lock);
+        sched_irq_restore(fl);
+        return -1;
+    }
     p->task = tid;
-    p->state = PROC_READY;
     sched_set_owner(tid, p);
+    sched_mark_user_app(tid, 1);
 
     sched_irq_restore(fl);
     serial_printf("[proc] surec olustur: %s (pid=%d, ppid=%d)\n",
@@ -120,6 +213,7 @@ static int proc_create(const char *name, void (*entry)(void *), void *arg, int p
 static void proc_thread_main(void *arg) {
     pcb_t *p = (pcb_t *)arg;
     if (!p) sched_exit();
+    sched_set_owner(sched_current(), p);
     p->state = PROC_RUNNING;
     if (p->entry) p->entry(p->arg);
     proc_exit(0);
@@ -146,33 +240,28 @@ static void proc_fault_handler(int int_no, uint64_t err, uint64_t cr2, uint64_t 
 }
 
 void proc_init(void) {
-    for (int i = 0; i < PROC_MAX; i++) {
-        s_procs[i].pid = 0;
-        s_procs[i].ppid = 0;
-        s_procs[i].state = PROC_UNUSED;
-        s_procs[i].exit_code = 0;
-        s_procs[i].is_app = 0;
-        s_procs[i].waiting = 0;
-        s_procs[i].caps = CAP_ALL;
-        s_procs[i].uid = 0;
-        s_procs[i].gid = 0;
-        s_procs[i].name[0] = 0;
-        s_procs[i].entry = 0;
-        s_procs[i].arg = 0;
-        s_procs[i].space = 0;
-        s_procs[i].task = -1;
+    for (uint32_t c = 0; c < PROC_MAX_CHUNKS; c++) s_proc_chunks[c] = 0;
+    s_proc_chunks[0] = (pcb_t *)kmalloc(sizeof(pcb_t) * PROC_CHUNK_SIZE);
+    if (!s_proc_chunks[0]) {
+        serial_puts("[proc] HATA: surec havuzu ayrilamadi\n");
+        return;
     }
-    s_procs[0].pid = 1;
-    s_procs[0].ppid = 0;
-    s_procs[0].state = PROC_RUNNING;
-    name_copy(s_procs[0].name, sizeof(s_procs[0].name), "init");
-    s_procs[0].space = vmm_current();
-    s_procs[0].task = sched_current();
-    sched_set_owner(sched_current(), &s_procs[0]);
+    s_proc_num_chunks = 1u;
+    s_proc_cap = (int)PROC_CHUNK_SIZE;
+    for (uint32_t i = 0; i < PROC_CHUNK_SIZE; i++) proc_init_slot(&s_proc_chunks[0][i]);
+
+    pcb_t *p0 = &s_proc_chunks[0][0];
+    p0->pid = 1;
+    p0->ppid = 0;
+    p0->state = PROC_RUNNING;
+    name_copy(p0->name, sizeof(p0->name), "init");
+    p0->space = vmm_current();
+    p0->task = sched_current();
+    sched_set_owner(sched_current(), p0);
     s_init_pid = 1;
     s_next_pid = 2;
     arctian_set_fault_handler(proc_fault_handler);
-    serial_puts("[proc] surec yoneticisi aktif (PID tablosu hazir)\n");
+    serial_puts("[proc] dinamik surec yoneticisi aktif (PID tablosu hazir)\n");
 }
 
 int proc_spawn(const char *name, void (*entry)(void *), void *arg) {
@@ -200,7 +289,8 @@ void proc_exit(int code) {
     if (p) {
         p->state = PROC_ZOMBIE;
         p->exit_code = code;
-        for (int i = 0; i < PROC_MAX; i++) {
+        int cap = __atomic_load_n(&s_proc_cap, __ATOMIC_ACQUIRE);
+        for (int i = 0; i < cap; i++) {
             pcb_t *c = proc_slot(i);
             if (c && c->state != PROC_UNUSED && c->ppid == p->pid)
                 c->ppid = s_init_pid;
@@ -255,15 +345,17 @@ int proc_getppid(void) {
 
 int proc_count(void) {
     int n = 0;
-    for (int i = 0; i < PROC_MAX; i++)
-        if (s_procs[i].state != PROC_UNUSED) n++;
+    int cap = __atomic_load_n(&s_proc_cap, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < cap; i++) {
+        pcb_t *p = proc_slot(i);
+        if (p && p->state != PROC_UNUSED) n++;
+    }
     return n;
 }
 
 int proc_info(int i, int *pid, char *name, int cap, int *state, int *ppid, int *code) {
-    if (i < 0 || i >= PROC_MAX) return -1;
-    pcb_t *p = &s_procs[i];
-    if (p->state == PROC_UNUSED) return -1;
+    pcb_t *p = proc_slot(i);
+    if (!p || p->state == PROC_UNUSED) return -1;
     if (pid) *pid = p->pid;
     if (name && cap > 0) name_copy(name, cap, p->name);
     if (state) *state = (int)p->state;
@@ -273,9 +365,9 @@ int proc_info(int i, int *pid, char *name, int cap, int *state, int *ppid, int *
 }
 
 int proc_info_ex(int i, asi_proc_info_t *out) {
-    if (i < 0 || i >= PROC_MAX || !out) return -1;
-    pcb_t *p = &s_procs[i];
-    if (p->state == PROC_UNUSED) return -1;
+    if (!out) return -1;
+    pcb_t *p = proc_slot(i);
+    if (!p || p->state == PROC_UNUSED) return -1;
     out->pid = p->pid;
     out->ppid = p->ppid;
     out->state = (int)p->state;
@@ -294,9 +386,9 @@ uint32_t proc_sys_ticks(void) {
 
 int proc_app_open_caps(const char *title, uint32_t caps) {
     uint64_t fl = sched_irq_save();
-    int slot = proc_alloc_slot();
-    if (slot < 0) { sched_irq_restore(fl); return -1; }
-    pcb_t *p = &s_procs[slot];
+    spin_lock(&s_proc_lock);
+    pcb_t *p = proc_alloc_slot_locked(&fl);
+    if (!p) { spin_unlock(&s_proc_lock); sched_irq_restore(fl); return -1; }
     p->pid = s_next_pid++;
     p->ppid = s_init_pid;
     p->state = PROC_RUNNING;
@@ -311,6 +403,7 @@ int proc_app_open_caps(const char *title, uint32_t caps) {
     p->space = 0;
     p->task = -1;
     name_copy(p->name, sizeof(p->name), title ? title : "uygulama");
+    spin_unlock(&s_proc_lock);
     sched_irq_restore(fl);
     serial_printf("[proc] uygulama sureci basladi: %s (pid=%d, yetki=0x%X)\n",
                   p->name, p->pid, (unsigned)caps);
@@ -334,8 +427,15 @@ uint32_t proc_caps_of(int pid) {
  * ayakta kalir. Bozulma bir kez seri loga yazilir. */
 static int proc_slot_valid(const pcb_t *p) {
     if (!p) return 0;
-    if (p < &s_procs[0] || p >= &s_procs[PROC_MAX]) return 0;
-    return (((uintptr_t)p - (uintptr_t)&s_procs[0]) % sizeof(pcb_t)) == 0;
+    uint32_t nc = __atomic_load_n(&s_proc_num_chunks, __ATOMIC_ACQUIRE);
+    for (uint32_t c = 0; c < nc; c++) {
+        pcb_t *base = s_proc_chunks[c];
+        if (!base) continue;
+        if (p >= base && p < base + PROC_CHUNK_SIZE) {
+            return (((uintptr_t)p - (uintptr_t)base) % sizeof(pcb_t)) == 0;
+        }
+    }
+    return 0;
 }
 
 int proc_owner_caps(uint32_t *out) {
@@ -386,9 +486,11 @@ void proc_app_close(int pid, int code) {
 
 int proc_reap(int *code_out) {
     uint64_t fl = sched_irq_save();
-    for (int i = 0; i < PROC_MAX; i++) {
-        pcb_t *p = &s_procs[i];
-        if (p->state != PROC_ZOMBIE) continue;
+    spin_lock(&s_proc_lock);
+    int cap = s_proc_cap;
+    for (int i = 0; i < cap; i++) {
+        pcb_t *p = proc_slot(i);
+        if (!p || p->state != PROC_ZOMBIE) continue;
         pcb_t *par = proc_find(p->ppid);
         if (par && par->waiting) continue;
         int pid = p->pid;
@@ -397,9 +499,11 @@ int proc_reap(int *code_out) {
                       p->name, pid, code);
         proc_free(p);
         if (code_out) *code_out = code;
+        spin_unlock(&s_proc_lock);
         sched_irq_restore(fl);
         return pid;
     }
+    spin_unlock(&s_proc_lock);
     sched_irq_restore(fl);
     return -1;
 }
@@ -489,4 +593,101 @@ int proc_fault_selftest(void) {
     serial_printf("[proc] bellek koruma selftest: pid=%d kod=%d -> %s\n",
                   r, code, ok ? "OK (surec olduruldu, sistem ayakta)" : "HATA");
     return ok ? 0 : -1;
+}
+
+/* ---- E1: OOM Basinc & Dondurma / Cozme / Sonlandirma ---- */
+
+int proc_oom_state(void) {
+    return vmm_oom_pressure();
+}
+
+void proc_oom_freeze_apps(void) {
+    sched_freeze_user_apps();
+    if (posix_oom_freeze_cb) posix_oom_freeze_cb(1);
+}
+
+void proc_oom_thaw_apps(void) {
+    sched_thaw_user_apps();
+    if (posix_oom_freeze_cb) posix_oom_freeze_cb(0);
+}
+
+int proc_oom_list_apps(asi_oom_app_t *out, int max_out) {
+    if (!out || max_out <= 0) return 0;
+    int n = 0;
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_proc_lock);
+    int cap = s_proc_cap;
+    for (int i = 1; i < cap && n < max_out; i++) {
+        pcb_t *p = proc_slot(i);
+        if (!p || p->state == PROC_UNUSED || p->state == PROC_ZOMBIE || p->pid <= 1)
+            continue;
+        asi_oom_app_t *e = &out[n++];
+        e->pid = p->pid;
+        uint32_t kb = p->space ? vmm_space_ram_kb(p->space) : 0u;
+        if (p->task > 0) kb += 32u;
+        if (kb == 0u) kb = 64u;
+        e->ram_kb = kb;
+        e->frozen = (p->task > 0 && sched_is_frozen(p->task)) ? 1u : 0u;
+        e->kind = p->is_app ? ASI_OOM_KIND_WLF : ASI_OOM_KIND_NATIVE;
+        e->reserved[0] = 0;
+        e->reserved[1] = 0;
+        name_copy(e->name, sizeof(e->name), p->name);
+    }
+    spin_unlock(&s_proc_lock);
+    sched_irq_restore(fl);
+
+    if (n < max_out && posix_oom_list_cb) {
+        int pn = posix_oom_list_cb(out + n, max_out - n);
+        if (pn > 0) n += pn;
+    }
+    return n;
+}
+
+int proc_oom_kill_app(int pid) {
+    if (pid <= 1) return -1;
+
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_proc_lock);
+    pcb_t *p = proc_find(pid);
+    if (p) {
+        sched_tid_t tid = p->task;
+        p->task = -1;
+        p->state = PROC_ZOMBIE;
+        p->exit_code = -9;
+        vmm_space_t sp = p->space;
+        p->space = 0;
+        pcb_t *par = proc_find(p->ppid);
+        int par_waiting = (par && par->waiting) ? 1 : 0;
+        spin_unlock(&s_proc_lock);
+        sched_irq_restore(fl);
+
+        if (tid > 0) {
+            sched_terminate_task(tid);
+            sched_reap(tid);
+        }
+        if (sp) {
+            vmm_state_t *st = VMM_STATE;
+            if (st && st->ready && sp != st->kernel_space && sp != vmm_current())
+                vmm_space_destroy(sp);
+        }
+
+        fl = sched_irq_save();
+        spin_lock(&s_proc_lock);
+        if (par_waiting) {
+            proc_wake_parent(p);
+        } else {
+            p->state = PROC_UNUSED;
+            p->pid = 0;
+            p->entry = 0;
+            p->arg = 0;
+        }
+        spin_unlock(&s_proc_lock);
+        sched_irq_restore(fl);
+        return 0;
+    }
+    spin_unlock(&s_proc_lock);
+    sched_irq_restore(fl);
+
+    if (posix_oom_kill_cb) return posix_oom_kill_cb(pid);
+    return -1;
 }

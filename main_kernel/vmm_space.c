@@ -114,10 +114,65 @@ int vmm_space_protect_user(vmm_space_t sp, uint64_t va, uint64_t flags) {
     return vmm_protect(sp, va, pte_flags);
 }
 
+/* PROT_NONE: P=1 korunur (cerceve verisi ve destroy muhasebesi bozulmaz),
+ * U=0 yapilarak CPL3 erisimi #PF ile reddedilir. */
+int vmm_space_protect_none(vmm_space_t sp, uint64_t va) {
+    uint64_t pte_flags = VMM_PTE_P;
+    if (!sp || (va & 0xFFFull)) return -1;
+    if (!vmm_space_user_range(va, 0x1000)) return -1;
+    if (vmm_space_nx_ok()) pte_flags |= VMM_PTE_NX;
+    return vmm_protect(sp, va, pte_flags);
+}
+
 uint64_t vmm_space_get_user_pte(vmm_space_t sp, uint64_t va) {
     if (!sp || (va & 0xFFFull)) return 0;
     if (!vmm_space_user_range(va, 0x1000)) return 0;
     return vmm_get_pte(sp, va);
+}
+
+/* [va, end) araligindaki ilk mevcut (P=1) 4KB kullanici VA'sini doner.
+ * Bos PML4 (512GB) / PDPT (1GB) / PD (2MB) girislerini O(1)'de atlar;
+ * boylece 64GB PROT_NONE GigaCage uzerinde unmap/mprotect/fork mikrosaniye surer. */
+uint64_t vmm_space_next_present(vmm_space_t sp, uint64_t va, uint64_t end) {
+    if (!sp || va >= end) return end;
+    va &= ~0xFFFull;
+    if (va < (uint64_t)VMM_USER_BASE) va = (uint64_t)VMM_USER_BASE;
+    if (end > VMM_USER_TOP) end = VMM_USER_TOP;
+    uint64_t *pml4 = ptbl(sp);
+
+    while (va < end) {
+        int i4 = (int)((va >> 39) & 0x1FF);
+        uint64_t e4 = pml4[i4];
+        if (!(e4 & VMM_PTE_P) || (e4 & VMM_PTE_HUGE)) {
+            uint64_t nxt = (va & ~0x7FFFFFFFFFull) + 0x8000000000ull;
+            if (nxt <= va || nxt >= end) return end;
+            va = nxt;
+            continue;
+        }
+        uint64_t *pdpt = ptbl(e4 & VMM_ADDR_MASK);
+        int i3 = (int)((va >> 30) & 0x1FF);
+        uint64_t e3 = pdpt[i3];
+        if (!(e3 & VMM_PTE_P) || (e3 & VMM_PTE_HUGE)) {
+            uint64_t nxt = (va & ~0x3FFFFFFFull) + 0x40000000ull;
+            if (nxt <= va || nxt >= end) return end;
+            va = nxt;
+            continue;
+        }
+        uint64_t *pd = ptbl(e3 & VMM_ADDR_MASK);
+        int i2 = (int)((va >> 21) & 0x1FF);
+        uint64_t e2 = pd[i2];
+        if (!(e2 & VMM_PTE_P) || (e2 & VMM_PTE_HUGE)) {
+            uint64_t nxt = (va & ~0x1FFFFFull) + 0x200000ull;
+            if (nxt <= va || nxt >= end) return end;
+            va = nxt;
+            continue;
+        }
+        uint64_t *pt = ptbl(e2 & VMM_ADDR_MASK);
+        int i1 = (int)((va >> 12) & 0x1FF);
+        if (pt[i1] & VMM_PTE_P) return va;
+        va += 0x1000ull;
+    }
+    return end;
 }
 
 void vmm_space_destroy(vmm_space_t sp) {

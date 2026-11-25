@@ -20,6 +20,15 @@
 #define PCI_VENDOR_TI       0x104C
 #define PCI_VENDOR_ATHEROS  0x168C
 #define PCI_VENDOR_BROADCOM 0x14E4
+#define PCI_VENDOR_BOCHS    0x1234
+#define PCI_VENDOR_VIRTIO   0x1AF4
+#define PCI_VENDOR_QEMU     0x1B36
+
+#define PCI_CLASS_DISPLAY        0x03
+#define PCI_SUBCLASS_VGA         0x00
+#define PCI_SUBCLASS_XGA         0x01
+#define PCI_SUBCLASS_3D          0x02
+#define PCI_SUBCLASS_DISP_OTHER  0x80
 
 #define PCI_CLASS_SERIAL         0x0C
 #define PCI_SUBCLASS_USB         0x03

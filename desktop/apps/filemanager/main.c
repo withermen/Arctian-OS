@@ -1534,9 +1534,10 @@ static void build_ui(lv_obj_t *win) {
 static void fm_relayout(lv_obj_t *win) {
     if (!win) return;
     lv_obj_t *shell = lv_obj_get_parent(win);
-    int outer_w = shell ? lv_obj_get_width(shell) : lv_obj_get_width(win) + 4;
+    int is_max = shell && lv_obj_has_flag(shell, LV_OBJ_FLAG_USER_1);
+    int outer_w = shell ? lv_obj_get_width(shell) : lv_obj_get_width(win) + (is_max ? 0 : 4);
     int outer_h = shell ? lv_obj_get_height(shell) : lv_obj_get_height(win) + 40;
-    int W = outer_w - 4, H = outer_h - 40;
+    int W = is_max ? outer_w : (outer_w - 4), H = outer_h - 40;
     if (W < 460 || H < 280) return;
     const int toolbar_h = 52, status_h = 28, side_w = 184, detail_w = 260, head_h = 30;
     int body_h = H - toolbar_h - status_h;
@@ -1545,9 +1546,12 @@ static void fm_relayout(lv_obj_t *win) {
     if (list_w < 100) list_w = 100;
     if (shell) {
         lv_obj_t *titlebar = lv_obj_get_child(shell, 0);
-        if (titlebar) { lv_obj_set_size(titlebar, outer_w - 2, 40); lv_obj_align(titlebar, LV_ALIGN_TOP_MID, 0, 1); }
-        lv_obj_set_pos(win, 2, 40);
-        lv_obj_set_size(win, outer_w - 4, outer_h - 40);
+        if (titlebar) {
+            lv_obj_set_size(titlebar, is_max ? outer_w : (outer_w - 2), 40);
+            lv_obj_align(titlebar, LV_ALIGN_TOP_MID, 0, is_max ? 0 : 1);
+        }
+        lv_obj_set_pos(win, is_max ? 0 : 2, 40);
+        lv_obj_set_size(win, W, H);
     }
     if (crumb_box) { lv_obj_set_pos(crumb_box, 56, 10); lv_obj_set_size(crumb_box, W - 320, 32); }
     if (ui_tb) lv_obj_set_size(ui_tb, W, toolbar_h);

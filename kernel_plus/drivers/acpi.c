@@ -3,6 +3,7 @@
 #include "kernel.h"
 #include "serial.h"
 #include "mmio.h"
+#include "paging.h"
 #include <stddef.h>
 
 acpi_info_t g_acpi;
@@ -35,15 +36,22 @@ static uint16_t rd16(const uint8_t *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-/* 1GB ustundeki fiziksel ACPI tablo adreslerini 2MB sayfalarla identity map'ler. */
+/* 1GB ustundeki fiziksel ACPI tablo adreslerini (>4 GB dahil) 2MB sayfalarla
+ * identity map'ler. VMM hazirsa vmm_map_mmio_range() kullanilir; degilse
+ * mmio_map() yedegine dusulur. */
 static const uint8_t *acpi_ensure(uint64_t addr, uint32_t size) {
-    if (addr >= 0x40000000ull)
-        mmio_map(addr, size ? size : 0x1000u);
+    if (!addr) return 0;
+    uint32_t sz = size ? size : 0x1000u;
+    if (addr + sz < addr) return 0;
+    if (addr >= 0x40000000ull || addr + sz > 0x40000000ull) {
+        if (vmm_map_mmio_range(addr, sz) != 0)
+            mmio_map(addr, sz);
+    }
     return (const uint8_t *)(uintptr_t)addr;
 }
 
 /* RSDP: UEFI yolunda 0x7100 (arctian_uefiinfo_t), BIOS yolunda EBDA ve
- * 0xE0000-0xFFFFF araliginda aranir. */
+ * 0xE0000-0xFFFFF araliginda aranir. >4 GB fiziksel adres desteklenir. */
 #define ACPI_UEFIINFO_ADDR  0x7100u
 #define ACPI_UEFIINFO_MAGIC 0x49464555u
 static const uint8_t *find_rsdp(void) {
@@ -52,7 +60,7 @@ static const uint8_t *find_rsdp(void) {
         uint64_t r = *(const uint64_t *)(uintptr_t)(ACPI_UEFIINFO_ADDR + 0x28u);
         if (r) {
             const uint8_t *p = acpi_ensure(r, 64);
-            if (mem_eq(p, "RSD PTR ", 8) && acpi_checksum(p, 20)) return p;
+            if (p && mem_eq(p, "RSD PTR ", 8) && acpi_checksum(p, 20)) return p;
         }
     }
     uint16_t ebda;
@@ -71,16 +79,17 @@ static const uint8_t *find_rsdp(void) {
     return 0;
 }
 
-/* Verilen tablo imzasini RSDT/XSDT icinde arar. */
+/* Verilen tablo imzasini RSDT/XSDT icinde arar (tam 64-bit adres destegi). */
 static const uint8_t *sdt_find(const uint8_t *sdt, const char *sig) {
     if (!sdt) return 0;
     uint32_t len = rd32(sdt + 4);
     if (len < 36 || len > (16u << 20)) return 0;
     int entsize = (mem_eq(sdt, "XSDT", 4)) ? 8 : 4;
-    for (uint32_t off = 36; off + (uint32_t)entsize <= len; off += entsize) {
-        uint64_t addr = (entsize == 8) ? rd64(sdt + off) : rd32(sdt + off);
-        if (!addr || addr > 0xFFFFFFFFull) continue;
+    for (uint32_t off = 36; off + (uint32_t)entsize <= len; off += (uint32_t)entsize) {
+        uint64_t addr = (entsize == 8) ? rd64(sdt + off) : (uint64_t)rd32(sdt + off);
+        if (!addr) continue;
         const uint8_t *t = acpi_ensure(addr, 0x1000);
+        if (!t) continue;
         if (mem_eq(t, sig, 4)) {
             uint32_t tl = rd32(t + 4);
             if (tl >= 36 && tl <= (16u << 20)) t = acpi_ensure(addr, tl);
@@ -118,10 +127,7 @@ static uint64_t aml_int(const uint8_t **pp, const uint8_t *end) {
     return v;
 }
 
-/* DSDT icinde "_S5_" / "_S3_" paketini bulup SLP_TYP degerlerini yazar.
- * Donus: 1 = paket bulundu, 0 = bulunamadi (bulunmayan bir devletin
- * SLP_TYP'i varsayilanla uyutulamaz; yoksa S3 sanilan bir yazma makineyi
- * kapatabilir). */
+/* DSDT icinde "_S5_" / "_S3_" paketini bulup SLP_TYP degerlerini yazar. */
 static int dsdt_slp(const uint8_t *dsdt, const char *name, uint8_t *a, uint8_t *b) {
     if (!dsdt) return 0;
     uint32_t len = rd32(dsdt + 4);
@@ -147,76 +153,227 @@ static int dsdt_slp(const uint8_t *dsdt, const char *name, uint8_t *a, uint8_t *
     return 0;
 }
 
+static void parse_madt(const uint8_t *sdt) {
+    const uint8_t *madt = sdt_find(sdt, "APIC");
+    if (!madt) return;
+    uint32_t len = rd32(madt + 4);
+    if (len < 44 || len > (16u << 20) || !acpi_checksum(madt, len)) return;
+    g_acpi.has_madt = 1;
+    g_acpi.lapic_addr = (uint64_t)rd32(madt + 36);
+    for (uint32_t off = 44; off + 2 <= len; ) {
+        uint8_t type = madt[off];
+        uint8_t elen = madt[off + 1];
+        if (elen < 2 || off + elen > len) break;
+        if (type == 0 && elen >= 8) {
+            if (rd32(madt + off + 4) & 1u) g_acpi.cpu_count++;
+        } else if (type == 9 && elen >= 12) {
+            if (rd32(madt + off + 8) & 1u) g_acpi.cpu_count++;
+        } else if (type == 1 && elen >= 12) {
+            g_acpi.ioapic_count++;
+        } else if (type == 5 && elen >= 12) {
+            g_acpi.lapic_addr = rd64(madt + off + 4);
+        }
+        off += elen;
+    }
+}
+
+static void parse_mcfg(const uint8_t *sdt) {
+    const uint8_t *mcfg = sdt_find(sdt, "MCFG");
+    if (!mcfg) return;
+    uint32_t len = rd32(mcfg + 4);
+    if (len < 60 || len > (16u << 20) || !acpi_checksum(mcfg, len)) return;
+    g_acpi.has_mcfg = 1;
+    g_acpi.mcfg_ecam_base = rd64(mcfg + 44);
+    g_acpi.mcfg_start_bus = mcfg[54];
+    g_acpi.mcfg_end_bus   = mcfg[55];
+}
+
+/* ------------------------------------------------------------------ */
+/* CPU termal sensoru (DTS) + guvenli bosta bekleme                   */
+/* ------------------------------------------------------------------ */
+
+static inline void acpi_cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
+                              uint32_t *c, uint32_t *d) {
+    __asm__ volatile("cpuid"
+                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                     : "a"(leaf), "c"(0u));
+}
+
+static inline uint64_t acpi_rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+static void probe_cpu_thermal(void) {
+    g_acpi.dts_supported = 0;
+    g_acpi.tjmax_c = 100;
+
+    uint32_t max_leaf = 0, ebx = 0, ecx = 0, edx = 0;
+    acpi_cpuid(0u, &max_leaf, &ebx, &ecx, &edx);
+    if (max_leaf < 6u) return;
+
+    /* Intel GenuineIntel kontrolu: IA32_THERM_STATUS / IA32_TEMPERATURE_TARGET */
+    int is_intel = (ebx == 0x756E6547u && edx == 0x49656E69u && ecx == 0x6C65746Eu);
+    if (!is_intel) return;
+
+    uint32_t a6 = 0, b6 = 0, c6 = 0, d6 = 0;
+    acpi_cpuid(6u, &a6, &b6, &c6, &d6);
+    if (!(a6 & 1u)) return; /* CPUID.06H:EAX[0] = Digital Thermal Sensor */
+
+    g_acpi.dts_supported = 1;
+
+    /* IA32_TEMPERATURE_TARGET (0x1A2) yalniz Nehalem+ (family 6, model >= 0x1A)
+     * islemcilerde mevcuttur; aksi halde veya okuma aralik disiysa 100C yedegi. */
+    uint32_t a1 = 0, b1 = 0, c1 = 0, d1 = 0;
+    acpi_cpuid(1u, &a1, &b1, &c1, &d1);
+    uint32_t fam   = (a1 >> 8) & 0xFu;
+    uint32_t model = ((a1 >> 4) & 0xFu) | (((a1 >> 16) & 0xFu) << 4);
+    if (fam == 0x6u && model >= 0x1Au) {
+        uint64_t tgt = acpi_rdmsr(0x1A2u);
+        int tj = (int)((tgt >> 16) & 0xFFu);
+        if (tj >= 50 && tj <= 125) g_acpi.tjmax_c = tj;
+    }
+}
+
+int acpi_cpu_temp_c(void) {
+    if (!g_acpi.dts_supported) return -1;
+    uint64_t st = acpi_rdmsr(0x19Cu); /* IA32_THERM_STATUS */
+    if (!(st & (1ull << 31))) return -1; /* Reading Valid (bit 31) */
+    int delta = (int)((st >> 16) & 0x7Fu);
+    int tj = g_acpi.tjmax_c > 0 ? g_acpi.tjmax_c : 100;
+    int temp = tj - delta;
+    if (temp < 0) temp = 0;
+    return temp;
+}
+
+void acpi_halt_idle(void) {
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0" : "=r"(rflags) :: "memory");
+    if (rflags & 0x200ull) {
+        __asm__ volatile("hlt" ::: "memory");
+    } else {
+        __asm__ volatile("pause" ::: "memory");
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Baslatma                                                           */
+/* ------------------------------------------------------------------ */
+
 void acpi_init(void) {
     for (unsigned i = 0; i < sizeof(g_acpi); i++) ((uint8_t *)&g_acpi)[i] = 0;
     g_acpi.slp_typ_s5a = 5;   /* ACPI spec onerilen varsayilan */
     g_acpi.slp_typ_s5b = 5;
+    g_acpi.tjmax_c = 100;
+
+    probe_cpu_thermal();
 
     const uint8_t *rsdp = find_rsdp();
-    if (!rsdp) return;
+    if (!rsdp) {
+        serial_printf("[acpi] present=0 dts=%d tjmax=%d\n",
+                      g_acpi.dts_supported, g_acpi.tjmax_c);
+        return;
+    }
 
     uint8_t revision = rsdp[15];
     const uint8_t *sdt = 0;
     if (revision >= 2) {
-        uint64_t xsdt = rd64(rsdp + 24);
-        if (xsdt && xsdt <= 0xFFFFFFFFull) {
-            const uint8_t *t = acpi_ensure(xsdt, 0x1000);
-            if (mem_eq(t, "XSDT", 4)) {
-                t = acpi_ensure(xsdt, rd32(t + 4));
-                if (acpi_checksum(t, rd32(t + 4))) sdt = t;
+        uint32_t rlen = rd32(rsdp + 20);
+        if (rlen >= 36 && rlen <= 256 && acpi_checksum(rsdp, rlen)) {
+            uint64_t xsdt = rd64(rsdp + 24);
+            if (xsdt) {
+                const uint8_t *t = acpi_ensure(xsdt, 0x1000);
+                if (t && mem_eq(t, "XSDT", 4)) {
+                    uint32_t xlen = rd32(t + 4);
+                    if (xlen >= 36 && xlen <= (16u << 20)) {
+                        t = acpi_ensure(xsdt, xlen);
+                        if (t && acpi_checksum(t, xlen)) {
+                            sdt = t;
+                            g_acpi.has_xsdt = 1;
+                            g_acpi.sdt_addr = xsdt;
+                        }
+                    }
+                }
             }
         }
     }
     if (!sdt) {
         uint32_t rsdt = rd32(rsdp + 16);
-        if (rsdt && rsdt <= 0xFFFFFFFFu) {
-            const uint8_t *t = acpi_ensure(rsdt, 0x1000);
-            if (mem_eq(t, "RSDT", 4)) {
-                t = acpi_ensure(rsdt, rd32(t + 4));
-                if (acpi_checksum(t, rd32(t + 4))) sdt = t;
+        if (rsdt) {
+            const uint8_t *t = acpi_ensure((uint64_t)rsdt, 0x1000);
+            if (t && mem_eq(t, "RSDT", 4)) {
+                uint32_t rlen = rd32(t + 4);
+                if (rlen >= 36 && rlen <= (16u << 20)) {
+                    t = acpi_ensure((uint64_t)rsdt, rlen);
+                    if (t && acpi_checksum(t, rlen)) {
+                        sdt = t;
+                        g_acpi.sdt_addr = (uint64_t)rsdt;
+                    }
+                }
             }
         }
     }
-    if (!sdt) return;
+    if (!sdt) {
+        serial_printf("[acpi] present=0 (no valid SDT) dts=%d\n", g_acpi.dts_supported);
+        return;
+    }
+
+    parse_madt(sdt);
+    parse_mcfg(sdt);
 
     const uint8_t *fadt = sdt_find(sdt, "FACP");
-    if (!fadt) return;
-    uint32_t flen = rd32(fadt + 4);
-    if (flen < 0x40 || flen > (16u << 20)) return;
+    if (fadt) {
+        uint32_t flen = rd32(fadt + 4);
+        if (flen >= 0x40 && flen <= (16u << 20)) {
+            for (int i = 0; i < 6; i++) g_acpi.oem_id[i] = (char)fadt[0x0A + i];
+            g_acpi.oem_id[6] = 0;
+            g_acpi.present = 1;
+            if (flen >= 0x2Eu) g_acpi.pm_profile = fadt[0x2D];
+            if (flen >= 0x30u) g_acpi.sci_int = (uint8_t)rd16(fadt + 0x2E);
+            if (flen >= 0x36u) {
+                g_acpi.smi_cmd = (uint16_t)rd32(fadt + 0x30);
+                g_acpi.acpi_enable = fadt[0x34];
+                g_acpi.acpi_disable = fadt[0x35];
+            }
+            if (flen >= 0x3Cu) g_acpi.pm1a_evt = (uint16_t)rd32(fadt + 0x38);
+            if (flen >= 0x44u) g_acpi.pm1a_cnt = (uint16_t)rd32(fadt + 0x40);
+            if (flen >= 0x48u) g_acpi.pm1b_cnt = (uint16_t)rd32(fadt + 0x44);
+            if (flen >= 0x5Au) g_acpi.pm1_cnt_len = fadt[0x59];
+            if (flen >= 0x6Du) g_acpi.century = fadt[0x6C];
+            if (flen >= 0x74u) g_acpi.flags = rd32(fadt + 0x70);
 
-    /* Tarla okumalari tablo uzunluguna karsi teker teker denetlenir:
-     * kisa FADT gonderen makinelerde (erken ACPI 1.0) 0x40 sonrasindaki
-     * alanlar yoktur; eskiden flags (=0x74) okunurken tablonun bitisindan
-     * aliniyordu. Yanlis deger, yanlis SLP_TYP demek; sessizce olmasin. */
-    for (int i = 0; i < 6; i++) g_acpi.oem_id[i] = (char)fadt[0x0A + i];
-    g_acpi.oem_id[6] = 0;
-    g_acpi.present = 1;
-    if (flen >= 0x2Fu) g_acpi.sci_int = fadt[0x2E];
-    if (flen >= 0x36u) {
-        g_acpi.smi_cmd = (uint16_t)rd32(fadt + 0x30);
-        g_acpi.acpi_enable = fadt[0x34];
-        g_acpi.acpi_disable = fadt[0x35];
+            /* DSDT: ACPI 2.0+ X_DSDT (offset 0x8C, 64-bit) tercih edilir. */
+            uint64_t dsdt_addr = (flen >= 0x2Cu) ? (uint64_t)rd32(fadt + 0x28) : 0ull;
+            if (flen >= 0x94u) {
+                uint64_t xd = rd64(fadt + 0x8C);
+                if (xd) dsdt_addr = xd;
+            }
+            const uint8_t *dsdt = dsdt_addr ? acpi_ensure(dsdt_addr, 0x1000) : 0;
+            if (dsdt && mem_eq(dsdt, "DSDT", 4)) {
+                uint32_t dlen = rd32(dsdt + 4);
+                if (dlen >= 36 && dlen <= (16u << 20)) {
+                    dsdt = acpi_ensure(dsdt_addr, dlen);
+                    if (dsdt) {
+                        g_acpi.has_dsdt = 1;
+                        dsdt_slp(dsdt, "_S5_", &g_acpi.slp_typ_s5a, &g_acpi.slp_typ_s5b);
+                        g_acpi.has_s3 = dsdt_slp(dsdt, "_S3_", &g_acpi.slp_typ_s3a, &g_acpi.slp_typ_s3b);
+                    }
+                }
+            }
+        }
     }
-    if (flen >= 0x3Cu) g_acpi.pm1a_evt = (uint16_t)rd32(fadt + 0x38);
-    if (flen >= 0x44u) g_acpi.pm1a_cnt = (uint16_t)rd32(fadt + 0x40);
-    if (flen >= 0x48u) g_acpi.pm1b_cnt = (uint16_t)rd32(fadt + 0x44);
-    if (flen >= 0x5Au) g_acpi.pm1_cnt_len = fadt[0x59];
-    if (flen >= 0x78u) g_acpi.flags = rd32(fadt + 0x74);
-    if (flen >= 0x6Du) g_acpi.century = fadt[0x6C];
 
-    /* DSDT: ACPI 2.0+ X_DSDT (GAS) tercih edilir. */
-    uint32_t dsdt32 = (flen >= 0x2Cu) ? rd32(fadt + 0x28) : 0;
-    const uint8_t *dsdt = dsdt32 ? acpi_ensure(dsdt32, 0x1000) : 0;
-    if (flen >= 0x94u) {
-        uint64_t xd = rd64(fadt + 0x90);
-        if (xd && xd <= 0xFFFFFFFFull) dsdt = acpi_ensure(xd, 0x1000);
-    }
-    if (dsdt && mem_eq(dsdt, "DSDT", 4)) {
-        dsdt = acpi_ensure((uint64_t)(uintptr_t)dsdt, rd32(dsdt + 4));
-        g_acpi.has_dsdt = 1;
-        dsdt_slp(dsdt, "_S5_", &g_acpi.slp_typ_s5a, &g_acpi.slp_typ_s5b);
-        g_acpi.has_s3 = dsdt_slp(dsdt, "_S3_", &g_acpi.slp_typ_s3a, &g_acpi.slp_typ_s3b);
-    }
+    int temp_c = acpi_cpu_temp_c();
+    serial_printf("[acpi] oem=%s %s=0x%llX fadt=%d dsdt=%d s3=%d cpus=%u mcfg=0x%llX prof=%u dts=%d temp=%dC\n",
+                  g_acpi.oem_id[0] ? g_acpi.oem_id : "-",
+                  g_acpi.has_xsdt ? "xsdt" : "rsdt",
+                  (unsigned long long)g_acpi.sdt_addr,
+                  g_acpi.present, g_acpi.has_dsdt, g_acpi.has_s3,
+                  g_acpi.cpu_count,
+                  (unsigned long long)g_acpi.mcfg_ecam_base,
+                  (unsigned)g_acpi.pm_profile,
+                  g_acpi.dts_supported, temp_c);
 }
 
 int acpi_present(void) { return g_acpi.present; }
@@ -252,14 +409,8 @@ void acpi_shutdown(void) {
     for (;;) { asm volatile("cli"); asm volatile("hlt"); }
 }
 
-/* DSDT'te _S3_ gorulmediyse SLP_TYP degerleri varsayilanlidir; boyle bir
- * makineye SLP_EN yazmak uyku degil kapatma demek olabilir. Bu yuzden
- * yalnizca gercekten _S3_ bulunan platformlarda yazilir.
- * Donus: 1 = istek yazildi (gercek uykuda buraya hic donulmez),
- *         0 = bu makine uyutulamadi; cagiran bos-beklemeye dusmeli. */
 int acpi_enter_sleep(void) {
     if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
-    /* S3 ile S5 ayni tipteyse yazilan komut makineyi kapatir; uyku sanma. */
     if (g_acpi.slp_typ_s3a == g_acpi.slp_typ_s5a) return 0;
     acpi_enable_sci();
     uint16_t va = (uint16_t)(((uint16_t)g_acpi.slp_typ_s3a & 0x07u) << 10) | 0x2000u;
@@ -268,14 +419,10 @@ int acpi_enter_sleep(void) {
         uint16_t vb = (uint16_t)(((uint16_t)g_acpi.slp_typ_s3b & 0x07u) << 10) | 0x2000u;
         outw(g_acpi.pm1b_cnt, vb);
     }
-    /* Platform istege uyduysa CPU burada durur; uyduysa burasi gorme
-     * ihtimalimiz yok. Kisa bir bos beklemeden sonra donuyoruz ki cagiran
-     * (system_sleep) hareketsizlige dusup tus/fare ile uyanabilsin. */
     for (int i = 0; i < 100000; i++) io_wait();
     return 1;
 }
 
-/* Uyku state'i hakkinda bilgi (panel/selftest icin). */
 int acpi_sleep_supported(void) {
     if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
     return g_acpi.slp_typ_s3a != g_acpi.slp_typ_s5a;
@@ -378,12 +525,13 @@ void acpi_power_poll(acpi_power_t *out) {
 
 int acpi_selftest(void) {
     serial_printf("[acpi] present=%d oem=%s pm1a_cnt=0x%x smi=0x%x "
-                  "S5=%u/%u S3=%u/%u s3_var=%d dsdt=%d\n",
+                  "S5=%u/%u S3=%u/%u s3_var=%d dsdt=%d mcfg=0x%llX temp=%dC\n",
                   g_acpi.present, g_acpi.oem_id[0] ? g_acpi.oem_id : "-",
                   g_acpi.pm1a_cnt, g_acpi.smi_cmd,
                   g_acpi.slp_typ_s5a, g_acpi.slp_typ_s5b,
                   g_acpi.slp_typ_s3a, g_acpi.slp_typ_s3b, g_acpi.has_s3,
-                  g_acpi.has_dsdt);
+                  g_acpi.has_dsdt, (unsigned long long)g_acpi.mcfg_ecam_base,
+                  acpi_cpu_temp_c());
     smbus_probe();
     acpi_power_t p;
     acpi_power_poll(&p);

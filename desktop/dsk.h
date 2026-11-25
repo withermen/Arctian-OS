@@ -31,13 +31,13 @@ const char *dpk_abi_signature(void);
 #include "slot.h"
 #include <stdint.h>
 /* Taskbar simge yuvalari: sabitler + acik (sabit olmayan) uygulamalar. */
-#define TB_MAX_ICONS 12
+#define TB_MAX_ICONS 20
 
 /* ---------------------------------------------------------------- */
 /* Pencere yonetimi                                                  */
 /* ---------------------------------------------------------------- */
 
-#define MAX_WINS 8
+#define MAX_WINS 256
 
 #define UI_REF_H 1440
 
@@ -147,6 +147,7 @@ typedef struct {
     /* buyutulmus (USER_1) moddan geri alinirken onceki geometriye donmek
      * icin ("onceki boyuta don"). 0 = henuz kayit yok. */
     int  max_saved_w, max_saved_h, max_saved_x, max_saved_y;
+    int  max_saved_r, max_saved_tb_r;
     /* Pencere acilirken uygulamanin bagladigi klavye grubu. Pencere one
      * geldiginde kabuk bu grubu geri yukler (odak eski uygulamada kalmaz). */
     lv_group_t *fgroup;
@@ -819,4 +820,6 @@ void update_selftest(void);
 void *arctian_js_arena(unsigned long *out_size);
 void posix_win_init(void);
 void posix_win_poll_input(void);
+int  posix_win_ram_kb(lv_obj_t *win);
+int  posix_win_count(void);
 void desktop_main(void *arg);

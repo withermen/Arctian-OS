@@ -54,22 +54,31 @@
 #define BACKBUFFER_BASE         0x09000000u
 #define BACKBUFFER_MAX          (16u * 1024u * 1024u)
 
-#define HEAP_BASE               0x10000000u
-#define HEAP_MAX                (768u * 1024u * 1024u)
-
-/* Kimlik (identity) esleme: 0 - 1 GB, 2MB huge page */
-#define IDENTITY_MAP_SIZE       (1u * 1024u * 1024u * 1024u)
-#define IDENTITY_MAP_PD_ENTRIES 512u
-
 /* --- Sanal bellek yonetimi (VMM / paging) --- */
 #define VMM_HIGHER_BASE         0xFFFF800000000000ull
 #define VMM_HIGHER_PML4_INDEX   256u
 #define VMM_USER_BASE           0x0000008000000000ull
 #define VMM_USER_PML4_INDEX     1u
-#define VMM_POOL_BASE           0x0A000000u
-#define VMM_POOL_SIZE           (96u * 1024u * 1024u)
+
+/* VMM durum sayfasi (4 KB, main_kernel + kernel_plus ortak sabit adres). */
 #define VMM_STATE_ADDR          0x0A000000u
-#define VMM_REFCOUNT_ADDR       0x0A001000u   /* 64 KB: 32768 x uint16_t refcount */
-#define VMM_FRAMES_BASE         0x0A011000u
+
+/* Kernel heap (kmalloc): 161 MB .. 224 MB (63 MB).
+ * 256 MB sistemde bile heap ile Ring-3 fiziksel cerceve havuzu cakismaz. */
+#define HEAP_BASE               0x0A100000u
+#define HEAP_MAX                (63u * 1024u * 1024u)
+
+/* Kimlik (identity) esleme baslangic boyutu: stage2 0-1 GB kurar;
+ * vmm_init() >1 GB takili RAM'i 2 MB huge page'lerle dinamik genisletir. */
+#define IDENTITY_MAP_SIZE       (1u * 1024u * 1024u * 1024u)
+#define IDENTITY_MAP_PD_ENTRIES 512u
+
+/* Ring-3 fiziksel cerceve havuzu tabani (224 MB).
+ * Gercek bitis adresi (pool_end), dinamik refcount dizisi ve >4 GB yuksek
+ * bellek havuzu vmm_init() tarafindan takili RAM'e gore olceklenir. */
+#define VMM_POOL_BASE           0x0E000000u
+#define VMM_POOL_SIZE           (96u * 1024u * 1024u)  /* yedek varsayilan */
+#define VMM_REFCOUNT_ADDR       0x0E000000u            /* dinamik: st->refcount_addr */
+#define VMM_FRAMES_BASE         0x0E010000u            /* dinamik: st->frames_base */
 
 #endif /* ARCTIAN_MEMORY_MAP_H */

@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+typedef enum {
+    AUDIO_BACKEND_NONE = 0,
+    AUDIO_BACKEND_HDA,
+    AUDIO_BACKEND_VIRTIO_SND,
+    AUDIO_BACKEND_AC97,
+    AUDIO_BACKEND_PCSPK
+} audio_backend_t;
+
 int      audio_init(void);
 
 int      audio_present(void);
@@ -15,4 +23,7 @@ void     audio_service(void);
 const char *audio_last_error(void);
 uint32_t audio_sample_rate(void);
 
-#endif
+audio_backend_t audio_backend(void);
+const char     *audio_backend_name(void);
+
+#endif /* AUDIO_H */

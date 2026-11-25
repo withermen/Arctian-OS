@@ -11,6 +11,7 @@
 #include "http.h"
 #include "clock.h"
 #include "alloc.h"
+#include "inflate_gzip.h"
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_ciphersuites.h"
@@ -29,6 +30,10 @@
 static unsigned char tls_heap[TLS_HEAP_SIZE];
 static char *https_buf;
 static uint32_t https_buf_cap;
+static uint8_t *s_gunzip_buf;
+
+static void *https_inf_alloc(size_t n) { return kmalloc(n ? n : 1); }
+static void  https_inf_free(void *p) { if (p) kfree(p); }
 
 
 static int https_grow(uint32_t need) {
@@ -387,13 +392,41 @@ void https_ck_absorb(const char *hdr, uint32_t hlen, const char *host, int tls) 
     ck_absorb(hdr, hlen, host, tls);
 }
 
-const char *https_get(const char *host, uint16_t port, const char *path,
-                      uint32_t *len_out) {
+uint32_t https_ck_export(char *out, uint32_t cap) {
+    if (!out || cap < 2) return 0;
+    uint32_t o = 0;
+    for (int i = 0; i < s_ck_count; i++) {
+        int hl = ck_len(s_ck[i].host);
+        int nl = ck_len(s_ck[i].name);
+        int vl = ck_len(s_ck[i].val);
+        if (hl <= 0 || nl <= 0) continue;
+        if (o + (uint32_t)(hl + nl + vl + 6) >= cap) break;
+        for (int k = 0; k < hl; k++) out[o++] = s_ck[i].host[k];
+        out[o++] = '\t';
+        for (int k = 0; k < nl; k++) out[o++] = s_ck[i].name[k];
+        out[o++] = '\t';
+        for (int k = 0; k < vl; k++) {
+            char ch = s_ck[i].val[k];
+            out[o++] = (ch == '\n' || ch == '\r' || ch == '\t') ? ' ' : ch;
+        }
+        out[o++] = '\t';
+        out[o++] = s_ck[i].secure ? '1' : '0';
+        out[o++] = '\n';
+    }
+    out[o] = 0;
+    return o;
+}
+
+static const char *https_send_raw(const char *method, const char *host, uint16_t port,
+                                  const char *path, const char *content_type,
+                                  const char *extra_headers, const void *body,
+                                  uint32_t body_len, uint32_t *len_out) {
     if (!s_inited) https_init();
     if (!s_inited) return 0;
     if (!host || !host[0]) return 0;
+    if (!method || !method[0]) method = "GET";
     if (!path || !path[0]) path = "/";
-    cdbg("[ck] GET ", path, (int)ck_len(path));
+    cdbg("[ck] REQ ", path, (int)ck_len(path));
 
     uint8_t ip[4];
     dns_result_t res[DNS_RESULT_MAX];
@@ -412,10 +445,6 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         mbedtls_ssl_set_hostname(&ssl, host);
         mbedtls_ssl_set_bio(&ssl, &conn, tls_bio_send, tls_bio_recv, NULL);
 
-        /* Madde 35: WANT_WRITE'de sonsuzcontinue livelock yolu vardi.
-         * BIO artik takilirsan WANT_WRITE donduruyor; burada toplam
-         * bir el sikisma siniri tutulur, sinir asilarsa bağlantidan
-         * vazgecirilir. */
         uint64_t hs_deadline = clock_ms() + 30000;
         for (;;) {
             ret = mbedtls_ssl_handshake(&ssl);
@@ -431,12 +460,11 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         }
     }
 
-
     if (ret == 0) {
         char req[8192];
         uint32_t r = 0;
-        const char *pre = "GET ";
-        while (*pre) req[r++] = *pre++;
+        for (int i = 0; method[i] && r < 24; i++) req[r++] = method[i];
+        req[r++] = ' ';
         for (int i = 0; path[i] && r < 3000; i++) req[r++] = path[i];
         const char *v = " HTTP/1.1\r\nHost: ";
         while (*v) req[r++] = *v++;
@@ -444,16 +472,9 @@ const char *https_get(const char *host, uint16_t port, const char *path,
         char ck[6144];
         if (ck_build(host, 1, ck, sizeof(ck)) > 0) {
             cdbg("[ck] cookie=", ck, (int)ck_len(ck));
-            int has = 0;
-            for (int i = 0; ck[i]; i++) {
-                if (ck[i] == 'S' && ck[i+1] == 'G' && ck[i+2] == '_' && ck[i+3] == 'S' && ck[i+4] == 'S') { has = 1; break; }
-            }
-            { char hb[48]; int ho = 0; const char *p = "[ck] cklen="; while (*p) hb[ho++] = *p++;
-              int L = ck_len(ck); char d[8]; int di = 0; if (!L) d[di++] = '0'; while (L) { d[di++] = (char)('0' + L % 10); L /= 10; }
-              while (di) hb[ho++] = d[--di]; hb[ho++] = ' '; hb[ho++] = 's'; hb[ho++] = 'g'; hb[ho++] = '='; hb[ho++] = has ? 'Y' : 'N'; hb[ho++] = '\n'; hb[ho] = 0; serial_puts(hb); }
             const char *ch = "\r\nCookie: ";
             while (*ch) req[r++] = *ch++;
-            for (int i = 0; ck[i] && r < 7500; i++) req[r++] = ck[i];
+            for (int i = 0; ck[i] && r < 6800; i++) req[r++] = ck[i];
         }
         const char *tail =
             "\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -463,17 +484,33 @@ const char *https_get(const char *host, uint16_t port, const char *path,
             "\r\nsec-ch-ua-mobile: ?0"
             "\r\nsec-ch-ua-platform: \"Windows\""
             "\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,image/apng,*/*;q=0.8,"
-            "application/signed-exchange;v=b3;q=0.7"
+            "image/avif,image/webp,image/apng,*/*;q=0.8"
             "\r\nAccept-Language: tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
-            "\r\nAccept-Encoding: identity"
-            "\r\nSec-Fetch-Dest: document"
-            "\r\nSec-Fetch-Mode: navigate"
-            "\r\nSec-Fetch-Site: none"
-            "\r\nSec-Fetch-User: ?1"
-            "\r\nUpgrade-Insecure-Requests: 1"
-            "\r\nConnection: close\r\n\r\n";
-        while (*tail && r < 8180) req[r++] = *tail++;
+            "\r\nAccept-Encoding: gzip, deflate"
+            "\r\nConnection: close";
+        while (*tail && r < 7600) req[r++] = *tail++;
+
+        if (content_type && content_type[0]) {
+            const char *cth = "\r\nContent-Type: ";
+            while (*cth && r < 7750) req[r++] = *cth++;
+            for (int i = 0; content_type[i] && r < 7850; i++) req[r++] = content_type[i];
+        }
+        if (extra_headers && extra_headers[0]) {
+            if (r < 7950) { req[r++] = '\r'; req[r++] = '\n'; }
+            for (int i = 0; extra_headers[i] && r < 8080; i++) req[r++] = extra_headers[i];
+            while (r >= 2 && req[r - 2] == '\r' && req[r - 1] == '\n') r -= 2;
+        }
+        int need_cl = (body_len > 0) ||
+                      (method[0] == 'P' && (method[1] == 'O' || method[1] == 'U' || method[1] == 'A'));
+        if (need_cl) {
+            const char *clh = "\r\nContent-Length: ";
+            while (*clh && r < 8140) req[r++] = *clh++;
+            char nb[16]; int ni = 0; uint32_t bl = body_len;
+            if (bl == 0) nb[ni++] = '0';
+            while (bl) { nb[ni++] = (char)('0' + (bl % 10u)); bl /= 10u; }
+            while (ni && r < 8170) req[r++] = nb[--ni];
+        }
+        req[r++] = '\r'; req[r++] = '\n'; req[r++] = '\r'; req[r++] = '\n';
 
         size_t off = 0;
         uint64_t wr_deadline = clock_ms() + 20000;
@@ -485,6 +522,19 @@ const char *https_get(const char *host, uint16_t port, const char *path,
                 continue;
             }
             break;
+        }
+        if (ret >= 0 && body && body_len > 0) {
+            const unsigned char *bp = (const unsigned char *)body;
+            size_t bo = 0;
+            while (bo < body_len) {
+                ret = mbedtls_ssl_write(&ssl, bp + bo, body_len - bo);
+                if (ret > 0) { bo += (size_t)ret; continue; }
+                if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                    if ((int64_t)(clock_ms() - wr_deadline) >= 0) { ret = -100; break; }
+                    continue;
+                }
+                break;
+            }
         }
     }
 
@@ -580,7 +630,14 @@ const char *https_get(const char *host, uint16_t port, const char *path,
     return https_buf;
 }
 
-const char *https_get_url(const char *url, uint32_t *len_out) {
+const char *https_get(const char *host, uint16_t port, const char *path,
+                      uint32_t *len_out) {
+    return https_send_raw("GET", host, port, path, 0, 0, 0, 0, len_out);
+}
+
+static const char *https_send_url(const char *method, const char *url,
+                                  const char *content_type, const char *extra_headers,
+                                  const void *body, uint32_t body_len, uint32_t *len_out) {
     if (!url) return 0;
     const char *p = url;
     if (!(p[0]=='h'&&p[1]=='t'&&p[2]=='t'&&p[3]=='p'&&p[4]=='s')) return 0;
@@ -601,7 +658,12 @@ const char *https_get_url(const char *url, uint32_t *len_out) {
         if (pv > 0 && pv < 65536u) port = (uint16_t)pv;
     }
     const char *path = (*p == '/') ? p : "/";
-    return https_get(host, port, path, len_out);
+    return https_send_raw(method, host, port, path, content_type, extra_headers,
+                          body, body_len, len_out);
+}
+
+const char *https_get_url(const char *url, uint32_t *len_out) {
+    return https_send_url("GET", url, 0, 0, 0, 0, len_out);
 }
 
 /* ================================================================== */
@@ -763,21 +825,56 @@ static void resolve_location(const char *base, const char *loc, char *out, int c
     out[o] = 0;
 }
 
-/* http/https ortak getirme: yonlendirmeleri (max 6) takip eder, chunked
- * govdeyi yerinde cozer ve YALNIZCA govdeyi dondurur. */
-const char *https_fetch_body(const char *url, uint32_t *len_out) {
+static char *https_maybe_decompress(const char *hdr, uint32_t hlen,
+                                    char *body, uint32_t blen, uint32_t *out_len) {
+    *out_len = blen;
+    if (!body || blen < 2) return body;
+    char ce[48];
+    ce[0] = 0;
+    raw_header_value(hdr, hlen, "Content-Encoding", ce, sizeof(ce));
+    int is_gzip = ci_contains(ce, "gzip") ||
+                  (blen >= 18 && (uint8_t)body[0] == 0x1F && (uint8_t)body[1] == 0x8B && (uint8_t)body[2] == 8);
+    int is_deflate = (!is_gzip && ci_contains(ce, "deflate"));
+    if (!is_gzip && !is_deflate) return body;
+
+    uint8_t *dec = 0;
+    uint32_t declen = 0;
+    uint32_t max_out = 8u * 1024u * 1024u;
+    int rc = is_gzip
+        ? inflate_gzip((const uint8_t *)body, blen, https_inf_alloc, https_inf_free, &dec, &declen, max_out)
+        : inflate_deflate_auto((const uint8_t *)body, blen, https_inf_alloc, https_inf_free, &dec, &declen, max_out);
+    if (rc == 0 && dec) {
+        if (s_gunzip_buf) kfree(s_gunzip_buf);
+        s_gunzip_buf = dec;
+        *out_len = declen;
+        return (char *)dec;
+    }
+    return body;
+}
+
+/* Tam HTTP/HTTPS istek motoru: GET/POST/PUT/PATCH/DELETE + ozel basliklar +
+ * govde + 301/302/303/307/308 yonlendirme + chunked + gzip/deflate acma. */
+const char *https_request(const char *method, const char *url,
+                          const char *content_type, const char *extra_headers,
+                          const void *req_body, uint32_t req_body_len,
+                          int *status_out, uint32_t *len_out) {
+    if (status_out) *status_out = 0;
+    if (len_out) *len_out = 0;
     if (!url || !url[0]) return 0;
 
-    /* GitHub cikis varliklari gibi yonlendirmelerde Location imzali sorgu
-     * ile 600-900 baytu ulasabiliyor; 512'lik tampon token'i kirpiyordu
-     * ("jwt-not-provided"). Yol+ sorgu icin 1024. */
     char cur[1024];
     str_copy_n(cur, url, sizeof(cur));
+    char cur_meth[16];
+    str_copy_n(cur_meth, (method && method[0]) ? method : "GET", sizeof(cur_meth));
+    const void *cur_body = req_body;
+    uint32_t cur_blen = req_body_len;
+    const char *cur_ct = content_type;
 
     for (int hop = 0; hop < 6; hop++) {
         if (ci_starts_with(cur, "https://")) {
             uint32_t rl = 0;
-            const char *raw_c = https_get_url(cur, &rl);
+            const char *raw_c = https_send_url(cur_meth, cur, cur_ct, extra_headers,
+                                               cur_body, cur_blen, &rl);
             if (!raw_c || rl == 0) return 0;
             char *raw = (char *)raw_c;
 
@@ -807,12 +904,20 @@ const char *https_fetch_body(const char *url, uint32_t *len_out) {
                     char nxt[1024];
                     resolve_location(cur, loc, nxt, sizeof(nxt));
                     str_copy_n(cur, nxt, sizeof(cur));
+                    /* RFC 9110: 301/302/303 -> GET'e don; 307/308 -> method/govdeyi koru */
+                    if (status != 307 && status != 308) {
+                        str_copy_n(cur_meth, "GET", sizeof(cur_meth));
+                        cur_body = 0; cur_blen = 0; cur_ct = 0;
+                    }
                     continue;
                 }
             }
-            if (len_out) *len_out = blen;
+            uint32_t fin_len = blen;
+            char *fin_body = https_maybe_decompress(raw, hlen, body, blen, &fin_len);
+            if (status_out) *status_out = status;
+            if (len_out) *len_out = fin_len;
             str_copy_n(s_last_url, cur, sizeof(s_last_url));
-            return body;
+            return fin_body;
         } else {
             http_response_t resp;
             if (!http_get(cur, &resp)) return 0;
@@ -829,15 +934,26 @@ const char *https_fetch_body(const char *url, uint32_t *len_out) {
                     char nxt[512];
                     resolve_location(cur, loc, nxt, sizeof(nxt));
                     str_copy_n(cur, nxt, sizeof(cur));
+                    if (resp.status_code != 307 && resp.status_code != 308) {
+                        str_copy_n(cur_meth, "GET", sizeof(cur_meth));
+                        cur_body = 0; cur_blen = 0; cur_ct = 0;
+                    }
                     continue;
                 }
             }
+            if (status_out) *status_out = resp.status_code;
             if (len_out) *len_out = blen;
             str_copy_n(s_last_url, cur, sizeof(s_last_url));
             return body;
         }
     }
     return 0;
+}
+
+/* http/https ortak getirme: yonlendirmeleri (max 6) takip eder, chunked +
+ * gzip/deflate cozer ve YALNIZCA govdeyi dondurur. */
+const char *https_fetch_body(const char *url, uint32_t *len_out) {
+    return https_request("GET", url, 0, 0, 0, 0, 0, len_out);
 }
 
 const char *https_fetch_last_url(void) {
@@ -1083,4 +1199,272 @@ int https_stream(const char *url, https_sink_fn sink, void *ctx) {
         return (int)delivered;
     }
     return -7;                                      /* yonlendirme limiti */
+}
+
+/* ================================================================== */
+/* RFC 6455 WebSocket istemcisi (ws:// ve wss://)                     */
+/* ================================================================== */
+#define WS_MAX_SLOTS 4
+typedef struct {
+    int used;
+    int tls;
+    int conn;
+    int state;      /* 0=kapali, 1=acik */
+    mbedtls_ssl_context ssl;
+    uint32_t rng;
+} ws_slot_t;
+
+static ws_slot_t s_ws[WS_MAX_SLOTS];
+
+static int ws_bio_recv_nb(void *ctx, unsigned char *buf, size_t len) {
+    int conn = *(int *)ctx;
+    if (len == 0) return 0;
+    if (len > 4096) len = 4096;
+    int n = tcp_receive(conn, (uint8_t *)buf, (uint16_t)len);
+    if (n > 0) return n;
+    int st = tcp_state(conn);
+    if (n < 0 || st == TCP_STATE_CLOSED || st == TCP_STATE_TIME_WAIT || st == TCP_STATE_CLOSE_WAIT)
+        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+    return MBEDTLS_ERR_SSL_WANT_READ;
+}
+
+static int ws_write_all(ws_slot_t *ws, const uint8_t *buf, uint32_t len) {
+    uint32_t off = 0;
+    uint64_t dl = clock_ms() + 10000;
+    while (off < len) {
+        int r = ws->tls
+            ? mbedtls_ssl_write(&ws->ssl, buf + off, len - off)
+            : tcp_send(ws->conn, buf + off, (uint16_t)((len - off) > 1400 ? 1400 : (len - off)));
+        if (r > 0) { off += (uint32_t)r; continue; }
+        if (r == 0 || r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if ((int64_t)(clock_ms() - dl) >= 0) return -1;
+            sched_sleep_ms(1);
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int ws_read_raw(ws_slot_t *ws, uint8_t *buf, uint32_t len, int blocking_ms) {
+    uint64_t dl = clock_ms() + (uint64_t)(blocking_ms > 0 ? blocking_ms : 0);
+    for (;;) {
+        int r = ws->tls
+            ? mbedtls_ssl_read(&ws->ssl, buf, len)
+            : tcp_receive(ws->conn, buf, (uint16_t)(len > 4096 ? 4096 : len));
+        if (r > 0) return r;
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE || (!ws->tls && r == 0)) {
+            if (blocking_ms <= 0 || (int64_t)(clock_ms() - dl) >= 0) return 0;
+            sched_sleep_ms(1);
+            continue;
+        }
+        ws->state = 0;
+        return -1;
+    }
+}
+
+int https_ws_open(const char *url) {
+    if (!url || !url[0]) return -1;
+    int tls = 0;
+    const char *p = url;
+    if (ci_starts_with(p, "wss://")) { tls = 1; p += 6; }
+    else if (ci_starts_with(p, "ws://")) { tls = 0; p += 5; }
+    else return -1;
+
+    char host[128]; int hl = 0;
+    while (*p && *p != '/' && *p != ':' && hl < 127) host[hl++] = *p++;
+    host[hl] = 0;
+    if (hl == 0) return -1;
+    uint16_t port = tls ? 443 : 80;
+    if (*p == ':') {
+        p++;
+        uint32_t pv = 0;
+        while (*p >= '0' && *p <= '9') { pv = pv * 10u + (uint32_t)(*p - '0'); p++; }
+        if (pv > 0 && pv < 65536u) port = (uint16_t)pv;
+    }
+    const char *path = (*p == '/') ? p : "/";
+
+    if (tls && !s_inited) https_init();
+    if (tls && !s_inited) return -1;
+
+    int id = -1;
+    for (int i = 0; i < WS_MAX_SLOTS; i++) if (!s_ws[i].used) { id = i; break; }
+    if (id < 0) return -1;
+
+    uint8_t ip[4]; dns_result_t res[DNS_RESULT_MAX]; int dn = 0;
+    if (!dns_resolve(host, res, &dn) || dn <= 0) return -1;
+    for (int i = 0; i < 4; i++) ip[i] = res[0].ip[i];
+
+    int conn = tcp_connect(ip, port);
+    if (conn < 0) return -1;
+
+    ws_slot_t *ws = &s_ws[id];
+    ws->used = 1; ws->tls = tls; ws->conn = conn; ws->state = 0;
+    ws->rng = (uint32_t)(clock_ms() ^ 0xA5C3917Du);
+
+    if (tls) {
+        mbedtls_ssl_init(&ws->ssl);
+        if (mbedtls_ssl_setup(&ws->ssl, &s_conf) != 0) {
+            mbedtls_ssl_free(&ws->ssl); tcp_close(conn); ws->used = 0; return -1;
+        }
+        mbedtls_ssl_set_hostname(&ws->ssl, host);
+        mbedtls_ssl_set_bio(&ws->ssl, &ws->conn, tls_bio_send, tls_bio_recv, NULL);
+        uint64_t hs_dl = clock_ms() + 15000;
+        int ret = 0;
+        for (;;) {
+            ret = mbedtls_ssl_handshake(&ws->ssl);
+            if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if ((int64_t)(clock_ms() - hs_dl) >= 0) { ret = -1; break; }
+                continue;
+            }
+            break;
+        }
+        if (ret != 0) { mbedtls_ssl_free(&ws->ssl); tcp_close(conn); ws->used = 0; return -1; }
+    }
+
+    char req[1536]; uint32_t r = 0;
+    const char *s1 = "GET "; while (*s1) req[r++] = *s1++;
+    for (int i = 0; path[i] && r < 512; i++) req[r++] = path[i];
+    const char *s2 = " HTTP/1.1\r\nHost: "; while (*s2) req[r++] = *s2++;
+    for (int i = 0; host[i] && r < 680; i++) req[r++] = host[i];
+    char ck[512];
+    if (ck_build(host, tls, ck, sizeof(ck)) > 0) {
+        const char *ch = "\r\nCookie: "; while (*ch) req[r++] = *ch++;
+        for (int i = 0; ck[i] && r < 1150; i++) req[r++] = ck[i];
+    }
+    const char *s3 =
+        "\r\nUpgrade: websocket"
+        "\r\nConnection: Upgrade"
+        "\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ=="
+        "\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    while (*s3 && r < sizeof(req) - 1) req[r++] = *s3++;
+
+    if (ws_write_all(ws, (const uint8_t *)req, r) != 0) { https_ws_close(id); return -1; }
+
+    /* Switch TLS BIO to non-blocking for frame polling after handshake */
+    if (tls) mbedtls_ssl_set_bio(&ws->ssl, &ws->conn, tls_bio_send, ws_bio_recv_nb, NULL);
+
+    char hbuf[1024]; uint32_t hn = 0;
+    uint64_t hdl = clock_ms() + 8000;
+    int got_hdr = 0;
+    while (hn + 1 < sizeof(hbuf) && (int64_t)(clock_ms() - hdl) < 0) {
+        int n = ws_read_raw(ws, (uint8_t *)hbuf + hn, 1, 50);
+        if (n < 0) break;
+        if (n == 0) continue;
+        hn += (uint32_t)n;
+        if (hn >= 4 && hbuf[hn - 4] == '\r' && hbuf[hn - 3] == '\n' &&
+            hbuf[hn - 2] == '\r' && hbuf[hn - 1] == '\n') { got_hdr = 1; break; }
+    }
+    hbuf[hn] = 0;
+    if (!got_hdr || !ci_contains_n(hbuf, hn, "101")) { https_ws_close(id); return -1; }
+    ws->state = 1;
+    return id;
+}
+
+int https_ws_send(int id, const void *data, uint32_t len, int is_binary) {
+    if (id < 0 || id >= WS_MAX_SLOTS || !s_ws[id].used || s_ws[id].state != 1) return -1;
+    ws_slot_t *ws = &s_ws[id];
+    uint8_t hdr[14]; uint32_t hl = 0;
+    hdr[hl++] = (uint8_t)(0x80u | (is_binary ? 0x02u : 0x01u));
+    if (len < 126u) {
+        hdr[hl++] = (uint8_t)(0x80u | len);
+    } else if (len < 65536u) {
+        hdr[hl++] = (uint8_t)(0x80u | 126u);
+        hdr[hl++] = (uint8_t)((len >> 8) & 0xFFu);
+        hdr[hl++] = (uint8_t)(len & 0xFFu);
+    } else {
+        hdr[hl++] = (uint8_t)(0x80u | 127u);
+        for (int i = 7; i >= 0; i--) hdr[hl++] = (i < 4) ? (uint8_t)((len >> (i * 8)) & 0xFFu) : 0;
+    }
+    ws->rng = ws->rng * 1664525u + 1013904223u;
+    uint8_t mask[4] = {
+        (uint8_t)(ws->rng >> 24), (uint8_t)(ws->rng >> 16),
+        (uint8_t)(ws->rng >> 8),  (uint8_t)(ws->rng)
+    };
+    for (int i = 0; i < 4; i++) hdr[hl++] = mask[i];
+    if (ws_write_all(ws, hdr, hl) != 0) { ws->state = 0; return -1; }
+
+    if (len > 0 && data) {
+        const uint8_t *src = (const uint8_t *)data;
+        uint8_t chunk[512];
+        uint32_t off = 0;
+        while (off < len) {
+            uint32_t n = (len - off) > sizeof(chunk) ? (uint32_t)sizeof(chunk) : (len - off);
+            for (uint32_t i = 0; i < n; i++) chunk[i] = src[off + i] ^ mask[(off + i) & 3u];
+            if (ws_write_all(ws, chunk, n) != 0) { ws->state = 0; return -1; }
+            off += n;
+        }
+    }
+    return 0;
+}
+
+int https_ws_recv(int id, void *buf, uint32_t cap, int *is_binary_out) {
+    if (id < 0 || id >= WS_MAX_SLOTS || !s_ws[id].used || s_ws[id].state != 1) return -1;
+    ws_slot_t *ws = &s_ws[id];
+    uint8_t h2[2];
+    int r = ws_read_raw(ws, h2, 1, 0);
+    if (r <= 0) return r; /* 0 = no frame waiting, -1 = closed */
+    if (ws_read_raw(ws, h2 + 1, 1, 200) <= 0) { ws->state = 0; return -1; }
+
+    uint8_t op = h2[0] & 0x0Fu;
+    int masked = (h2[1] & 0x80u) ? 1 : 0;
+    uint64_t plen = h2[1] & 0x7Fu;
+    if (plen == 126u) {
+        uint8_t b[2];
+        if (ws_read_raw(ws, b, 2, 200) < 2) { ws->state = 0; return -1; }
+        plen = ((uint64_t)b[0] << 8) | b[1];
+    } else if (plen == 127u) {
+        uint8_t b[8];
+        if (ws_read_raw(ws, b, 8, 200) < 8) { ws->state = 0; return -1; }
+        plen = 0;
+        for (int i = 0; i < 8; i++) plen = (plen << 8) | b[i];
+    }
+    uint8_t mask[4] = {0,0,0,0};
+    if (masked && ws_read_raw(ws, mask, 4, 200) < 4) { ws->state = 0; return -1; }
+
+    uint8_t *dst = (uint8_t *)buf;
+    uint32_t got = 0;
+    uint64_t rem = plen;
+    while (rem > 0) {
+        uint8_t tmp[512];
+        uint32_t want = rem > sizeof(tmp) ? (uint32_t)sizeof(tmp) : (uint32_t)rem;
+        int n = ws_read_raw(ws, tmp, want, 1000);
+        if (n <= 0) { ws->state = 0; return -1; }
+        for (int i = 0; i < n; i++) {
+            uint8_t b = masked ? (uint8_t)(tmp[i] ^ mask[(plen - rem + (uint64_t)i) & 3u]) : tmp[i];
+            if (dst && got < cap) dst[got++] = b;
+        }
+        rem -= (uint64_t)n;
+    }
+
+    if (op == 0x08u) { ws->state = 0; return -1; } /* CLOSE */
+    if (op == 0x09u) {
+        /* PING -> reply PONG (0x0A) */
+        uint8_t ph[6] = { 0x8Au, 0x80u, 0, 0, 0, 0 };
+        ws_write_all(ws, ph, 6);
+        return 0;
+    }
+    if (op == 0x0Au) return 0; /* PONG */
+    if (is_binary_out) *is_binary_out = (op == 0x02u) ? 1 : 0;
+    return (int)got;
+}
+
+int https_ws_state(int id) {
+    if (id < 0 || id >= WS_MAX_SLOTS || !s_ws[id].used) return 0;
+    return s_ws[id].state;
+}
+
+void https_ws_close(int id) {
+    if (id < 0 || id >= WS_MAX_SLOTS || !s_ws[id].used) return;
+    ws_slot_t *ws = &s_ws[id];
+    if (ws->state == 1) {
+        uint8_t cf[6] = { 0x88u, 0x80u, 0, 0, 0, 0 };
+        ws_write_all(ws, cf, 6);
+    }
+    if (ws->tls) {
+        mbedtls_ssl_close_notify(&ws->ssl);
+        mbedtls_ssl_free(&ws->ssl);
+    }
+    tcp_close(ws->conn);
+    ws->used = 0; ws->state = 0; ws->conn = -1;
 }

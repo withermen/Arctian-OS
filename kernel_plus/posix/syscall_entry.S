@@ -43,9 +43,17 @@ arctian_syscall_entry:
     movw %ax, %ds
     movw %ax, %es
 
-    movq %rsp, %rdi           /* posix_regs_t *regs */
+    movq %rsp, %rbx           /* callee-saved: posix_regs_t *regs */
+    subq $512, %rsp
+    andq $-16, %rsp
+    fxsave (%rsp)
+
+    movq %rbx, %rdi           /* posix_regs_t *regs */
     cld
     call posix_syscall_dispatch
+
+    fxrstor (%rsp)
+    movq %rbx, %rsp
 
 .globl posix_iret_return
 posix_iret_return:

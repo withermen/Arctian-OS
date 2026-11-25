@@ -44,7 +44,9 @@ int         vmm_space_map_user(vmm_space_t sp, uint64_t va, uint64_t pa,
  * 0 = basarili, <0 = hata. */
 int         vmm_space_unmap_user(vmm_space_t sp, uint64_t va);
 int         vmm_space_protect_user(vmm_space_t sp, uint64_t va, uint64_t flags);
+int         vmm_space_protect_none(vmm_space_t sp, uint64_t va);
 uint64_t    vmm_space_get_user_pte(vmm_space_t sp, uint64_t va);
+uint64_t    vmm_space_next_present(vmm_space_t sp, uint64_t va, uint64_t end);
 
 /* Alani ve ona ait sayfa tablolarini geri verir. Halen eslenmis kullanici
  * yapragi varsa cerceveleri de serbest birakir; bu yuzden cagiran taraf

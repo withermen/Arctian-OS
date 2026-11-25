@@ -17,6 +17,8 @@
 #include "isr.h"
 #include "syscall.h"
 #include "vesa.h"
+#include "gpu.h"
+#include "gpu_simd.h"
 #include "backbuffer.h"
 #include "bootanim.h"
 #include "mouse.h"
@@ -36,6 +38,7 @@
 #include "blockdev.h"
 #include "net_task.h"
 #include "ipv4.h"
+#include "ipv6.h"
 #include "arp.h"
 #include "tcp.h"
 #include "dns.h"
@@ -265,11 +268,21 @@ static int  log_flush_fn(void) { return klog_flush(); }
 /* Cihaz listesi — 0.5'te surucu sayisi genisletildi:
  * ag icin birden fazla surucu ailesi (E1000 / RTL8139 / RTL8169 / PCnet /
  * Wi-Fi iwl / Wi-Fi generic) listelenir. */
-#define DEV_ROWS 14
+#define DEV_ROWS 15
 
 static int dev_count_fn(void) { return DEV_ROWS; }
 
 static const char *dev_name_fn(int i) {
+    if (i == 0 && gpu_is_ready()) return gpu_status_name();
+    if (i == 8) {
+        switch (audio_backend()) {
+            case AUDIO_BACKEND_HDA:        return "Ses (Intel HDA)";
+            case AUDIO_BACKEND_VIRTIO_SND: return "Ses (VirtIO-Sound)";
+            case AUDIO_BACKEND_AC97:       return "Ses (AC97)";
+            case AUDIO_BACKEND_PCSPK:      return "Ses (PC Speaker)";
+            default:                       return "Ses";
+        }
+    }
     static const char *n[DEV_ROWS] = {
         "Ekran (Bochs VBE)",
         "Disk",
@@ -284,14 +297,15 @@ static const char *dev_name_fn(int i) {
         "Klavye (PS/2)",
         "Fare (PS/2)",
         "RTC",
-        "MbedTLS / HTTPS"
+        "MbedTLS / HTTPS",
+        "Ag - VirtIO-Net surucusu"
     };
     return (i >= 0 && i < DEV_ROWS) ? n[i] : 0;
 }
 
 static const char *dev_status_fn(int i) {
     switch (i) {
-        case 0: return "aktif";
+        case 0: return (gpu_is_ready() || vesa_is_enabled()) ? "aktif" : "yok";
         case 1: return blockdev_count() > 0 ? "aktif" : "yok";
         case 2: return net_driver_type() == 0 ? "aktif" : "beklemede";
         case 3: return net_driver_type() == 1 ? "aktif" : "beklemede";
@@ -303,6 +317,7 @@ static const char *dev_status_fn(int i) {
         case 9: return usb_device_count > 0 ? "aktif" : "cihaz yok";
         case 10: case 11: case 12: return "aktif";
         case 13: return "aktif";
+        case 14: return net_driver_type() == NET_TYPE_VIRTIO ? "aktif" : "beklemede";
     }
     return "?";
 }
@@ -325,6 +340,30 @@ static const char *net_http_request(const char *method, const char *url,
     }
     return https_request(method, url, content_type, extra_headers,
                          body, body_len, status_out, len_out);
+}
+static uint32_t net_cookie_export(char *out, uint32_t cap) {
+    if (net_perm()) return 0;
+    return https_ck_export(out, cap);
+}
+static int net_ws_open(const char *url) {
+    if (net_perm()) return -1;
+    return https_ws_open(url);
+}
+static int net_ws_send(int id, const void *data, uint32_t len, int is_binary) {
+    if (net_perm()) return -1;
+    return https_ws_send(id, data, len, is_binary);
+}
+static int net_ws_recv(int id, void *buf, uint32_t cap, int *is_binary_out) {
+    if (net_perm()) return -1;
+    return https_ws_recv(id, buf, cap, is_binary_out);
+}
+static int net_ws_state(int id) {
+    if (net_perm()) return 0;
+    return https_ws_state(id);
+}
+static void net_ws_close(int id) {
+    if (net_perm()) return;
+    https_ws_close(id);
 }
 static const char *net_last_url(void) {
     return https_fetch_last_url();
@@ -535,7 +574,7 @@ static int wlf_run_image_body_fn(const void *image, uint32_t size, void *body) {
 
 static int      gfx_w(void)   { return backbuffer_width(); }
 static int      gfx_h(void)   { return backbuffer_height(); }
-static uint32_t *gfx_fb(void) { return (uint32_t *)BACKBUFFER_BASE; }
+static uint32_t *gfx_fb(void) { return backbuffer_ptr(); }
 static uint32_t gfx_rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
@@ -543,10 +582,18 @@ static void     gfx_present(void) { backbuffer_blit(); }
 static void     gfx_present_rect(int x, int y, int w, int h) {
     backbuffer_blit_rect(x, y, w, h);
 }
+static void     gfx_flip(void) {
+    if (gpu_is_ready()) gpu_vsync_flip();
+    else backbuffer_blit();
+}
 
 static int gfx_set_mode(int width, int height) {
     if (width < 320 || height < 200) return -1;
-    if (vesa_init(width, height, VESA_DEFAULT_BPP) != 0) return -2;
+    if (gpu_is_ready()) {
+        if (gpu_set_mode(width, height, VESA_DEFAULT_BPP) != 0) return -2;
+    } else {
+        if (vesa_init(width, height, VESA_DEFAULT_BPP) != 0) return -2;
+    }
 
     framebuffer_t *fb = vesa_get_framebuffer();
     int aw = (fb && fb->width)  ? fb->width  : width;
@@ -747,6 +794,50 @@ static void  kp_mem_info(asi_meminfo_t *o) {
 }
 static asi_mem_t s_mem = { kp_mem_alloc, kp_mem_free, kp_mem_set, kp_mem_copy, kp_mem_info };
 
+#ifdef ARCTIAN_KERNEL_SELFTESTS
+static void e1_oom_victim(void *arg) {
+    (void)arg;
+    for (;;) sched_sleep_ms(50);
+}
+static void e1_verify_subsystems(void) {
+    /* 1) Dynamic higher-half heap > 63 MB HEAP_MAX */
+    size_t sz1 = 40u * 1024u * 1024u;
+    size_t sz2 = 32u * 1024u * 1024u;
+    volatile uint32_t *p1 = (volatile uint32_t *)kmalloc(sz1);
+    volatile uint32_t *p2 = (volatile uint32_t *)kmalloc(sz2);
+    int heap_ok = 0;
+    if (p1 && p2) {
+        p1[0] = 0xCAFE1111u;
+        p1[(sz1 / 4u) - 1u] = 0xCAFE2222u;
+        p2[0] = 0xBEEF3333u;
+        p2[(sz2 / 4u) - 1u] = 0xBEEF4444u;
+        heap_ok = (p1[0] == 0xCAFE1111u && p1[(sz1 / 4u) - 1u] == 0xCAFE2222u &&
+                   p2[0] == 0xBEEF3333u && p2[(sz2 / 4u) - 1u] == 0xBEEF4444u &&
+                   (uintptr_t)p2 >= (uintptr_t)VMM_KHEAP_BASE);
+    }
+    if (p2) kfree((void *)p2);
+    if (p1) kfree((void *)p1);
+
+    /* 2) OOM list + kill + VMM frame reclaim */
+    int vpid = proc_spawn("oom-victim", e1_oom_victim, 0);
+    int list_ok = 0, kill_ok = 0;
+    if (vpid > 1) {
+        sched_sleep_ms(10);
+        asi_oom_app_t apps[16];
+        int cnt = proc_oom_list_apps(apps, 16);
+        for (int i = 0; i < cnt; i++) {
+            if (apps[i].pid == vpid && apps[i].ram_kb > 0) list_ok = 1;
+        }
+        kill_ok = (proc_oom_kill_app(vpid) == 0);
+    }
+
+    /* 3) VSync page-flip */
+    gpu_vsync_flip();
+    serial_printf("[e1-verify] heap_gt63MB=%s oom_list=%s oom_kill=%s flip=OK\n",
+                  heap_ok ? "OK" : "FAIL", list_ok ? "OK" : "FAIL", kill_ok ? "OK" : "FAIL");
+}
+#endif
+
 void kernel_plus_main(void *arg) __attribute__((section(".text.entry")));
 void kernel_plus_main(void *arg) {
     g_asi = (asi_t *)arg;
@@ -770,28 +861,32 @@ void kernel_plus_main(void *arg) {
     arctian_set_recover_tick(recover_tick);
     asm volatile("sti");
 
-    /* Grafik */
-    terminal_writestring("kernel_plus: VESA baslatiliyor...\n");
-    int vr = vesa_init(VESA_DEFAULT_WIDTH, VESA_DEFAULT_HEIGHT, VESA_DEFAULT_BPP);
-    bool gui = (vr == 0);
+    /* CPU SIMD (SSE2/SSSE3/AVX/AVX2) + PCI + Modern GPU alt sistemi */
+    gpu_simd_init();
+    LOG("[kp] pci...");
+    pci_init();
+
+    /* Grafik: PCI GPU arka ucu (VirtIO-GPU 2D / Intel / NVIDIA / BGA / GOP) */
+    terminal_writestring("kernel_plus: GPU/VESA baslatiliyor...\n");
+    LOG("[kp] gpu...");
+    bool gui = (gpu_init(VESA_DEFAULT_WIDTH, VESA_DEFAULT_HEIGHT, VESA_DEFAULT_BPP) == 0);
+    if (!gui) {
+        int vr = vesa_init(VESA_DEFAULT_WIDTH, VESA_DEFAULT_HEIGHT, VESA_DEFAULT_BPP);
+        gui = (vr == 0);
+    }
     serial_puts(gui ? "[kp] vesa ok\n" : "[kp] vesa FAIL\n");
     if (gui) {
-        vesa_clear(0x0E0B12);
+        if (!gpu_is_ready()) vesa_clear(0x0E0B12);
         if (backbuffer_init() != 0) gui = false;
     }
     if (gui) backbuffer_clear(0x0E0B12);
     serial_puts(gui ? "[kp] backbuffer ok\n" : "[kp] no gui\n");
 
-    /* Acilis animasyonu: ekranin tek sahibi. Cekirdek + VESA hazir (50). */
+    /* Acilis animasyonu: ekranin tek sahibi. Cekirdek + PCI + GPU hazir (95). */
     if (gui) {
         bootanim_start();
-        bootanim_advance(50);
+        bootanim_advance(95);
     }
-
-    /* Suruculer */
-    LOG("[kp] pci...");
-    pci_init();
-    if (gui) bootanim_advance(45);
     LOG("[kp] acpi...");
     acpi_init();
     cpu_detect();
@@ -813,7 +908,7 @@ void kernel_plus_main(void *arg) {
     blockdev_set_scan_hook(usb_msd_scan);
     if (gui) bootanim_advance(85);
     LOG("[kp] ses...");
-    if (audio_init() != 0) serial_puts("[kp] AC97 yok (ses kapali)\n");
+    if (audio_init() != 0) serial_puts("[kp] ses yok (ses kapali)\n");
     if (gui) bootanim_advance(25);
     LOG("[kp] net...");
     extern void iwl_ax201_register(void);
@@ -825,6 +920,7 @@ void kernel_plus_main(void *arg) {
     net_init();
     ipv4_init();
     arp_init();
+    ipv6_init();
     tcp_init();
     ksock_init();
     spool_init();
@@ -833,8 +929,10 @@ void kernel_plus_main(void *arg) {
     net_task_init();
     if (gui) bootanim_advance(75);
     ipv4_config_dhcp();   /* IP yapilandirmasi (gercek DHCP, olmazsa slirp) */
+    ipv6_send_rs();
     if (gui) bootanim_advance(100);
     ipv4_frag_selftest(); /* parca birlestirme/parcalama sinavi (madde 70) */
+    ipv6_selftest();
 #ifdef ARCTIAN_NET_SELFTEST
     net_selftest();
 #endif
@@ -897,6 +995,7 @@ void kernel_plus_main(void *arg) {
     s_gfx.present = gfx_present;
     s_gfx.present_rect = gfx_present_rect;
     s_gfx.set_mode = gfx_set_mode;
+    s_gfx.flip = gfx_flip;
     s_input.mouse_x = in_mx;
     s_input.mouse_y = in_my;
     s_input.mouse_buttons = in_btns;
@@ -958,6 +1057,12 @@ void kernel_plus_main(void *arg) {
     s_net.dl_size = net_dl_size;
     s_net.download_raw = net_download_raw;
     s_net.http_request = net_http_request;
+    s_net.cookie_export = net_cookie_export;
+    s_net.ws_open = net_ws_open;
+    s_net.ws_send = net_ws_send;
+    s_net.ws_recv = net_ws_recv;
+    s_net.ws_state = net_ws_state;
+    s_net.ws_close = net_ws_close;
     s_net.submit = net_submit;
     s_net.busy = net_busy;
     s_net.service = net_service;
@@ -985,6 +1090,11 @@ void kernel_plus_main(void *arg) {
     s_proc.reap = proc_reap;
     s_proc.info_ex = proc_info_ex_fn;
     s_proc.sys_ticks = proc_sys_ticks_fn;
+    s_proc.oom_state = proc_oom_state;
+    s_proc.oom_freeze_apps = proc_oom_freeze_apps;
+    s_proc.oom_thaw_apps = proc_oom_thaw_apps;
+    s_proc.oom_list_apps = proc_oom_list_apps;
+    s_proc.oom_kill_app = proc_oom_kill_app;
     s_lab.selftest = lab_selftest;
     s_lab.thread_count = kthread_count;
     s_lab.shm_count = shm_count;
@@ -1102,6 +1212,8 @@ void kernel_plus_main(void *arg) {
      * (tests/* altindaki betikler bu bayragi kullanir). */
 #ifdef ARCTIAN_KERNEL_SELFTESTS
     sched_selftest();
+    sched_e1_selftest();
+    e1_verify_subsystems();
     proc_selftest();
 #ifdef ARCTIAN_WLF_SELFTEST
     wlf_user_selftest();

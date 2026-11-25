@@ -85,7 +85,7 @@ static void ed_scroll_cb(lv_event_t *e) {
 }
 
 
-/* ---- Kayit ---- */
+
 static int ed_save(ed_ctx_t *c, int manual) {
     if (!c || !c->ta) return 0;
     const char *txt = lv_textarea_get_text(c->ta);

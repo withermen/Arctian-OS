@@ -37,11 +37,13 @@
 #define VESA_DEFAULT_HEIGHT     720
 #define VESA_DEFAULT_BPP        32
 
-// 2K resolution
+// 2K / FHD / 4K resolutions
 #define VESA_2K_WIDTH           2560
 #define VESA_2K_HEIGHT          1440
 #define VESA_FHD_WIDTH          1920
 #define VESA_FHD_HEIGHT         1080
+#define VESA_4K_WIDTH           3840
+#define VESA_4K_HEIGHT          2160
 
 // Tazeleme hizi degerleri (Hz)
 #define VESA_REFRESH_60         60
@@ -61,6 +63,8 @@ typedef struct {
 
 // VESA functions
 int  vesa_init(int width, int height, int bpp);
+void vesa_attach_external(uint32_t *virt, uint64_t phys,
+                          int width, int height, int pitch, int bpp);
 void vesa_disable(void);
 bool vesa_is_enabled(void);
 void vesa_set_refresh_rate(int hz);

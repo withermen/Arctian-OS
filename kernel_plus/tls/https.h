@@ -17,9 +17,17 @@ const char *https_get(const char *host, uint16_t port, const char *path,
 /* "https://host[:port]/path" seklindeki URL'yi ayristirip https_get yapar. */
 const char *https_get_url(const char *url, uint32_t *len_out);
 
-/* http/https ortak: yonlendirmeleri takip eder, chunked cozer, YALNIZCA
- * govdeyi dondurur (bir sonraki cagriya kadar gecerli). Hata: NULL. */
+/* http/https ortak: yonlendirmeleri takip eder, chunked + gzip/deflate cozer,
+ * YALNIZCA govdeyi dondurur (bir sonraki cagriya kadar gecerli). Hata: NULL. */
 const char *https_fetch_body(const char *url, uint32_t *len_out);
+
+/* Tam HTTP/HTTPS istemcisi: GET/POST/PUT/PATCH/DELETE + Content-Type + ozel
+ * basliklar + govde + 301/302/303/307/308 yonlendirme + chunked + gzip/deflate.
+ * Basarida govde (sonlandirilmis), *status_out = HTTP durum kodu, *len_out = boy. */
+const char *https_request(const char *method, const char *url,
+                          const char *content_type, const char *extra_headers,
+                          const void *body, uint32_t body_len,
+                          int *status_out, uint32_t *len_out);
 
 /* Son https_fetch_body cagrisinin ulastigi nihai (yonlendirme sonrasi) URL. */
 const char *https_fetch_last_url(void);
@@ -47,5 +55,14 @@ void https_cookie_set2(const char *host, const char *name, const char *value,
  * yanitindaki Set-Cookie satirlarini depoya isler. */
 int  https_ck_build(const char *host, int tls, char *out, int cap);
 void https_ck_absorb(const char *hdr, uint32_t hlen, const char *host, int tls);
+/* Cerez deposunu diske kaydetmek icin "host\tname\tval\tsecure\n" satirlarina doker. */
+uint32_t https_ck_export(char *out, uint32_t cap);
+
+/* RFC 6455 WebSocket istemcisi (ws:// ve wss://). Donus id: 0..3, hata: -1. */
+int https_ws_open(const char *url);
+int https_ws_send(int id, const void *data, uint32_t len, int is_binary);
+int https_ws_recv(int id, void *buf, uint32_t cap, int *is_binary_out);
+int https_ws_state(int id);
+void https_ws_close(int id);
 
 #endif /* ARCTIAN_HTTPS_H */

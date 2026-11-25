@@ -183,7 +183,17 @@ int wolf_main(const wolf_api_t *api) {
   `struct`, pointer, dizi, `float` **yoktur** — native SDK ile bunlar
   kullanılabilir (gcc sınırı).
 - `wolf_exec` yalnızca bilgi komutlarını kabul eder (güvenlik).
-- Aynı adres alanında çalışırlar; tam süreç izolasyonu yol haritasında.
+- Native `.wlf` uygulamaları **Ring 3 + ayrı sayfa tablosu (CR3)** içinde
+  çalışır (`main_kernel/wlf_user.c`, `kernel_plus/system/wolf_bridge.c`);
+  GUI çağrıları `wolf_api_t` trampoline tablosu ve `SYS_WOLF_CALL`/`SYS_WOLF_WAIT`
+  üzerinden masaüstüne aktarılır. (OS içi `WLF_KIND_SCRIPT` bytecode VM ise
+  masaüstü bağlamında yorumlanır.)
+
+## SDK'daki Diğer Bileşenler
+
+- `sdk/toolchain/`: Ring-3 ELF64 C/C++20 (musl 1.2.5 + `libstdc++` 14.2) çapraz
+  derleme araç zinciri (`arctian-cc`, `arctian-cxx`, `arctian-pkg-config`, `arctian.cmake`).
+- `sdk/webkit/`: WPE WebKit tabanlı Ring-3 tarayıcı arka ucu (`arctian_wpe_backend.cpp`).
 
 ## Dosyalar
 

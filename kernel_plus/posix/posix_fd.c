@@ -13,6 +13,7 @@
 #include "rtc.h"
 #include "net.h"
 #include "ipv4.h"
+#include "percpu.h"
 #include "serial.h"
 #include <string.h>
 
@@ -55,6 +56,19 @@ typedef struct {
 static pepoll_t   s_epolls[POSIX_MAX_EPOLLS];
 static spinlock_t s_epoll_tab_lock;
 
+/* ---- Eventfd (GLib GWakeup / WebKit RunLoop icin) ---- */
+typedef struct {
+    int        used;
+    int        semaphore;
+    spinlock_t lock;
+    uint64_t   counter;
+    waitq_t    rd_wq;
+    waitq_t    wr_wq;
+} pefd_t;
+
+static pefd_t     s_efds[POSIX_MAX_EFDS];
+static spinlock_t s_efd_tab_lock;
+
 static char s_resolv_buf[128];
 static const char s_hosts_buf[] = "127.0.0.1 localhost\n";
 
@@ -62,9 +76,11 @@ void posix_fd_init_subsys(void) {
     memset(s_files, 0, sizeof(s_files));
     memset(s_pipes, 0, sizeof(s_pipes));
     memset(s_epolls, 0, sizeof(s_epolls));
+    memset(s_efds, 0, sizeof(s_efds));
     spin_init(&s_file_lock);
     spin_init(&s_pipe_tab_lock);
     spin_init(&s_epoll_tab_lock);
+    spin_init(&s_efd_tab_lock);
 }
 
 posix_file_t *posix_file_alloc(int kind) {
@@ -146,6 +162,8 @@ void posix_file_unref(posix_file_t *f) {
         posix_shm_unref(obj_id);
     else if (kind == PFD_GFX)
         posix_gfx_close_obj(obj_id);
+    else if (kind == PFD_EVENTFD && obj_id >= 0 && obj_id < POSIX_MAX_EFDS)
+        s_efds[obj_id].used = 0;
 }
 
 int posix_fd_install(posix_proc_t *p, posix_file_t *f, uint32_t fd_flags) {
@@ -211,20 +229,46 @@ void posix_fd_close_all(posix_proc_t *p, int cloexec_only) {
     for (int i = 0; i < dn; i++) posix_file_unref(to_drop[i]);
 }
 
-/* Yol normalizasyonu: goreli yolu cwd ile birlestir */
-static void resolve_path(posix_proc_t *p, const char *in, char *out, size_t cap) {
+/* Yol normalizasyonu: goreli yolu dirfd veya cwd ile birlestir */
+static void resolve_path_at(posix_proc_t *p, int dirfd, const char *in, char *out, size_t cap) {
     if (!in || !in[0]) { strncpy(out, "/", cap); out[cap - 1] = 0; return; }
     if (in[0] == '/' || (in[0] && in[1] == ':')) {
         strncpy(out, in, cap - 1);
         out[cap - 1] = 0;
         return;
     }
-    size_t cl = strlen(p->cwd);
+    const char *base = p ? p->cwd : "/";
+    if (dirfd != AT_FDCWD && dirfd >= 0 && p) {
+        posix_file_t *df = posix_fd_get(p, dirfd);
+        if (df && df->path[0]) base = df->path;
+    }
+    size_t cl = strlen(base);
     size_t pos = 0;
-    for (size_t i = 0; i < cl && pos + 1 < cap; i++) out[pos++] = p->cwd[i];
+    for (size_t i = 0; i < cl && pos + 1 < cap; i++) out[pos++] = base[i];
     if (pos > 0 && out[pos - 1] != '/' && pos + 1 < cap) out[pos++] = '/';
     for (size_t i = 0; in[i] && pos + 1 < cap; i++) out[pos++] = in[i];
     out[pos] = 0;
+}
+
+static void resolve_path(posix_proc_t *p, const char *in, char *out, size_t cap) {
+    resolve_path_at(p, AT_FDCWD, in, out, cap);
+}
+
+/* POSIX yolunu tutarli C:/ AFS yoluna cevir ("/tmp/a" -> "C:/tmp/a", "/" -> "C:/") */
+static void afs_norm_cpath(const char *path, char *out, size_t cap) {
+    if (!path || !path[0] || cap < 5) { if (cap) out[0] = 0; return; }
+    if ((path[0] == 'C' || path[0] == 'c') && path[1] == ':') {
+        strncpy(out, path, cap - 1);
+        out[cap - 1] = 0;
+        return;
+    }
+    const char *p = path;
+    while (*p == '/') p++;
+    out[0] = 'C'; out[1] = ':'; out[2] = '/';
+    size_t n = strlen(p);
+    if (n + 4 > cap) n = cap - 4;
+    memcpy(out + 3, p, n);
+    out[3 + n] = 0;
 }
 
 static uint32_t afs_handle_size(void *h) {
@@ -246,7 +290,14 @@ static void *afs_lookup_path(const char *path) {
     size_t n = strlen(p);
     if (n + 4 > sizeof(cpath)) return 0;
     memcpy(cpath + 3, p, n + 1);
-    return afs_find_handle(cpath);
+    h = afs_find_handle(cpath);
+    if (h) return h;
+    if (n > 0 && cpath[3 + n - 1] != '/' && n + 5 <= sizeof(cpath)) {
+        cpath[3 + n] = '/';
+        cpath[3 + n + 1] = 0;
+        h = afs_find_handle(cpath);
+    }
+    return h;
 }
 
 static void build_resolv_conf(void) {
@@ -268,10 +319,10 @@ static void build_resolv_conf(void) {
 
 /* ---- openat / close ---- */
 int64_t posix_sys_openat(posix_proc_t *p, int dirfd, uint64_t path_va, int flags, uint32_t mode) {
-    (void)dirfd; (void)mode;
+    (void)mode;
     char raw[192], path[192];
     if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
-    resolve_path(p, raw, path, sizeof(path));
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
 
     uint32_t fd_flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
 
@@ -316,9 +367,13 @@ int64_t posix_sys_openat(posix_proc_t *p, int dirfd, uint64_t path_va, int flags
     }
 
     void *h = afs_lookup_path(path);
+    if (h && (flags & O_CREAT) && (flags & O_EXCL)) {
+        return -EEXIST;
+    }
     if (!h && (flags & O_CREAT)) {
-        const char *ap = (path[0] == '/') ? path + 1 : path;
-        h = afs_create_handle(ap);
+        char cpath[208];
+        afs_norm_cpath(path, cpath, sizeof(cpath));
+        h = afs_create_handle(cpath);
     }
     if (!h) return -ENOENT;
     if ((flags & O_TRUNC) && ((flags & O_ACCMODE) != O_RDONLY)) {
@@ -327,6 +382,10 @@ int64_t posix_sys_openat(posix_proc_t *p, int dirfd, uint64_t path_va, int flags
 
     posix_file_t *f = posix_file_alloc(PFD_AFS);
     if (!f) return -ENFILE;
+    asi_stat_t ast;
+    memset(&ast, 0, sizeof(ast));
+    if (afs_stat_handle(h, &ast) == 0)
+        f->is_dir = ast.is_dir ? 1 : 0;
     f->flags = (uint32_t)flags;
     f->afs_handle = h;
     f->offset = (flags & O_APPEND) ? afs_handle_size(h) : 0;
@@ -489,6 +548,36 @@ static int64_t file_read_kbuf(posix_file_t *f, uint8_t *kbuf, uint64_t len) {
         f->offset += done;
         return (int64_t)done;
     }
+    case PFD_EVENTFD: {
+        if (len < 8) return -EINVAL;
+        int id = f->obj_id;
+        if (id < 0 || id >= POSIX_MAX_EFDS || !s_efds[id].used) return -EBADF;
+        pefd_t *ef = &s_efds[id];
+        for (;;) {
+            uint64_t fl = sched_irq_save();
+            spin_lock(&ef->lock);
+            if (ef->counter > 0) {
+                uint64_t val = ef->semaphore ? 1ull : ef->counter;
+                ef->counter -= val;
+                int w = waitq_pop(&ef->wr_wq);
+                spin_unlock(&ef->lock);
+                if (w >= 0) sched_wake(w);
+                sched_irq_restore(fl);
+                memcpy(kbuf, &val, 8);
+                return 8;
+            }
+            if (f->flags & O_NONBLOCK) {
+                spin_unlock(&ef->lock);
+                sched_irq_restore(fl);
+                return -EAGAIN;
+            }
+            waitq_add(&ef->rd_wq, sched_current());
+            sched_prepare_block();
+            spin_unlock(&ef->lock);
+            sched_commit_block();
+            sched_irq_restore(fl);
+        }
+    }
     default:
         return -EBADF;
     }
@@ -543,6 +632,37 @@ static int64_t file_write_kbuf(posix_file_t *f, const uint8_t *kbuf, uint64_t le
         }
         f->offset += done;
         return (int64_t)done;
+    }
+    case PFD_EVENTFD: {
+        if (len < 8) return -EINVAL;
+        int id = f->obj_id;
+        if (id < 0 || id >= POSIX_MAX_EFDS || !s_efds[id].used) return -EBADF;
+        uint64_t add = 0;
+        memcpy(&add, kbuf, 8);
+        if (add == ~0ull) return -EINVAL;
+        pefd_t *ef = &s_efds[id];
+        for (;;) {
+            uint64_t fl = sched_irq_save();
+            spin_lock(&ef->lock);
+            if (ef->counter <= (~0ull - 1ull) - add) {
+                ef->counter += add;
+                int w = waitq_pop(&ef->rd_wq);
+                spin_unlock(&ef->lock);
+                if (w >= 0) sched_wake(w);
+                sched_irq_restore(fl);
+                return 8;
+            }
+            if (f->flags & O_NONBLOCK) {
+                spin_unlock(&ef->lock);
+                sched_irq_restore(fl);
+                return -EAGAIN;
+            }
+            waitq_add(&ef->wr_wq, sched_current());
+            sched_prepare_block();
+            spin_unlock(&ef->lock);
+            sched_commit_block();
+            sched_irq_restore(fl);
+        }
     }
     default:
         return -EBADF;
@@ -678,7 +798,7 @@ int64_t posix_sys_newfstatat(posix_proc_t *p, int dirfd, uint64_t path_va, uint6
         return posix_sys_fstat(p, dirfd, st_va);
     char raw[192], path[192];
     if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
-    resolve_path(p, raw, path, sizeof(path));
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
 
     posix_stat_t st;
     memset(&st, 0, sizeof(st));
@@ -698,8 +818,11 @@ int64_t posix_sys_newfstatat(posix_proc_t *p, int dirfd, uint64_t path_va, uint6
     } else {
         void *h = afs_lookup_path(path);
         if (!h) return -ENOENT;
-        st.st_mode = S_IFREG | 0644u;
-        st.st_size = (int64_t)afs_handle_size(h);
+        asi_stat_t ast;
+        memset(&ast, 0, sizeof(ast));
+        int is_dir = (afs_stat_handle(h, &ast) == 0 && ast.is_dir);
+        st.st_mode = is_dir ? (S_IFDIR | 0755u) : (S_IFREG | 0644u);
+        st.st_size = (int64_t)ast.size;
         st.st_ino  = (uint64_t)(uintptr_t)h;
     }
     st.st_blocks = (st.st_size + 511) / 512;
@@ -857,21 +980,29 @@ uint32_t posix_file_poll_mask(posix_file_t *f) {
         return posix_sock_poll_mask(f->kind, f->obj_id);
     case PFD_GFX:
         return posix_gfx_poll_mask(f->obj_id);
+    case PFD_EVENTFD: {
+        if (f->obj_id < 0 || f->obj_id >= POSIX_MAX_EFDS || !s_efds[f->obj_id].used)
+            return POLLERR;
+        uint32_t m = 0;
+        if (s_efds[f->obj_id].counter > 0) m |= POLLIN;
+        if (s_efds[f->obj_id].counter < (~0ull - 1ull)) m |= POLLOUT;
+        return m;
+    }
     default:
         return POLLNVAL;
     }
 }
 
 int64_t posix_sys_poll(posix_proc_t *p, uint64_t fds_va, uint64_t nfds, int timeout_ms) {
-    if (nfds > 64) return -EINVAL;
-    posix_pollfd_t kfds[64];
+    if (nfds > POSIX_MAX_FDS) return -EINVAL;
+    posix_pollfd_t kfds[POSIX_MAX_FDS];
     if (nfds > 0 && posix_ucopy_in(kfds, fds_va, nfds * sizeof(posix_pollfd_t)) < 0)
         return -EFAULT;
 
     uint64_t deadline = (timeout_ms > 0) ? (clock_ms() + (uint64_t)timeout_ms) : 0;
 
     for (;;) {
-        ipv4_poll();
+        if (percpu_self_index() == 0) ipv4_poll();
         int ready = 0;
         for (uint64_t i = 0; i < nfds; i++) {
             kfds[i].revents = 0;
@@ -987,7 +1118,7 @@ int64_t posix_sys_epoll_wait(posix_proc_t *p, int epfd, uint64_t evs_va, int max
     uint64_t deadline = (timeout_ms > 0) ? (clock_ms() + (uint64_t)timeout_ms) : 0;
 
     for (;;) {
-        ipv4_poll();
+        if (percpu_self_index() == 0) ipv4_poll();
         int n = 0;
         for (int i = 0; i < POSIX_MAX_EPOLL_ENT && n < maxev; i++) {
             if (!ep->ents[i].used) continue;
@@ -1028,13 +1159,33 @@ static int64_t rtc_unix_seconds(void) {
     return days * 86400 + (int64_t)t.hour * 3600 + (int64_t)t.minute * 60 + (int64_t)t.second;
 }
 
+static int64_t s_rt_offset_ms = 0;
+static int s_rt_init = 0;
+
+uint64_t posix_realtime_ms(void) {
+    uint64_t up = clock_ms();
+    int64_t rtc_ms = rtc_unix_seconds() * 1000ll;
+    if (!s_rt_init) {
+        s_rt_offset_ms = rtc_ms - (int64_t)up;
+        s_rt_init = 1;
+    } else {
+        int64_t cur = (int64_t)up + s_rt_offset_ms;
+        int64_t diff = rtc_ms - cur;
+        if (diff > 2000ll || diff < -2000ll)
+            s_rt_offset_ms = rtc_ms - (int64_t)up;
+    }
+    int64_t rt = (int64_t)up + s_rt_offset_ms;
+    return (rt < 0) ? 0 : (uint64_t)rt;
+}
+
 int64_t posix_sys_clock_gettime(int clk_id, uint64_t ts_va) {
     posix_timespec_t ts;
-    uint64_t ms = clock_ms();
-    if (clk_id == CLOCK_REALTIME) {
-        ts.tv_sec  = rtc_unix_seconds();
-        ts.tv_nsec = (int64_t)((ms % 1000ull) * 1000000ull);
+    if (clk_id == CLOCK_REALTIME || clk_id == 5 /* CLOCK_REALTIME_COARSE */) {
+        uint64_t rt = posix_realtime_ms();
+        ts.tv_sec  = (int64_t)(rt / 1000ull);
+        ts.tv_nsec = (int64_t)((rt % 1000ull) * 1000000ull);
     } else {
+        uint64_t ms = clock_ms();
         ts.tv_sec  = (int64_t)(ms / 1000ull);
         ts.tv_nsec = (int64_t)((ms % 1000ull) * 1000000ull);
     }
@@ -1119,47 +1270,165 @@ int64_t posix_sys_chdir(posix_proc_t *p, uint64_t path_va) {
 }
 
 int64_t posix_sys_mkdirat(posix_proc_t *p, int dirfd, uint64_t path_va, uint32_t mode) {
-    (void)dirfd; (void)mode;
-    char raw[192], path[192];
+    (void)mode;
+    char raw[192], path[192], cpath[208];
     if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
-    resolve_path(p, raw, path, sizeof(path));
-    const char *ap = (path[0] == '/') ? path + 1 : path;
-    afs_ensure_dir(ap);
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
+    afs_norm_cpath(path, cpath, sizeof(cpath));
+    afs_ensure_dir(cpath);
     return 0;
 }
 
 int64_t posix_sys_unlinkat(posix_proc_t *p, int dirfd, uint64_t path_va, int flags) {
-    (void)dirfd; (void)flags;
-    char raw[192], path[192];
+    (void)flags;
+    char raw[192], path[192], cpath[208];
     if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
-    resolve_path(p, raw, path, sizeof(path));
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
+    afs_norm_cpath(path, cpath, sizeof(cpath));
+    if (afs_remove(cpath) == 0) return 0;
     const char *ap = (path[0] == '/') ? path + 1 : path;
     return afs_remove(ap) == 0 ? 0 : -ENOENT;
 }
 
 int64_t posix_sys_rename(posix_proc_t *p, uint64_t old_va, uint64_t new_va) {
-    char r1[192], r2[192], p1[192], p2[192];
+    char r1[192], r2[192], p1[192], p2[192], c1[208], c2[208];
     if (posix_ucstr_in(r1, sizeof(r1), old_va) < 0) return -EFAULT;
     if (posix_ucstr_in(r2, sizeof(r2), new_va) < 0) return -EFAULT;
     resolve_path(p, r1, p1, sizeof(p1));
     resolve_path(p, r2, p2, sizeof(p2));
+    afs_norm_cpath(p1, c1, sizeof(c1));
+    afs_norm_cpath(p2, c2, sizeof(c2));
+    if (afs_rename(c1, c2) == 0) return 0;
     return afs_rename((p1[0] == '/') ? p1 + 1 : p1, (p2[0] == '/') ? p2 + 1 : p2) == 0 ? 0 : -ENOENT;
 }
 
+/* Linux x86-64 struct linux_dirent64 */
+typedef struct __attribute__((packed)) {
+    uint64_t d_ino;
+    int64_t  d_off;
+    uint16_t d_reclen;
+    uint8_t  d_type;
+    char     d_name[1];
+} posix_dirent64_t;
+
 int64_t posix_sys_getdents64(posix_proc_t *p, int fd, uint64_t dirp_va, uint64_t count) {
-    (void)p; (void)fd; (void)dirp_va; (void)count;
-    return 0;
+    posix_file_t *f = posix_fd_get(p, fd);
+    if (!f) return -EBADF;
+    if (f->kind != PFD_AFS || !f->is_dir) return -ENOTDIR;
+    if (count < 24) return -EINVAL;
+
+    char cpath[208];
+    afs_norm_cpath(f->path, cpath, sizeof(cpath));
+    int total = afs_count_dir(cpath);
+    const char *dir_arg = cpath;
+    if (total <= 0) {
+        const char *ap = (f->path[0] == '/') ? f->path + 1 : f->path;
+        int t2 = afs_count_dir(ap);
+        if (t2 > 0) { total = t2; dir_arg = ap; }
+    }
+
+    uint64_t written = 0;
+    int idx = (int)f->offset;
+    while (idx < total) {
+        char name[AFS_NAME_MAX + 4];
+        int is_dir = 0;
+        if (afs_list_dir(dir_arg, idx, name, (int)sizeof(name), &is_dir) != 0) break;
+        size_t nlen = strlen(name);
+        uint16_t reclen = (uint16_t)((19u + nlen + 1u + 7u) & ~7u);
+        if (written + reclen > count) break;
+
+        uint8_t ent[128];
+        if (reclen > sizeof(ent)) { idx++; continue; }
+        memset(ent, 0, reclen);
+        posix_dirent64_t *d = (posix_dirent64_t *)ent;
+        d->d_ino    = (uint64_t)(idx + 2);
+        d->d_off    = (int64_t)(idx + 1);
+        d->d_reclen = reclen;
+        d->d_type   = is_dir ? 4u /* DT_DIR */ : 8u /* DT_REG */;
+        memcpy(d->d_name, name, nlen + 1);
+
+        if (posix_ucopy_out(dirp_va + written, ent, reclen) < 0)
+            return written ? (int64_t)written : -EFAULT;
+        written += reclen;
+        idx++;
+    }
+    f->offset = (uint64_t)idx;
+    return (int64_t)written;
 }
 
 int64_t posix_sys_access(posix_proc_t *p, int dirfd, uint64_t path_va, int mode) {
-    (void)dirfd; (void)mode;
+    (void)mode;
     char raw[192], path[192];
     if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
-    resolve_path(p, raw, path, sizeof(path));
-    if (strcmp(path, "/") == 0 || strcmp(path, "/etc/resolv.conf") == 0 ||
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
+    if (strcmp(path, "/") == 0 || strcmp(path, "/etc") == 0 || strcmp(path, "/dev") == 0 ||
+        strcmp(path, "/etc/resolv.conf") == 0 ||
         strcmp(path, "/etc/hosts") == 0 || strcmp(path, "/dev/null") == 0)
         return 0;
     return afs_lookup_path(path) ? 0 : -ENOENT;
+}
+
+int64_t posix_sys_readlinkat(posix_proc_t *p, int dirfd, uint64_t path_va,
+                             uint64_t buf_va, uint64_t bufsiz) {
+    if (!p || bufsiz == 0) return -EINVAL;
+    char raw[192], path[192];
+    if (posix_ucstr_in(raw, sizeof(raw), path_va) < 0) return -EFAULT;
+    resolve_path_at(p, dirfd, raw, path, sizeof(path));
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        const char *exe = p->exe_path[0] ? p->exe_path : "/elf";
+        size_t n = strlen(exe);
+        if (n > bufsiz) n = (size_t)bufsiz;
+        if (posix_ucopy_out(buf_va, exe, n) < 0) return -EFAULT;
+        return (int64_t)n;
+    }
+    return -EINVAL;
+}
+
+int64_t posix_sys_eventfd2(posix_proc_t *p, uint32_t initval, int flags) {
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_efd_tab_lock);
+    int id = -1;
+    for (int i = 0; i < POSIX_MAX_EFDS; i++) {
+        if (!s_efds[i].used) {
+            memset(&s_efds[i], 0, sizeof(s_efds[i]));
+            s_efds[i].used = 1;
+            s_efds[i].semaphore = (flags & 1) ? 1 : 0; /* EFD_SEMAPHORE */
+            s_efds[i].counter = initval;
+            spin_init(&s_efds[i].lock);
+            waitq_init(&s_efds[i].rd_wq);
+            waitq_init(&s_efds[i].wr_wq);
+            id = i;
+            break;
+        }
+    }
+    spin_unlock(&s_efd_tab_lock);
+    sched_irq_restore(fl);
+    if (id < 0) return -ENFILE;
+
+    posix_file_t *f = posix_file_alloc(PFD_EVENTFD);
+    if (!f) { s_efds[id].used = 0; return -ENFILE; }
+    f->obj_id = id;
+    f->flags = O_RDWR | ((flags & O_NONBLOCK) ? O_NONBLOCK : 0);
+    int fd = posix_fd_install(p, f, (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
+    if (fd < 0) posix_file_unref(f);
+    return fd;
+}
+
+int64_t posix_sys_statfs(uint64_t buf_va) {
+    if (!buf_va) return -EFAULT;
+    int64_t st[15]; /* Linux x86-64 struct statfs = 120 bytes */
+    memset(st, 0, sizeof(st));
+    st[0] = 0xEF53;   /* f_type (EXT2/3/4 super magic) */
+    st[1] = 4096;     /* f_bsize */
+    st[2] = 65536;    /* f_blocks (~256 MB) */
+    st[3] = 32768;    /* f_bfree (~128 MB) */
+    st[4] = 32768;    /* f_bavail */
+    st[5] = 512;      /* f_files */
+    st[6] = 256;      /* f_ffree */
+    st[8] = 63;       /* f_namelen */
+    st[9] = 4096;     /* f_frsize */
+    if (posix_ucopy_out(buf_va, st, sizeof(st)) < 0) return -EFAULT;
+    return 0;
 }
 
 int64_t posix_sys_ioctl(posix_proc_t *p, int fd, uint64_t req, uint64_t arg) {

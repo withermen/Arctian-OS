@@ -13,12 +13,16 @@
  */
 #include "posix.h"
 #include "posix_gfx.h"
+#include "alloc.h"
 #include "clock.h"
 #include "serial.h"
 #include <string.h>
 
-#define PGFX_MAX_WINS  8
-#define PGFX_EV_CAP    64
+#define PGFX_CHUNK_SHIFT 4u
+#define PGFX_CHUNK_SIZE  (1u << PGFX_CHUNK_SHIFT) /* 16 pencere / dilim */
+#define PGFX_CHUNK_MASK  (PGFX_CHUNK_SIZE - 1u)
+#define PGFX_MAX_CHUNKS  64u                      /* 1024 POSIX pencereye kadar dinamik */
+#define PGFX_EV_CAP      64
 
 typedef struct {
     int        used;
@@ -40,8 +44,17 @@ typedef struct {
     uint32_t   ev_count;
 } pgfx_win_t;
 
-static pgfx_win_t s_wins[PGFX_MAX_WINS];
-static spinlock_t s_win_tab_lock;
+static pgfx_win_t       *s_win_chunks[PGFX_MAX_CHUNKS];
+static volatile uint32_t s_win_num_chunks = 0;
+static volatile int      s_win_cap = 0;
+static spinlock_t        s_win_tab_lock;
+
+static inline pgfx_win_t *pgfx_slot(int id) {
+    int cap = __atomic_load_n(&s_win_cap, __ATOMIC_ACQUIRE);
+    if (id < 0 || id >= cap) return 0;
+    pgfx_win_t *ch = s_win_chunks[(uint32_t)id >> PGFX_CHUNK_SHIFT];
+    return ch ? &ch[(uint32_t)id & PGFX_CHUNK_MASK] : 0;
+}
 
 /* Masaustu tarafi kancalari (desktop/posix_win.c tarafindan kaydedilir) */
 typedef void *(*pgfx_open_cb_t)(int win_id, const char *title, uint32_t w, uint32_t h);
@@ -60,34 +73,50 @@ void posix_gfx_register_desktop(pgfx_open_cb_t on_open, pgfx_blit_cb_t on_blit,
 }
 
 void posix_gfx_init(void) {
-    memset(s_wins, 0, sizeof(s_wins));
     spin_init(&s_win_tab_lock);
+    int cap = __atomic_load_n(&s_win_cap, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < cap; i++) {
+        pgfx_win_t *gw = pgfx_slot(i);
+        if (gw) memset(gw, 0, sizeof(*gw));
+    }
 }
 
 int posix_gfx_shm_id(int obj_id) {
-    if (obj_id < 0 || obj_id >= PGFX_MAX_WINS || !s_wins[obj_id].used) return -1;
-    return s_wins[obj_id].shm_id;
+    pgfx_win_t *gw = pgfx_slot(obj_id);
+    if (!gw || !gw->used) return -1;
+    return gw->shm_id;
 }
 
 /* Masaustunun paylasimli ARGB8888 tamponundan satir/piksel okuyabilmesi icin */
 int posix_gfx_copy_rect(int win_id, uint32_t *dst_argb, uint32_t dst_stride_px,
                         int32_t x, int32_t y, int32_t w, int32_t h) {
-    if (win_id < 0 || win_id >= PGFX_MAX_WINS || !s_wins[win_id].used) return -1;
-    pgfx_win_t *gw = &s_wins[win_id];
-    if (gw->shm_id < 0 || !dst_argb) return -1;
+    pgfx_win_t *gw = pgfx_slot(win_id);
+    if (!gw || !dst_argb) return -1;
+
+    uint64_t fl = sched_irq_save();
+    spin_lock(&gw->lock);
+    int sid = (gw->used && !gw->want_close) ? gw->shm_id : -1;
+    uint32_t gw_w = gw->width;
+    uint32_t gw_h = gw->height;
+    if (sid >= 0 && posix_shm_ref(sid) != 0) sid = -1;
+    spin_unlock(&gw->lock);
+    sched_irq_restore(fl);
+
+    if (sid < 0) return -1;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
-    if (x + w > (int32_t)gw->width)  w = (int32_t)gw->width - x;
-    if (y + h > (int32_t)gw->height) h = (int32_t)gw->height - y;
-    if (w <= 0 || h <= 0) return 0;
+    if (x + w > (int32_t)gw_w) w = (int32_t)gw_w - x;
+    if (y + h > (int32_t)gw_h) h = (int32_t)gw_h - y;
+    if (w <= 0 || h <= 0) { posix_shm_unref(sid); return 0; }
 
+    int rc = 0;
     for (int32_t row = y; row < y + h; row++) {
-        uint64_t byte_off = ((uint64_t)row * gw->width + (uint64_t)x) * 4ull;
+        uint64_t byte_off = ((uint64_t)row * gw_w + (uint64_t)x) * 4ull;
         uint64_t rem = (uint64_t)w * 4ull;
         uint8_t *dst = (uint8_t *)(dst_argb + (uint64_t)row * dst_stride_px + (uint64_t)x);
         while (rem > 0) {
-            uint64_t pa = posix_shm_frame(gw->shm_id, byte_off >> 12);
-            if (!pa) return -1;
+            uint64_t pa = posix_shm_frame(sid, byte_off >> 12);
+            if (!pa) { rc = -1; goto out; }
             uint64_t po = byte_off & 0xFFFull;
             uint64_t ch = 0x1000ull - po;
             if (ch > rem) ch = rem;
@@ -97,13 +126,15 @@ int posix_gfx_copy_rect(int win_id, uint32_t *dst_argb, uint32_t dst_stride_px,
             rem -= ch;
         }
     }
-    return 0;
+out:
+    posix_shm_unref(sid);
+    return rc;
 }
 
 /* Masaustunden Ring-3 penceresine girdi olayi gonder (fare/klavye/tekerlek/kapanma). */
 void posix_gfx_push_event(int win_id, const arctian_gfx_event_t *ev) {
-    if (win_id < 0 || win_id >= PGFX_MAX_WINS || !ev) return;
-    pgfx_win_t *gw = &s_wins[win_id];
+    pgfx_win_t *gw = pgfx_slot(win_id);
+    if (!gw || !ev) return;
     uint64_t fl = sched_irq_save();
     spin_lock(&gw->lock);
     if (gw->used) {
@@ -120,16 +151,17 @@ void posix_gfx_push_event(int win_id, const arctian_gfx_event_t *ev) {
 }
 
 uint32_t posix_gfx_poll_mask(int obj_id) {
-    if (obj_id < 0 || obj_id >= PGFX_MAX_WINS || !s_wins[obj_id].used) return POLLERR;
+    pgfx_win_t *gw = pgfx_slot(obj_id);
+    if (!gw || !gw->used) return POLLERR;
     uint32_t m = POLLOUT;
-    if (s_wins[obj_id].ev_count > 0) m |= POLLIN;
+    if (gw->ev_count > 0) m |= POLLIN;
     return m;
 }
 
 int64_t posix_gfx_read_events(int obj_id, uint8_t *dst, uint64_t len, int nonblock) {
-    if (obj_id < 0 || obj_id >= PGFX_MAX_WINS || !s_wins[obj_id].used) return -EBADF;
+    pgfx_win_t *gw = pgfx_slot(obj_id);
+    if (!gw || !gw->used) return -EBADF;
     if (len < sizeof(arctian_gfx_event_t)) return -EINVAL;
-    pgfx_win_t *gw = &s_wins[obj_id];
 
     for (;;) {
         uint64_t fl = sched_irq_save();
@@ -154,28 +186,43 @@ int64_t posix_gfx_read_events(int obj_id, uint8_t *dst, uint64_t len, int nonblo
 }
 
 void posix_gfx_close_obj(int obj_id) {
-    if (obj_id < 0 || obj_id >= PGFX_MAX_WINS) return;
-    pgfx_win_t *gw = &s_wins[obj_id];
+    pgfx_win_t *gw = pgfx_slot(obj_id);
+    if (!gw) return;
+    int sid = -1;
     uint64_t fl = sched_irq_save();
     spin_lock(&gw->lock);
-    if (gw->used) gw->want_close = 1;
+    if (gw->used) {
+        gw->want_close = 1;
+        gw->want_open = 0;
+        gw->dirty = 0;
+        sid = gw->shm_id;
+        gw->shm_id = -1;
+    }
     spin_unlock(&gw->lock);
     sched_irq_restore(fl);
+    if (sid >= 0) posix_shm_unref(sid);
 }
 
 /* Masaustu ana dongusunden her karede cagirilir (wolf_bridge_drain ile yan yana). */
 void posix_gfx_desktop_drain(void) {
-    for (int i = 0; i < PGFX_MAX_WINS; i++) {
-        pgfx_win_t *gw = &s_wins[i];
-        if (!gw->used) continue;
+    int cap = __atomic_load_n(&s_win_cap, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < cap; i++) {
+        pgfx_win_t *gw = pgfx_slot(i);
+        if (!gw || !gw->used) continue;
 
         if (gw->want_close) {
+            uint64_t fl = sched_irq_save();
+            spin_lock(&gw->lock);
             void *h = gw->desktop_handle;
             int sid = gw->shm_id;
             gw->desktop_handle = 0;
             gw->shm_id = -1;
             gw->want_close = 0;
+            gw->want_open = 0;
+            gw->dirty = 0;
             gw->used = 0;
+            spin_unlock(&gw->lock);
+            sched_irq_restore(fl);
             if (h && s_cb_close) s_cb_close(h);
             if (sid >= 0) posix_shm_unref(sid);
             continue;
@@ -213,23 +260,58 @@ int64_t posix_sys_gfx_create(posix_proc_t *p, uint64_t title_va, uint32_t w, uin
     uint64_t fl = sched_irq_save();
     spin_lock(&s_win_tab_lock);
     int wid = -1;
-    for (int i = 0; i < PGFX_MAX_WINS; i++) {
-        if (!s_wins[i].used) {
-            memset(&s_wins[i], 0, sizeof(s_wins[i]));
-            s_wins[i].used = 1;
-            spin_init(&s_wins[i].lock);
-            strncpy(s_wins[i].title, title, sizeof(s_wins[i].title) - 1);
-            s_wins[i].width = w;
-            s_wins[i].height = h;
-            s_wins[i].shm_id = sid;
-            s_wins[i].want_open = 1;
-            wid = i;
+    for (;;) {
+        int cap = s_win_cap;
+        for (int i = 0; i < cap; i++) {
+            pgfx_win_t *cand = pgfx_slot(i);
+            if (cand && !cand->used) {
+                wid = i;
+                break;
+            }
+        }
+        if (wid >= 0) break;
+
+        uint32_t nc = s_win_num_chunks;
+        if (nc >= PGFX_MAX_CHUNKS) break;
+
+        spin_unlock(&s_win_tab_lock);
+        sched_irq_restore(fl);
+        pgfx_win_t *new_ch = (pgfx_win_t *)kmalloc(sizeof(pgfx_win_t) * PGFX_CHUNK_SIZE);
+        fl = sched_irq_save();
+        if (!new_ch) {
+            spin_lock(&s_win_tab_lock);
             break;
         }
+        memset(new_ch, 0, sizeof(pgfx_win_t) * PGFX_CHUNK_SIZE);
+
+        spin_lock(&s_win_tab_lock);
+        if (s_win_num_chunks == nc && s_win_num_chunks < PGFX_MAX_CHUNKS) {
+            wid = (int)(nc * PGFX_CHUNK_SIZE);
+            s_win_chunks[s_win_num_chunks++] = new_ch;
+            __atomic_store_n(&s_win_cap, (int)(s_win_num_chunks * PGFX_CHUNK_SIZE), __ATOMIC_RELEASE);
+            break;
+        }
+        spin_unlock(&s_win_tab_lock);
+        sched_irq_restore(fl);
+        kfree(new_ch);
+        fl = sched_irq_save();
+        spin_lock(&s_win_tab_lock);
+    }
+
+    if (wid >= 0) {
+        pgfx_win_t *gw = pgfx_slot(wid);
+        memset(gw, 0, sizeof(*gw));
+        gw->used = 1;
+        spin_init(&gw->lock);
+        strncpy(gw->title, title, sizeof(gw->title) - 1);
+        gw->width = w;
+        gw->height = h;
+        gw->shm_id = sid;
+        gw->want_open = 1;
     }
     spin_unlock(&s_win_tab_lock);
     sched_irq_restore(fl);
-    if (wid < 0) { posix_shm_unref(sid); return -ENOSPC; }
+    if (wid < 0) { posix_shm_unref(sid); return -ENOMEM; }
 
     posix_file_t *f = posix_file_alloc(PFD_GFX);
     if (!f) { posix_gfx_close_obj(wid); return -ENFILE; }
@@ -243,8 +325,8 @@ int64_t posix_sys_gfx_create(posix_proc_t *p, uint64_t title_va, uint32_t w, uin
 int64_t posix_sys_gfx_present(posix_proc_t *p, int fd, int32_t x, int32_t y, int32_t w, int32_t h) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f || f->kind != PFD_GFX) return -EBADF;
-    pgfx_win_t *gw = &s_wins[f->obj_id];
-    if (!gw->used) return -EBADF;
+    pgfx_win_t *gw = pgfx_slot(f->obj_id);
+    if (!gw || !gw->used) return -EBADF;
     if (w <= 0 || h <= 0) { x = 0; y = 0; w = (int32_t)gw->width; h = (int32_t)gw->height; }
 
     uint64_t fl = sched_irq_save();
@@ -268,7 +350,8 @@ int64_t posix_sys_gfx_present(posix_proc_t *p, int fd, int32_t x, int32_t y, int
 int64_t posix_sys_gfx_poll(posix_proc_t *p, int fd, uint64_t ev_va, int timeout_ms) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f || f->kind != PFD_GFX) return -EBADF;
-    pgfx_win_t *gw = &s_wins[f->obj_id];
+    pgfx_win_t *gw = pgfx_slot(f->obj_id);
+    if (!gw || !gw->used) return -EBADF;
     uint64_t deadline = (timeout_ms > 0) ? (clock_ms() + (uint64_t)timeout_ms) : 0;
 
     for (;;) {
@@ -295,7 +378,8 @@ int64_t posix_sys_gfx_resize(posix_proc_t *p, int fd, uint32_t w, uint32_t h) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f || f->kind != PFD_GFX) return -EBADF;
     if (w == 0 || h == 0 || w > 1920 || h > 1080) return -EINVAL;
-    pgfx_win_t *gw = &s_wins[f->obj_id];
+    pgfx_win_t *gw = pgfx_slot(f->obj_id);
+    if (!gw || !gw->used) return -EBADF;
     int rc = posix_shm_resize(gw->shm_id, (uint64_t)w * (uint64_t)h * 4ull);
     if (rc < 0) return rc;
     gw->width = w;

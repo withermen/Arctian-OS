@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Arctian OS statik sysroot pkg-config sarmalayicisi
+set -euo pipefail
+TC="${ARCTIAN_TOOLCHAIN:-$HOME/arctian-toolchain}"
+source "$TC/env.sh"
+export PKG_CONFIG_DIR=""
+export PKG_CONFIG_LIBDIR="$ARCTIAN_SYSROOT/usr/lib/pkgconfig:$ARCTIAN_SYSROOT/usr/share/pkgconfig"
+export PKG_CONFIG_SYSROOT_DIR="$ARCTIAN_SYSROOT"
+exec "$TC/host/bin/pkg-config" --static "$@"

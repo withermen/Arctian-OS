@@ -12,6 +12,8 @@
 #define ETHER_TYPE_ARP   0x0806
 #define ETHER_TYPE_IPV6  0x86DD
 
+#define NET_TYPE_VIRTIO  5
+
 typedef struct {
     uint8_t mac[NET_MAC_LEN];
     bool valid;

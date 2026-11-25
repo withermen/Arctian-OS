@@ -23,13 +23,14 @@
 #define TCP_STATE_CLOSE_WAIT   9
 #define TCP_STATE_LAST_ACK    10
 
-#define TCP_MAX_CONNECTIONS   8
+#define TCP_MAX_CONNECTIONS   64
 #define TCP_RETRANSMIT_TIMEOUT 1000
 #define TCP_WINDOW_SIZE       8192
 #define TCP_MSS               1460
-#define TCP_RXBUF_SIZE        (256u * 1024u)  /* F3: kmalloc dairesel halka (2^n) */
+#define TCP_RXBUF_SIZE        (128u * 1024u)  /* F3: kmalloc dairesel halka (2^n) */
 #define TCP_RXBUF_MASK        (TCP_RXBUF_SIZE - 1u)
 #define TCP_WSCALE_SHIFT      3   /* F3: pencere olcegi (x8) */
+#define TCP_OOO_SLOTS         8   /* F2: dinamik OOO yeniden siralama yuvalari */
 
 typedef struct {
     uint16_t src_port;
@@ -73,9 +74,19 @@ typedef struct {
     uint16_t ack_pkts;        /* F3: son ACK'tan beri alinan sirali paket sayisi */
     uint32_t idle_ms;         /* son aktivite (clock_ms kesiti): bekleme
                                * durumlarinda slot toplama icin */
+    /* F2: RFC 6582 NewReno tikaniklik denetimi + dinamik OOO kuyrugu */
+    uint32_t cwnd;            /* tikaniklik penceresi (bayt) */
+    uint32_t ssthresh;        /* yavas baslangic esigi (bayt) */
+    uint8_t  dup_acks;        /* ardisik yinelenen ACK sayaci */
+    uint8_t  in_recovery;     /* 1 = hizli toparlanma etkin */
+    uint8_t  fin_received;    /* 1 = sira disi FIN alindi, bekleniyor */
+    uint32_t recover_seq;     /* RFC 6582 'recover' sira numarasi */
+    uint32_t fin_seq;         /* FIN'in beklendigi sira numarasi */
+    void    *ooo;             /* dinamik OOO tamponu (yalniz gerekince kmalloc) */
 } tcp_connection_t;
 
 void tcp_init(void);
+void tcp_10_selftest(void);
 int  tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port);
 int  tcp_listen(uint16_t port);
 int  tcp_accept(int listen_id);

@@ -38,10 +38,12 @@ arctian_recover_t *g_arctian_recover = NULL;
 static arctian_recover_tick_fn s_recover_tick = NULL;
 static arctian_sched_tick_fn  s_sched_tick = NULL;
 static arctian_fault_fn       s_fault_handler = NULL;
+static arctian_pf_handler_fn  s_pf_handler = NULL;
 
 void arctian_set_recover_tick(arctian_recover_tick_fn fn) { s_recover_tick = fn; }
 void arctian_set_sched_tick(arctian_sched_tick_fn fn) { s_sched_tick = fn; }
 void arctian_set_fault_handler(arctian_fault_fn fn) { s_fault_handler = fn; }
+void arctian_set_pf_handler(arctian_pf_handler_fn fn) { s_pf_handler = fn; }
 
 static char *rc_append(char *p, const char *s) {
     while (*s) *p++ = *s++;
@@ -131,6 +133,13 @@ void isr_handler(registers_t *regs) {
 
     // Exception (0-31)
     if (int_no < 32) {
+        /* Demand paging / kurtarilabilir sayfa hatasi: log/panik oncesi dene */
+        if (int_no == 14 && s_pf_handler) {
+            uint64_t pf_cr2;
+            asm volatile("mov %%cr2, %0" : "=r"(pf_cr2));
+            if (s_pf_handler(pf_cr2, regs->err_code, regs->rip))
+                return;
+        }
         serial_puts("[isr] EXC int=");
         serial_hex((uint64_t)int_no);
         serial_puts(" rip=");

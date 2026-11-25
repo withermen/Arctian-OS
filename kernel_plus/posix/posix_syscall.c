@@ -1,5 +1,7 @@
 /* x86-64 SYSCALL/SYSRET kurulumu ve Linux ABI uyumlu POSIX syscall dagiticisi. */
 #include "posix.h"
+#include "isr.h"
+#include "clock.h"
 #include "percpu.h"
 #include "percpu_gdt.h"
 #include "serial.h"
@@ -55,23 +57,62 @@ void posix_syscall_enable_cpu(void) {
     wrmsr64(MSR_FMASK, 0x700ull);   /* SYSCALL girisinde TF|IF|DF kapat */
 }
 
+/* Exception kapilarini (ozellikle #PF vektor 14) Interrupt Gate (0x8E) yap:
+ * Trap Gate (0x8F) IF=1 biraktigi icin #PF girisinde mov %%cr2 oncesi
+ * timer IRQ / gorev degisimi girerse CR2 baska surecin adresiyle ezilir! */
+static void posix_harden_exception_gates(void) {
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) idtr;
+    struct idt_ent {
+        uint16_t off_lo;
+        uint16_t sel;
+        uint8_t  ist;
+        uint8_t  type_attr;
+        uint16_t off_mid;
+        uint32_t off_hi;
+        uint32_t resv;
+    } __attribute__((packed));
+
+    __asm__ volatile("sidt %0" : "=m"(idtr) :: "memory");
+    if (!idtr.base || idtr.limit < (uint16_t)(32u * sizeof(struct idt_ent) - 1u))
+        return;
+
+    uint64_t fl = sched_irq_save();
+    volatile struct idt_ent *idt = (volatile struct idt_ent *)(uintptr_t)idtr.base;
+    for (int i = 0; i < 32; i++) {
+        if ((idt[i].type_attr & 0x8Fu) == 0x8Fu) {
+            idt[i].type_attr = (uint8_t)((idt[i].type_attr & ~0x0Fu) | 0x0Eu);
+        }
+    }
+    sched_irq_restore(fl);
+}
+
 void posix_init(void) {
     posix_fd_init_subsys();
     posix_sock_init();
     posix_gfx_init();
+    posix_harden_exception_gates();
+    arctian_set_pf_handler(posix_pf_handler);
     posix_syscall_enable_cpu();
-    serial_puts("[posix] SYSCALL/SYSRET + ELF64/VM/thread/futex/fd/sock/gfx hazir\n");
+    serial_puts("[posix] SYSCALL/SYSRET + ELF64/VM(demand)/thread/futex/fd/sock/gfx hazir\n");
 }
 
-/* ---- Kullanici bellegi guvenli erisim yardimcilari ---- */
+/* ---- Kullanici bellegi guvenli erisim yardimcilari (demand-paging uyumlu) ---- */
 int posix_uprobe(uint64_t va, uint64_t len, int write) {
     if (len == 0) return 1;
     uint64_t end = va + len;
     if (end < va) return 0;
     if (va < (uint64_t)VMM_USER_BASE || end > VMM_USER_TOP) return 0;
     vmm_space_t sp = vmm_space_current();
-    for (uint64_t pg = va & ~0xFFFull; pg < end; pg += 0x1000ull)
-        if (!vmm_probe_user(sp, pg, write)) return 0;
+    posix_proc_t *p = posix_cur_proc();
+    for (uint64_t pg = va & ~0xFFFull; pg < end; pg += 0x1000ull) {
+        if (!vmm_probe_user(sp, pg, write)) {
+            if (!p || !posix_vm_fault_page(p, pg, write, 0)) return 0;
+            if (!vmm_probe_user(sp, pg, write)) return 0;
+        }
+    }
     return 1;
 }
 
@@ -93,17 +134,53 @@ int posix_ucstr_in(char *kdst, uint64_t cap, uint64_t usrc) {
     if (!kdst || cap == 0) return -EINVAL;
     if (usrc < (uint64_t)VMM_USER_BASE || usrc >= VMM_USER_TOP) return -EFAULT;
     vmm_space_t sp = vmm_space_current();
-    if (!vmm_probe_user(sp, usrc & ~0xFFFull, 0)) return -EFAULT;
+    posix_proc_t *p = posix_cur_proc();
+    if (!vmm_probe_user(sp, usrc & ~0xFFFull, 0)) {
+        if (!p || !posix_vm_fault_page(p, usrc, 0, 0) ||
+            !vmm_probe_user(sp, usrc & ~0xFFFull, 0))
+            return -EFAULT;
+    }
     uint64_t i = 0;
     for (; i + 1 < cap; i++) {
         uint64_t a = usrc + i;
-        if ((a & 0xFFFull) == 0 && !vmm_probe_user(sp, a, 0)) return -EFAULT;
+        if ((a & 0xFFFull) == 0 && !vmm_probe_user(sp, a, 0)) {
+            if (!p || !posix_vm_fault_page(p, a, 0, 0) || !vmm_probe_user(sp, a, 0))
+                return -EFAULT;
+        }
         char c = *(const char *)(uintptr_t)a;
         kdst[i] = c;
         if (c == 0) return 0;
     }
     kdst[cap - 1] = 0;
     return -ENAMETOOLONG;
+}
+
+static void posix_fill_rlimit(int resource, uint64_t lim[2]) {
+    vmm_meminfo_t mi;
+    vmm_mem_info(&mi);
+    uint64_t ram = mi.total_bytes ? mi.total_bytes : (96ull * 1024ull * 1024ull);
+    switch (resource) {
+    case 3: /* RLIMIT_STACK */
+        lim[0] = POSIX_USER_STACK_SZ_BYTES;
+        lim[1] = POSIX_USER_STACK_SZ_BYTES;
+        break;
+    case 7: /* RLIMIT_NOFILE */
+        lim[0] = (uint64_t)POSIX_MAX_FDS;
+        lim[1] = (uint64_t)POSIX_MAX_FDS;
+        break;
+    case 2: /* RLIMIT_DATA */
+        lim[0] = (ram * 3ull) / 4ull;
+        lim[1] = (ram * 3ull) / 4ull;
+        break;
+    case 9: /* RLIMIT_AS */
+        lim[0] = ~0ull; /* RLIM_INFINITY */
+        lim[1] = ~0ull;
+        break;
+    default:
+        lim[0] = ram;
+        lim[1] = ram;
+        break;
+    }
 }
 
 /* ---- Ana Linux x86-64 Syscall Dagitici ---- */
@@ -168,17 +245,22 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
     case NR_mmap:       ret = posix_sys_mmap(p, a1, a2, (uint32_t)a3, (uint32_t)a4, (int)a5, a6); break;
     case NR_mprotect:   ret = posix_sys_mprotect(p, a1, a2, (uint32_t)a3); break;
     case NR_munmap:     ret = posix_sys_munmap(p, a1, a2); break;
+    case NR_mremap:     ret = posix_sys_mremap(p, a1, a2, a3, (uint32_t)a4, a5); break;
     case NR_brk:        ret = posix_sys_brk(p, a1); break;
-    case NR_madvise:    ret = 0; break;
+    case NR_madvise:    ret = posix_sys_madvise(p, a1, a2, (int)a3); break;
     case NR_ioctl:      ret = posix_sys_ioctl(p, (int)a1, a2, a3); break;
     case NR_access:     ret = posix_sys_access(p, AT_FDCWD, a1, (int)a2); break;
-    case NR_faccessat:  ret = posix_sys_access(p, (int)a1, a2, (int)a3); break;
+    case NR_faccessat:
+    case NR_faccessat2: ret = posix_sys_access(p, (int)a1, a2, (int)a3); break;
     case NR_pipe:       ret = posix_sys_pipe2(p, a1, 0); break;
     case NR_pipe2:      ret = posix_sys_pipe2(p, a1, (int)a2); break;
     case NR_dup:        ret = posix_sys_dup(p, (int)a1); break;
     case NR_dup2:       ret = posix_sys_dup3(p, (int)a1, (int)a2, 0); break;
     case NR_dup3:       ret = posix_sys_dup3(p, (int)a1, (int)a2, (int)a3); break;
     case NR_fcntl:      ret = posix_sys_fcntl(p, (int)a1, (int)a2, a3); break;
+    case NR_flock:
+    case NR_fsync:
+    case NR_fdatasync:  ret = 0; break;
     case NR_ftruncate:  ret = posix_sys_ftruncate(p, (int)a1, (int64_t)a2); break;
     case NR_getcwd:     ret = posix_sys_getcwd(p, a1, a2); break;
     case NR_chdir:      ret = posix_sys_chdir(p, a1); break;
@@ -188,12 +270,47 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
     case NR_rmdir:      ret = posix_sys_unlinkat(p, AT_FDCWD, a1, 0); break;
     case NR_unlinkat:   ret = posix_sys_unlinkat(p, (int)a1, a2, (int)a3); break;
     case NR_rename:     ret = posix_sys_rename(p, a1, a2); break;
+    case NR_renameat:
+    case NR_renameat2:  ret = posix_sys_rename(p, a2, a4); break;
     case NR_getdents64: ret = posix_sys_getdents64(p, (int)a1, a2, a3); break;
-    case NR_readlink:
-    case NR_readlinkat: ret = -EINVAL; break;
+    case NR_readlink:   ret = posix_sys_readlinkat(p, AT_FDCWD, a1, a2, a3); break;
+    case NR_readlinkat: ret = posix_sys_readlinkat(p, (int)a1, a2, a3, a4); break;
+    case NR_chmod:
+    case NR_fchmod:
+    case NR_chown:
+    case NR_fchown:
+    case NR_lchown:
+    case NR_fchownat:
+    case NR_fchmodat:
+    case NR_utimensat:  ret = 0; break;
+    case NR_umask:      ret = 0022; break;
+    case NR_statfs:
+    case NR_fstatfs:    ret = posix_sys_statfs(a2); break;
+    case NR_eventfd:    ret = posix_sys_eventfd2(p, (uint32_t)a1, 0); break;
+    case NR_eventfd2:   ret = posix_sys_eventfd2(p, (uint32_t)a1, (int)a2); break;
     case NR_sched_yield: sched_yield(); ret = 0; break;
     case NR_nanosleep:  ret = posix_sys_nanosleep(a1, a2); break;
-    case NR_clock_nanosleep: ret = posix_sys_nanosleep(a3, a4); break;
+    case NR_clock_nanosleep: {
+        if (a2 & 1u /* TIMER_ABSTIME */) {
+            posix_timespec_t req;
+            if (posix_ucopy_in(&req, a3, sizeof(req)) < 0) { ret = -EFAULT; break; }
+            if (req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1000000000L) {
+                ret = -EINVAL; break;
+            }
+            uint64_t target_ms = (uint64_t)req.tv_sec * 1000ull + (uint64_t)(req.tv_nsec / 1000000L);
+            if (req.tv_nsec % 1000000L) target_ms++;
+            uint64_t now = ((int)a1 == CLOCK_REALTIME) ? posix_realtime_ms() : clock_ms();
+            if (target_ms > now) {
+                uint64_t diff = target_ms - now;
+                if (diff > 0x7FFFFFFFull) diff = 0x7FFFFFFFull;
+                sched_sleep_ms((uint32_t)diff);
+            }
+            ret = 0;
+        } else {
+            ret = posix_sys_nanosleep(a3, a4);
+        }
+        break;
+    }
     case NR_clock_gettime:   ret = posix_sys_clock_gettime((int)a1, a2); break;
     case NR_clock_getres: {
         posix_timespec_t res = { 0, 1000000 }; /* 1 ms */
@@ -220,6 +337,7 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
     case NR_geteuid:
     case NR_getgid:
     case NR_getegid:
+    case NR_setpgid:
     case NR_getpgrp:
     case NR_setsid:     ret = 0; break;
     case NR_fork:
@@ -278,14 +396,62 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
     case NR_kill:
     case NR_tkill:
     case NR_tgkill:     ret = 0; break;
+    case NR_time: {
+        uint32_t ux = clock_unix();
+        int64_t tsec = ux ? (int64_t)ux : (int64_t)(1795400000ll + (int64_t)(clock_ms() / 1000ull));
+        if (a1 && posix_ucopy_out(a1, &tsec, 8) < 0) { ret = -EFAULT; break; }
+        ret = tsec;
+        break;
+    }
+    case NR_sysinfo: {
+        struct {
+            int64_t  uptime;
+            uint64_t loads[3];
+            uint64_t totalram;
+            uint64_t freeram;
+            uint64_t sharedram;
+            uint64_t bufferram;
+            uint64_t totalswap;
+            uint64_t freeswap;
+            uint16_t procs;
+            uint16_t pad;
+            uint32_t _pad2;
+            uint64_t totalhigh;
+            uint64_t freehigh;
+            uint32_t mem_unit;
+            uint32_t _f;
+        } si;
+        memset(&si, 0, sizeof(si));
+        vmm_meminfo_t mi;
+        vmm_mem_info(&mi);
+        si.uptime   = (int64_t)(clock_ms() / 1000ull);
+        si.totalram = mi.total_bytes;
+        si.freeram  = mi.free_bytes;
+        si.procs    = 4;
+        si.mem_unit = 1;
+        ret = a1 ? posix_ucopy_out(a1, &si, sizeof(si)) : -EFAULT;
+        break;
+    }
+    case NR_getrlimit: {
+        uint64_t lim[2];
+        posix_fill_rlimit((int)a1, lim);
+        ret = a2 ? posix_ucopy_out(a2, lim, sizeof(lim)) : -EFAULT;
+        break;
+    }
     case NR_prlimit64: {
-        uint64_t lim[2] = { 64ull * 1024ull * 1024ull, 64ull * 1024ull * 1024ull };
-        if (a4) posix_ucopy_out(a4, lim, sizeof(lim));
+        uint64_t lim[2];
+        posix_fill_rlimit((int)a2, lim);
+        if (a4) {
+            if (posix_ucopy_out(a4, lim, sizeof(lim)) < 0) { ret = -EFAULT; break; }
+        }
         ret = 0;
         break;
     }
     case NR_sched_getaffinity: {
-        uint64_t mask = 0xFull;
+        uint32_t ncpu = percpu_online_count();
+        if (ncpu == 0) ncpu = 1;
+        if (ncpu > 64) ncpu = 64;
+        uint64_t mask = (ncpu == 64) ? ~0ull : ((1ull << ncpu) - 1ull);
         uint64_t sz = (a2 < 8) ? a2 : 8;
         if (sz && a3) posix_ucopy_out(a3, &mask, sz);
         ret = (int64_t)sz;

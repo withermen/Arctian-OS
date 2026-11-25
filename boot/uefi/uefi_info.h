@@ -35,13 +35,18 @@ typedef struct {
     uint64_t kernel_size;       /* 0x40 dosya boyu (bayt) */
     uint32_t secureboot;        /* 0x48 SecureBoot degiskeni (0/1) */
     uint32_t _pad0;             /* 0x4C */
-    uint32_t _reserved[4];      /* 0x50 - 0x5F */
+    uint64_t fb_phys;           /* 0x50 tam 64-bit GOP FrameBufferBase */
+    uint64_t fb_size;           /* 0x58 tam 64-bit GOP FrameBufferSize */
 } arctian_uefiinfo_t;
 
 _Static_assert(sizeof(arctian_uefiinfo_t) == 0x60,
                "uefi_info 0x7100-0x7160 arasina sigmali");
 _Static_assert(__builtin_offsetof(arctian_uefiinfo_t, memmap_key) == 0x20,
                "memmap_key sabit yerinde kalmali");
+_Static_assert(__builtin_offsetof(arctian_uefiinfo_t, fb_phys) == 0x50,
+               "fb_phys 0x7150 adresinde olmali");
+_Static_assert(__builtin_offsetof(arctian_uefiinfo_t, fb_size) == 0x58,
+               "fb_size 0x7158 adresinde olmali");
 
 static inline arctian_uefiinfo_t *arctian_uefiinfo(void) {
     return (arctian_uefiinfo_t *)(uintptr_t)ARCTIAN_UEFIINFO_ADDR;

@@ -1,4 +1,5 @@
 #include "ipv4.h"
+#include "ipv6.h"
 #include "arp.h"
 #include "udp.h"
 #include "dhcp.h"
@@ -463,6 +464,10 @@ static void ipv4_drain(int handle_ip) {
         }
         if (!handle_ip) continue;   /* ic-ice ARP bosaltmasi: katmanlara
                                      * dokunma, TCP/UDP kuyrugunu karistir */
+        if (ether_type == ETHER_TYPE_IPV6) {
+            ipv6_rx(rx_buf, rx_len);
+            continue;
+        }
         if (ether_type != 0x0800) continue;
 
         ip_pkt_t p;

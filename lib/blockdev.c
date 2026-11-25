@@ -323,6 +323,31 @@ void blk_mmio_map(uint64_t phys, uint64_t size) {
     __asm__ volatile ("mov %0, %%cr3" :: "r"(cr3));
 }
 
+/* Sayfa tablosunu yuruyerek sanal adresi 64-bit fiziksel adrese cevirir.
+ * DMA motorlari (AHCI PRDT / NVMe PRP) kimlik-eslemesiz tamponlarda da
+ * gercek fiziksel adresleri kullanabilsin diye paylasilir. */
+uint64_t blk_virt_to_phys(const void *ptr) {
+    uint64_t va = (uint64_t)(uintptr_t)ptr;
+    uint64_t cr3;
+    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
+    uint64_t *pml4 = (uint64_t *)(uintptr_t)(cr3 & 0x000FFFFFFFFFF000ull);
+    uint64_t e = pml4[(va >> 39) & 0x1FFu];
+    if (!(e & 1u)) return 0;
+    if (e & 0x80u) return (e & 0x000FFFFFC0000000ull) | (va & 0x3FFFFFFFull);
+    uint64_t *pdpt = (uint64_t *)(uintptr_t)(e & 0x000FFFFFFFFFF000ull);
+    e = pdpt[(va >> 30) & 0x1FFu];
+    if (!(e & 1u)) return 0;
+    if (e & 0x80u) return (e & 0x000FFFFFC0000000ull) | (va & 0x3FFFFFFFull);
+    uint64_t *pd = (uint64_t *)(uintptr_t)(e & 0x000FFFFFFFFFF000ull);
+    e = pd[(va >> 21) & 0x1FFu];
+    if (!(e & 1u)) return 0;
+    if (e & 0x80u) return (e & 0x000FFFFFFFE00000ull) | (va & 0x1FFFFFull);
+    uint64_t *pt = (uint64_t *)(uintptr_t)(e & 0x000FFFFFFFFFF000ull);
+    e = pt[(va >> 12) & 0x1FFu];
+    if (!(e & 1u)) return 0;
+    return (e & 0x000FFFFFFFFFF000ull) | (va & 0xFFFull);
+}
+
 /* ---- PCI config uzayi (lib tarafi; kernel_plus'tan bagimsiz) ---- */
 uint32_t blk_pci_readl(uint8_t bus, uint8_t slot, uint8_t func, uint8_t off) {
     uint32_t addr = 0x80000000u | ((uint32_t)bus << 16) |

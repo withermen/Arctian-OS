@@ -1,14 +1,15 @@
-# Bilinen Hatalar
+# Bilinen Hatalar (0.7 Tarihsel Tarama Arşivi)
 
 0.7 üzerinde yaptığım geniş bir kod taramasının sonucu. Repoyu inceleyenlerin
 "burası düzgün mü?" diye tahmin yürütmesine gerek olmasın diye yazdım; burada
 listelenen her madde kod okunarak bulundu, çoğu QEMU'da ya da kodu izleyerek
 doğrulandı. Hepsi düzeltildi; madde metinleri aşağıdaki "Son durum"da
-anlatıldığı gibi referans numaraları için yerinde duruyor.
+anlatıldığı gibi referans numaraları için yerinde duruyor. Güncel **Arctian OS 1.0**
+durumu için [1.0-durum.md](1.0-durum.md) dosyasına bakın.
 
 Numaraları issue'larda referans vermek için kullanabilirsiniz.
 
-## Son durum (Kasım 2026)
+## Son durum
 
 Listedeki 76 maddenin tamamı düzeltildi. Madde metinlerini ve
 numaralarını bilerek yerinde bıraktım; issue'larda referans verilen
@@ -18,10 +19,11 @@ numara verilmedi.
 
 Bilenin bilmesi gereken üç sonuç:
 
-- AFS başlığı sürüm 5'e çıktı (madde 63 ve 10: 64 bit kapasite ve
-  nesil sayaçlı tutamaklar). Sürüm 4 veya öncesi bir disk ilk bağlamada
-  tanınmaz ve otomatik olarak yeniden biçimlenir; yani eski QEMU test
-  disklerinizdeki veriler gider. Yeni disklerde sorun yok.
+- AFS başlığı 0.7'de sürüm 5'e, ardından 0.8.2/1.0'da **sürüm 6**'ya çıktı
+  (64-bit kapasite, nesil sayaçlı tutamaklar, LBA `65536` tabanı, `free-extent`
+  geri kazanımı ve 255 bayta kadar uzun yol desteği). Eski sürüm 5/legacy diskler
+  mount sırasında uyumlu biçimde bağlanır; sürüm 4 veya öncesi diskler yeniden
+  biçimlenir.
 - Disk şifreleme kurulumu artık aşamalı (madde 4): niyet başlığı
   veriden önce diske yazılır. Kurulum yarıda kalırsa disk kilitli
   kalır ve şifre çözme ekranında parola ile kurulum kaldığı yerden
@@ -278,5 +280,3 @@ Hobi sistem, ağa çıkıyor; bunlar "ileride" denmeyecek cinsten.
     boru hattı verisi dosyaya yazarken 20 KB, boruda 8 KB'a sessizce
     kırpılıyor (`terminal/main.c:1762`, `:2889`).
 76. `sfw_num` port ayrıştırması 12 haneli girişte int taşamasına giriyor.
-
-## 0.8 testlerinde eklenenler (bunlar açık)

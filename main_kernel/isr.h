@@ -41,4 +41,9 @@ void arctian_set_sched_tick(arctian_sched_tick_fn fn);
 typedef void (*arctian_fault_fn)(int int_no, uint64_t err, uint64_t cr2, uint64_t rip);
 void arctian_set_fault_handler(arctian_fault_fn fn);
 
+/* Kurtarilabilir #PF isleyicisi (demand paging): 1 donerse hata cozuldu,
+ * komut kesintisiz devam eder; 0 donerse normal olumcul hata yolu isler. */
+typedef int (*arctian_pf_handler_fn)(uint64_t cr2, uint64_t err, uint64_t rip);
+void arctian_set_pf_handler(arctian_pf_handler_fn fn);
+
 #endif

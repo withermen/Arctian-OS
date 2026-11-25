@@ -9,5 +9,6 @@ void   kfree(void *ptr);
 size_t ksize(void *ptr);
 size_t kmalloc_used(void);
 size_t kmalloc_total(void);
+size_t kmalloc_heap_mapped(void);
 
 #endif /* ARCTIAN_ALLOC_H */

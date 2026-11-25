@@ -12,7 +12,7 @@ Windows'ta desteklenen yol **WSL üzerinden Debian**'dır.
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential nasm binutils python3 xorriso file rsync
+sudo apt install -y build-essential nasm binutils python3 xorriso mtools file rsync
 sudo apt install -y qemu-system-x86 ovmf       # QEMU ve UEFI testi için (isteğe bağlı)
 ```
 
@@ -22,7 +22,7 @@ sudo apt install -y qemu-system-x86 ovmf       # QEMU ve UEFI testi için (iste�
 | `nasm` | `boot/*.asm` önyükleyici aşamaları ve `isr.asm` / `ring3_user.asm` |
 | `ld`, `objcopy` | modül ELF'leri → düz `.bin`; `--wrap=lv_obj_send_event` |
 | `python3` | paketleyici, imzacı, font/duvar kağıdı/uygulama üreticileri |
-| `xorriso` | El Torito önyüklenebilir ISO |
+| `xorriso`, `mtools` | Hibrit BIOS+UEFI Çift El Torito ISOHybrid ISO ve FAT32 ESP imajı |
 | `qemu-system-x86_64` | BIOS/UEFI çalıştırma ve kurulum testi (isteğe bağlı) |
 
 Üçüncü parti bağımlılık gerekmez: LVGL ve mbedTLS depoya **vendored** edilmiştir
@@ -52,10 +52,15 @@ make clean      # build/ silinir
 Çıktılar:
 
 ```
-build/arctian.img   ham disk imaji (BIOS'tan doğrudan önyüklenebilir)
-build/arctian.iso   El Torito önyüklenebilir ISO (USB / CD / kalıp)
-build/obj-<hash>/   nesne dosyaları (bayrak kümesinin md5 ön eki)
+build/arctian.img       ham disk imajı (BIOS'tan doğrudan önyüklenebilir)
+build/arctian.iso       Hibrit BIOS+UEFI Çift El Torito ISOHybrid ISO (USB / CD / kalıp)
+build/uefi/BOOTX64.EFI  UEFI x86-64 önyükleyici uygulaması (`make efi`)
+build/obj-<hash>/       nesne dosyaları (bayrak kümesinin md5 ön eki)
 ```
+
+> **İsteğe bağlı ISO paket varlıkları:** `tools/arctianpack.py`, `ARCTIAN_WEBKIT_ELF`
+> (`WEBKIT.ELF`), `ARCTIAN_DEJAVU_TTF` (`DEJAVU.TTF`) ve `ARCTIAN_CACERT_PEM` (`CACERT.PEM`)
+> ortam değişkenleri veya varsayılan yolları bulunursa bunları da ISO'ya ekler.
 
 Nesne dizini derleme bayraklarına göre adlandırılır (`FLAGS_HASH`): `DEBUG=1` ile `DEBUG=0`
 aynı anda bozulmadan durur, karışık nesnelerden imaj üretilmez.
@@ -78,7 +83,7 @@ make pack DEBUG=1 T07_TEST=1     # imza/kapı öz-test imajı
 make -j8 DEBUG=0                 # sürüm imajı
 make test-uefi                   # OVMF altında UEFI önyükleme testi
 make test-smp                    # QEMU -smp 4 çok çekirdek testi
-make test-isolation              # B1 ring-3 izolasyon testi
+bash tests/isolation/run.sh      # B1 ring-3 izolasyon testi
 ```
 
 Sürüm numarası `version.json`'dan okunur ve `VERSION_CFLAGS` ile gömülür; komut satırından
@@ -93,11 +98,15 @@ ve `libstdc++` (14.2) statik PIE sysroot'u sudo gerektirmeden kurulabilir:
 bash sdk/toolchain/build-toolchain.sh    # $HOME/arctian-toolchain altına kurar
 ```
 
-Derleme sarmalayıcıları:
+Derleme sarmalayıcıları ve CMake/pkg-config araçları:
 
 ```sh
 sdk/toolchain/arctian-cc  -O2 program.c   -o program.elf
 sdk/toolchain/arctian-cxx -O2 program.cpp -o program.elf
+# CMake / pkg-config (ör. sdk/webkit/ WPE WebKit derlemeleri):
+#   sdk/toolchain/arctian.cmake
+#   sdk/toolchain/arctian-pkg-config
+#   sdk/toolchain/setup-webkit-deps.sh
 ```
 
 Doğrulama paketini derlemek için:
@@ -124,9 +133,12 @@ ISO üretilemezse paketleyici derlemeyi **dur­durur** (yarım/0 baytlık çıkt
 ```sh
 qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 1024M -vga std -serial stdio
 qemu-system-x86_64 -drive file=build/arctian.img,format=raw -m 1024M -vga std -serial stdio
+# VirtIO GPU/Net/Sound ile:
+qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 2G -device virtio-vga \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -device intel-hda -device hda-duplex -serial stdio
 ```
 
-Kurulum akışını uçtan uca test etmek için:
+Kurulum akışını uçtan uca test etmek için (hedef disk en az **5 GiB** olmalıdır):
 
 ```sh
 bash tools/test_install.sh      # ISO + sanal hedef disk ile QEMU başlatır

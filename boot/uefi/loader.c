@@ -65,15 +65,14 @@ void serial_dec(UINT64 v) {
 
 void serial_hex(UINT64 v) {
     static const char digits[] = "0123456789ABCDEF";
-    char out[19];
+    char out[17];
     int i, start = 0;
-    out[0] = '0';
-    out[1] = 'x';
     for (i = 0; i < 16; i++)
-        out[2 + i] = digits[(v >> (60 - 4 * i)) & 0xF];
-    out[18] = 0;
-    while (out[start + 2] == '0' && start < 15)
+        out[i] = digits[(v >> (60 - 4 * i)) & 0xF];
+    out[16] = 0;
+    while (out[start] == '0' && start < 15)
         start++;
+    serial_puts("0x");
     serial_puts(out + start);
 }
 
@@ -114,16 +113,24 @@ void gop_report(EFI_SYSTEM_TABLE *st) {
     for (i = 0; i < ARCTIAN_BOOTINFO_SIZE / 4; i++)
         w[i] = 0;
 
+    UINT64 fb_base = (UINT64)mode->FrameBufferBase;
+    UINT64 fb_sz   = (UINT64)mode->FrameBufferSize;
+    arctian_uefiinfo_t *ui = arctian_uefiinfo();
+    ui->fb_phys = fb_base;
+    ui->fb_size = fb_sz;
+
     bi->magic       = ARCTIAN_BOOTINFO_MAGIC;
-    bi->fb_phys     = (UINT32)mode->FrameBufferBase;
+    bi->fb_phys     = (fb_base >= 0x100000000ull) ? 0xFFFFFFFFu : (UINT32)fb_base;
     bi->pitch       = (UINT16)(info->PixelsPerScanLine * 4u);
     bi->width       = (UINT16)info->HorizontalResolution;
     bi->height      = (UINT16)info->VerticalResolution;
     bi->bpp         = 32;  /* iki GOP duzeni de 8/8/8/8; BltOnly zaten eleniyor */
     bi->struct_size = sizeof(arctian_bootinfo_t);
     bi->source      = ARCTIAN_BOOT_SRC_UEFI;
-    bi->flags       = ARCTIAN_BOOT_FLAG_LFB_VALID | ARCTIAN_BOOT_FLAG_UEFI;
-    bi->fb_size     = (UINT32)mode->FrameBufferSize;
+    bi->flags       = ((fb_base != 0 && info->PixelFormat < PixelBltOnly)
+                       ? ARCTIAN_BOOT_FLAG_LFB_VALID : 0u) |
+                      ARCTIAN_BOOT_FLAG_UEFI;
+    bi->fb_size     = (fb_sz >= 0x100000000ull) ? 0xFFFFFFFFu : (UINT32)fb_sz;
 
     /* Maske sozlesmesi bootinfo.h/VBE ile ayni: piksel sozcugunun
      * little-endian 32-bit degeri icinde bit konumu. */

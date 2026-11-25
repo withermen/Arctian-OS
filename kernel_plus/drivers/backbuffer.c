@@ -11,25 +11,73 @@
  */
 #include "backbuffer.h"
 #include "vesa.h"
+#include "gpu.h"
+#include "gpu_simd.h"
 #include "font8x8.h"
 #include "kernel.h"
 #include "memory_map.h"
+#include "alloc.h"
 
 /* ================================================================== */
-/* Backbuffer — up to ~14.1MB at fixed address 0x400000 (past BSS)     */
-/* Sized for max 2560x1440x32. Identity-mapped via boot page tables.    */
+/* Backbuffer — 16MB altinda hizli BACKBUFFER_BASE, 4K'ya (3840x2160)  */
+/* kadar dinamik VMM higher-half bellekten buyur.                     */
 /* ================================================================== */
 
-/* Maximum dimensions the fixed buffer supports */
-#define BB_MAX_WIDTH  2560
-#define BB_MAX_HEIGHT 1440
+/* Maximum dimensions supported (4K UHD) */
+#define BB_MAX_WIDTH  3840
+#define BB_MAX_HEIGHT 2160
 
 /* Current active dimensions (set from VESA mode on init) */
 static int bb_width  = 1024;
 static int bb_height = 768;
 
-static uint32_t * const backbuffer = (uint32_t *)BACKBUFFER_BASE;
-static bool active = false;
+static uint32_t *backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_BASE;
+static size_t    backbuffer_alloc_bytes = 0;
+static bool      active = false;
+
+static void backbuffer_ensure_storage(int *w_io, int *h_io) {
+    int w = *w_io;
+    int h = *h_io;
+    size_t need = (size_t)w * (size_t)h * 4u;
+    if (need <= (size_t)BACKBUFFER_MAX) {
+        if (backbuffer_alloc_bytes > 0 && backbuffer != (uint32_t *)(uintptr_t)BACKBUFFER_BASE) {
+            kfree(backbuffer);
+        }
+        backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_BASE;
+        backbuffer_alloc_bytes = 0;
+        return;
+    }
+    if (need <= backbuffer_alloc_bytes && backbuffer) {
+        return;
+    }
+    uint32_t *nb = (uint32_t *)kmalloc(need);
+    if (nb) {
+        if (backbuffer_alloc_bytes > 0 && backbuffer != (uint32_t *)(uintptr_t)BACKBUFFER_BASE) {
+            kfree(backbuffer);
+        }
+        backbuffer = nb;
+        backbuffer_alloc_bytes = need;
+        gpu_simd_fill32(backbuffer, 0u, (size_t)w * (size_t)h);
+        return;
+    }
+    /* Bellek yetmezse statik BACKBUFFER_BASE boyutuna guvenli kenetle */
+    if (backbuffer_alloc_bytes > 0 && backbuffer != (uint32_t *)(uintptr_t)BACKBUFFER_BASE) {
+        kfree(backbuffer);
+    }
+    backbuffer = (uint32_t *)(uintptr_t)BACKBUFFER_BASE;
+    backbuffer_alloc_bytes = 0;
+    if (w > 2560) w = 2560;
+    if (h > 1440) h = 1440;
+    while ((size_t)w * (size_t)h * 4u > (size_t)BACKBUFFER_MAX && h > 200) {
+        h -= 16;
+    }
+    *w_io = w;
+    *h_io = h;
+}
+
+uint32_t *backbuffer_ptr(void) {
+    return backbuffer;
+}
 
 /* ================================================================== */
 /* Public API                                                         */
@@ -43,23 +91,18 @@ int backbuffer_init(void) {
     if (!fb) return -1;
 
     /* Set dimensions from current VESA mode */
-    bb_width = fb->width;
-    bb_height = fb->height;
+    int w = fb->width;
+    int h = fb->height;
 
-    /* Clamp to max buffer size */
-    if (bb_width > BB_MAX_WIDTH)  bb_width = BB_MAX_WIDTH;
-    if (bb_height > BB_MAX_HEIGHT) bb_height = BB_MAX_HEIGHT;
+    /* Clamp to max buffer size (4K) */
+    if (w > BB_MAX_WIDTH)  w = BB_MAX_WIDTH;
+    if (h > BB_MAX_HEIGHT) h = BB_MAX_HEIGHT;
+    backbuffer_ensure_storage(&w, &h);
+    bb_width  = w;
+    bb_height = h;
 
     /* Clear the backbuffer (not in BSS, so not automatically zeroed) */
-    uint64_t c64 = 0;
-    uint64_t *ptr = (uint64_t *)backbuffer;
-    int n = (bb_width * bb_height) / 2;
-    for (int i = 0; i < n; i++) {
-        ptr[i] = c64;
-    }
-    if ((bb_width * bb_height) & 1) {
-        backbuffer[n * 2] = 0;
-    }
+    gpu_simd_fill32(backbuffer, 0u, (size_t)bb_width * (size_t)bb_height);
 
     active = true;
     return 0;
@@ -67,16 +110,7 @@ int backbuffer_init(void) {
 
 void backbuffer_clear(uint32_t color) {
     if (!active) return;
-    /* 64-bit bloat ile hizli clear */
-    uint64_t c64 = ((uint64_t)color << 32) | color;
-    uint64_t *ptr = (uint64_t *)backbuffer;
-    int n = (bb_width * bb_height) / 2;
-    for (int i = 0; i < n; i++) {
-        ptr[i] = c64;
-    }
-    if ((bb_width * bb_height) & 1) {
-        backbuffer[n * 2] = color;
-    }
+    gpu_simd_fill32(backbuffer, color, (size_t)bb_width * (size_t)bb_height);
 }
 
 void backbuffer_put_pixel(int x, int y, uint32_t color) {
@@ -104,22 +138,25 @@ void backbuffer_fill_rect(int x, int y, int w, int h, uint32_t color) {
     if (h > bb_height - y) h = bb_height - y;
     if (w <= 0 || h <= 0) return;
 
-    uint64_t c64 = ((uint64_t)color << 32) | color;
+    if (x == 0 && w == bb_width) {
+        gpu_simd_fill32(backbuffer + (size_t)y * (size_t)bb_width,
+                        color, (size_t)w * (size_t)h);
+        return;
+    }
 
     for (int row = 0; row < h; row++) {
-        int base = (y + row) * bb_width + x;
-        int col = 0;
-        for (; col + 1 < w; col += 2) {
-            ((uint64_t *)(backbuffer + base))[col / 2] = c64;
-        }
-        if (col < w) {
-            backbuffer[base + col] = color;
-        }
+        gpu_simd_fill32(backbuffer + (size_t)(y + row) * (size_t)bb_width + (size_t)x,
+                        color, (size_t)w);
     }
 }
 
 void backbuffer_blit(void) {
     if (!active) return;
+
+    if (gpu_is_ready()) {
+        gpu_present_backbuffer(backbuffer, bb_width, bb_height, 0, 0, bb_width, bb_height);
+        return;
+    }
 
     framebuffer_t *fb = vesa_get_framebuffer();
     if (!fb || !fb->enabled || !fb->address)
@@ -129,35 +166,35 @@ void backbuffer_blit(void) {
     int copy_w = (bb_width < fb->width) ? bb_width : fb->width;
     int copy_h = (bb_height < fb->height) ? bb_height : fb->height;
 
-    /* 8 baytlik depo: TCG'de tek tek bayt kopyalamak 340 ms suruyordu
-     * (1280x720). Cift dword yazimi ayni isi ~4 kat hizli bitirir. */
+    if (copy_w == bb_width && copy_w == fb_pitch_dwords) {
+        gpu_simd_copy_wc(fb->address, backbuffer, (size_t)copy_w * (size_t)copy_h * 4u);
+        return;
+    }
+
+    size_t row_bytes = (size_t)copy_w * 4u;
     for (int row = 0; row < copy_h; row++) {
-        const uint32_t *s = backbuffer + (uint32_t)row * (uint32_t)bb_width;
-        uint32_t *d = fb->address + (uint32_t)row * (uint32_t)fb_pitch_dwords;
-        int i = 0;
-        for (; i + 1 < copy_w; i += 2) {
-            uint64_t v;
-            __builtin_memcpy(&v, s + i, 8);
-            __builtin_memcpy(d + i, &v, 8);
-        }
-        if (i < copy_w) d[i] = s[i];
+        const uint32_t *s = backbuffer + (size_t)row * (size_t)bb_width;
+        uint32_t *d = fb->address + (size_t)row * (size_t)fb_pitch_dwords;
+        gpu_simd_copy_wc(d, s, row_bytes);
     }
 }
 
-/* Kirli bolge blit'i (performans): arayuz her karede yalnizca degisen
- * dikdortgeni kopyalar. TCG'de 1920x1080 tam blit ~1-2 sn suruyordu ve
- * fare/tiklama gecikmesinin asil nedeniydi. */
+/* Kirli bolge blit'i (performans): GPU alt sistemi (WC + SIMD + VirtIO-GPU)
+ * uzerinden yalnizca degisen dikdortgeni sunar. */
 void backbuffer_blit_rect(int x, int y, int w, int h) {
     if (!active || w <= 0 || h <= 0) return;
+
+    if (gpu_is_ready()) {
+        gpu_present_backbuffer(backbuffer, bb_width, bb_height, x, y, w, h);
+        return;
+    }
+
     framebuffer_t *fb = vesa_get_framebuffer();
     if (!fb || !fb->enabled || !fb->address) return;
 
     int fb_pitch_dwords = fb->pitch / 4;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
-    /* Tasma guvenli kirpma: x+w ifadesi INT_MAX yakininda tasiyip negatif
-     * olur ve sinir kontrolu hicbir sey gormeden gecerdi. Cikarma iceren
-     * sekil her girdide dogru kalir. */
     if (x >= bb_width || y >= bb_height) return;
     if (w > bb_width - x)  w = bb_width - x;
     if (h > bb_height - y) h = bb_height - y;
@@ -165,10 +202,11 @@ void backbuffer_blit_rect(int x, int y, int w, int h) {
     if (h > fb->height - y) h = fb->height - y;
     if (w <= 0 || h <= 0) return;
 
+    size_t row_bytes = (size_t)w * 4u;
     for (int row = y; row < y + h; row++) {
-        memcpy(fb->address + row * fb_pitch_dwords + x,
-               backbuffer + row * bb_width + x,
-               (size_t)w * 4u);
+        gpu_simd_copy_wc(fb->address + (size_t)row * (size_t)fb_pitch_dwords + (size_t)x,
+                         backbuffer + (size_t)row * (size_t)bb_width + (size_t)x,
+                         row_bytes);
     }
 }
 
@@ -195,6 +233,7 @@ void backbuffer_resize(int w, int h) {
         if (fb->width > 0 && w > fb->width)  w = fb->width;
         if (fb->height > 0 && h > fb->height) h = fb->height;
     }
+    backbuffer_ensure_storage(&w, &h);
     bb_width = w;
     bb_height = h;
 }

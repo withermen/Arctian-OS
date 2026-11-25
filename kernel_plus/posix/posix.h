@@ -8,6 +8,7 @@
 #include "vmm_space.h"
 #include "sched.h"
 #include "sync.h"
+#include "asi.h"
 
 /* ---- Linux x86-64 errno degerleri (negatif donulur) ---- */
 #define EPERM        1
@@ -115,6 +116,9 @@
 #define NR_kill             62
 #define NR_uname            63
 #define NR_fcntl            72
+#define NR_flock            73
+#define NR_fsync            74
+#define NR_fdatasync        75
 #define NR_ftruncate        77
 #define NR_getcwd           79
 #define NR_chdir            80
@@ -123,16 +127,26 @@
 #define NR_rmdir            84
 #define NR_unlink           87
 #define NR_readlink         89
+#define NR_chmod            90
+#define NR_fchmod           91
+#define NR_chown            92
+#define NR_fchown           93
+#define NR_lchown           94
+#define NR_umask            95
 #define NR_gettimeofday     96
 #define NR_getrlimit        97
+#define NR_sysinfo          99
 #define NR_getuid           102
 #define NR_getgid           104
 #define NR_geteuid          107
 #define NR_getegid          108
+#define NR_setpgid          109
 #define NR_getppid          110
 #define NR_getpgrp          111
 #define NR_setsid           112
 #define NR_sigaltstack      131
+#define NR_statfs           137
+#define NR_fstatfs          138
 #define NR_prctl            157
 #define NR_arch_prctl       158
 #define NR_gettid           186
@@ -151,22 +165,30 @@
 #define NR_tgkill           234
 #define NR_openat           257
 #define NR_mkdirat          258
+#define NR_fchownat         260
 #define NR_newfstatat       262
 #define NR_unlinkat         263
+#define NR_renameat         264
 #define NR_readlinkat       267
+#define NR_fchmodat         268
 #define NR_faccessat        269
 #define NR_ppoll            271
 #define NR_set_robust_list  273
+#define NR_utimensat        280
 #define NR_epoll_pwait      281
+#define NR_eventfd          284
 #define NR_accept4          288
+#define NR_eventfd2         290
 #define NR_epoll_create1    291
 #define NR_dup3             292
 #define NR_pipe2            293
 #define NR_prlimit64        302
+#define NR_renameat2        316
 #define NR_getrandom        318
 #define NR_memfd_create     319
 #define NR_statx            332
 #define NR_rseq             334
+#define NR_faccessat2       439
 
 /* Arctian Ring-3 Grafik & Girdi Koprusu syscalls (500..505) */
 #define NR_arctian_gfx_create   500
@@ -182,10 +204,20 @@
 #define PROT_WRITE  0x2
 #define PROT_EXEC   0x4
 
-#define MAP_SHARED    0x01
-#define MAP_PRIVATE   0x02
-#define MAP_FIXED     0x10
-#define MAP_ANONYMOUS 0x20
+#define MAP_SHARED          0x01
+#define MAP_PRIVATE         0x02
+#define MAP_FIXED           0x10
+#define MAP_ANONYMOUS       0x20
+#define MAP_NORESERVE       0x4000
+#define MAP_FIXED_NOREPLACE 0x100000
+
+#define MADV_DONTNEED       4
+#define MADV_FREE           8
+
+#define MREMAP_MAYMOVE      1
+#define MREMAP_FIXED        2
+
+#define POSIX_USER_STACK_SZ_BYTES (4ull * 1024ull * 1024ull)
 
 #define ARCH_SET_GS 0x1001
 #define ARCH_SET_FS 0x1002
@@ -264,10 +296,13 @@
 #define SOCK_CLOEXEC   02000000
 #define SOL_SOCKET     1
 #define SO_REUSEADDR   2
+#define SO_TYPE        3
 #define SO_ERROR       4
 #define SO_KEEPALIVE   9
 #define SO_RCVBUF      8
 #define SO_SNDBUF      7
+#define SO_PROTOCOL    38
+#define SO_DOMAIN      39
 #define IPPROTO_TCP    6
 #define TCP_NODELAY    1
 #define MSG_DONTWAIT   0x40
@@ -368,17 +403,19 @@ typedef struct {
 } posix_cmsghdr_t;
 
 /* ---- Cekirdek POSIX nesneleri ---- */
-#define POSIX_MAX_PROCS     32
-#define POSIX_MAX_THREADS   64
-#define POSIX_MAX_FDS       64
-#define POSIX_MAX_VMAS      128
-#define POSIX_MAX_FILES     192
-#define POSIX_MAX_PIPES     32
-#define POSIX_MAX_EPOLLS    16
-#define POSIX_MAX_EPOLL_ENT 64
-#define POSIX_MAX_SHMS      32
-#define POSIX_MAX_USOCKS    48
-#define POSIX_MAX_ISOCKS    32
+#define POSIX_MAX_PROCS     2048  /* dinamik kmalloc dilimleriyle sinirsiz/RAM-olcekli */
+#define POSIX_MAX_THREADS   8192  /* dinamik kmalloc dilimleriyle sinirsiz/RAM-olcekli */
+#define POSIX_MAX_FDS       256
+#define POSIX_MAX_VMAS      4096
+#define POSIX_MAX_FILES     1024
+#define POSIX_MAX_PIPES     128
+#define POSIX_MAX_EPOLLS    32
+#define POSIX_MAX_EPOLL_ENT 128
+#define POSIX_MAX_SHMS      256
+#define POSIX_MAX_EFDS      64
+#define POSIX_MAX_USOCKS    128
+#define POSIX_MAX_ISOCKS    128
+#define POSIX_GFX_MAX_WINS  1024  /* dinamik kmalloc dilimleriyle sinirsiz/RAM-olcekli */
 
 /* VMA */
 typedef struct {
@@ -404,7 +441,8 @@ enum {
     PFD_SOCK_UNIX,
     PFD_EPOLL,
     PFD_SHM,
-    PFD_GFX
+    PFD_GFX,
+    PFD_EVENTFD
 };
 
 typedef struct {
@@ -440,9 +478,11 @@ struct posix_proc {
     uint64_t     brk_base;
     uint64_t     brk_cur;
     uint64_t     mmap_next;
-    posix_vma_t  vmas[POSIX_MAX_VMAS];
+    posix_vma_t *vmas;       /* dinamik heap dizisi (vma_cap = POSIX_MAX_VMAS) */
+    int          vma_cap;
     posix_fd_ent_t fds[POSIX_MAX_FDS];
     char         cwd[192];
+    char         exe_path[192];
     char         name[48];
     waitq_t      wait_wq;    /* wait4 bekleyen ebeveynler */
 };
@@ -469,16 +509,22 @@ int posix_ucopy_out(uint64_t udst, const void *ksrc, uint64_t len);
 int posix_ucstr_in(char *kdst, uint64_t cap, uint64_t usrc);
 
 /* VM (posix_vm.c) */
-void     posix_vm_init_proc(posix_proc_t *p);
+int      posix_vm_init_proc(posix_proc_t *p);
 void     posix_vm_destroy_proc(posix_proc_t *p);
 int      posix_vm_clone(posix_proc_t *dst, posix_proc_t *src);
 int      posix_vm_add_vma(posix_proc_t *p, uint64_t start, uint64_t end,
                           uint32_t prot, uint32_t flags, int shm_id);
 uint64_t posix_vm_find_free(posix_proc_t *p, uint64_t len);
+int      posix_vm_fault_page(posix_proc_t *p, uint64_t va, int is_write, int is_exec);
+void     posix_vm_dump_fault(posix_proc_t *p, uint64_t va);
+int      posix_pf_handler(uint64_t cr2, uint64_t err, uint64_t rip);
 int64_t  posix_sys_mmap(posix_proc_t *p, uint64_t addr, uint64_t len,
                         uint32_t prot, uint32_t flags, int fd, uint64_t off);
 int64_t  posix_sys_munmap(posix_proc_t *p, uint64_t addr, uint64_t len);
 int64_t  posix_sys_mprotect(posix_proc_t *p, uint64_t addr, uint64_t len, uint32_t prot);
+int64_t  posix_sys_madvise(posix_proc_t *p, uint64_t addr, uint64_t len, int advice);
+int64_t  posix_sys_mremap(posix_proc_t *p, uint64_t old_addr, uint64_t old_len,
+                          uint64_t new_len, uint32_t flags, uint64_t new_addr);
 int64_t  posix_sys_brk(posix_proc_t *p, uint64_t addr);
 
 /* SHM (posix_vm.c) */
@@ -500,6 +546,10 @@ int posix_elf_load(posix_proc_t *p, const uint8_t *img, uint64_t size,
                    char *const argv[], int argc,
                    char *const envp[], int envc,
                    posix_elf_info_t *out);
+int posix_elf_load_afs(posix_proc_t *p, void *afs_handle, uint64_t size,
+                       char *const argv[], int argc,
+                       char *const envp[], int envc,
+                       posix_elf_info_t *out);
 
 /* Proc & Thread (posix_proc.c) */
 posix_thr_t  *posix_cur_thr(void);
@@ -509,7 +559,14 @@ int           posix_spawn_elf_mem(const char *name, const uint8_t *elf, uint64_t
                                   char *const argv[], int argc);
 int           posix_spawn_elf_path(const char *path, char *const argv[], int argc);
 int           posix_wait_pid_kernel(int pid, int *exit_code_out);
+
+/* Unified OOM kancalari (kernel_plus/system/proc.c zayif sembollerini doldurur) */
+int           posix_oom_list_cb(asi_oom_app_t *out, int max_out);
+int           posix_oom_kill_cb(int pid);
+void          posix_oom_freeze_cb(int freeze);
 int64_t       posix_sys_fork(posix_regs_t *regs);
+int64_t       posix_sys_fork_ex(posix_regs_t *regs, uint64_t child_stack, uint64_t flags,
+                                uint64_t ptid, uint64_t ctid);
 int64_t       posix_sys_clone(posix_regs_t *regs, uint64_t flags, uint64_t child_stack,
                               uint64_t ptid, uint64_t ctid, uint64_t newtls);
 int64_t       posix_sys_execve(posix_regs_t *regs, uint64_t path_va,
@@ -550,6 +607,7 @@ int64_t posix_sys_poll(posix_proc_t *p, uint64_t fds_va, uint64_t nfds, int time
 int64_t posix_sys_epoll_create1(posix_proc_t *p, int flags);
 int64_t posix_sys_epoll_ctl(posix_proc_t *p, int epfd, int op, int fd, uint64_t ev_va);
 int64_t posix_sys_epoll_wait(posix_proc_t *p, int epfd, uint64_t evs_va, int maxev, int timeout_ms);
+uint64_t posix_realtime_ms(void);
 int64_t posix_sys_clock_gettime(int clk_id, uint64_t ts_va);
 int64_t posix_sys_nanosleep(uint64_t req_va, uint64_t rem_va);
 int64_t posix_sys_getrandom(uint64_t buf_va, uint64_t len, uint32_t flags);
@@ -562,6 +620,9 @@ int64_t posix_sys_unlinkat(posix_proc_t *p, int dirfd, uint64_t path_va, int fla
 int64_t posix_sys_rename(posix_proc_t *p, uint64_t old_va, uint64_t new_va);
 int64_t posix_sys_getdents64(posix_proc_t *p, int fd, uint64_t dirp_va, uint64_t count);
 int64_t posix_sys_access(posix_proc_t *p, int dirfd, uint64_t path_va, int mode);
+int64_t posix_sys_readlinkat(posix_proc_t *p, int dirfd, uint64_t path_va, uint64_t buf_va, uint64_t bufsiz);
+int64_t posix_sys_eventfd2(posix_proc_t *p, uint32_t initval, int flags);
+int64_t posix_sys_statfs(uint64_t buf_va);
 int64_t posix_sys_ioctl(posix_proc_t *p, int fd, uint64_t req, uint64_t arg);
 
 /* Soketler (posix_sock.c) */

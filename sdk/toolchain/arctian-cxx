@@ -22,13 +22,27 @@ GLIB="$ARCTIAN_GCC_LIB"
 CINC="$ARCTIAN_CXX_INC"
 
 COMPILE_ONLY=0
+HAS_OUT=0
+[ $# -eq 0 ] && COMPILE_ONLY=1
 for a in "$@"; do
-    case "$a" in -c|-S|-E) COMPILE_ONLY=1 ;; esac
+    case "$a" in
+        -c|-S|-E|-M|-MM|-fsyntax-only|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*|--help)
+            COMPILE_ONLY=1
+            ;;
+        -o|-o*)
+            HAS_OUT=1
+            ;;
+    esac
 done
+if [ "$COMPILE_ONLY" -eq 0 ] && [ "$HAS_OUT" -eq 0 ]; then
+    for a in "$@"; do
+        case "$a" in -v) COMPILE_ONLY=1 ;; esac
+    done
+fi
 
 CXXFLAGS=(
     "${EXTRA_B[@]}"
-    -m64 -std=c++20 -fPIE -fexceptions -frtti -fno-stack-protector -fno-use-linker-plugin
+    -m64 -std=c++20 -fPIE -fexceptions -frtti -fno-stack-protector
     -D_GNU_SOURCE -D_REENTRANT
     -nostdinc -nostdinc++
     -isystem "$SCRIPT_DIR/include"
@@ -44,6 +58,7 @@ if [ "$COMPILE_ONLY" -eq 1 ]; then
     exec "$CXX_BIN" "${CXXFLAGS[@]}" "$@"
 else
     exec "$CXX_BIN" "${CXXFLAGS[@]}" \
+        -fno-use-linker-plugin \
         -nostdlib -static-pie \
         -Wl,-z,noexecstack \
         "$SYS/usr/lib/rcrt1.o" \
@@ -51,7 +66,7 @@ else
         "$GLIB/crtbeginS.o" \
         "$@" \
         -L"$SYS/usr/lib" -L"$GLIB" \
-        -Wl,--start-group -lstdc++ -lm -lc -lgcc -lgcc_eh -Wl,--end-group \
+        -Wl,--start-group -lstdc++ -latomic -lm -lc -lgcc -lgcc_eh -Wl,--end-group \
         "$GLIB/crtendS.o" \
         "$SYS/usr/lib/crtn.o"
 fi

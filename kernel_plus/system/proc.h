@@ -39,4 +39,11 @@ int  proc_owner_ids(uint32_t *uid, uint32_t *gid);
 int  proc_selftest(void);
 int  proc_fault_selftest(void);
 
+/* E1: OOM Basinc & Dondurma/Cozme/Sonlandirma API'si */
+int  proc_oom_state(void);
+void proc_oom_freeze_apps(void);
+void proc_oom_thaw_apps(void);
+int  proc_oom_list_apps(asi_oom_app_t *out, int max_out);
+int  proc_oom_kill_app(int pid);
+
 #endif

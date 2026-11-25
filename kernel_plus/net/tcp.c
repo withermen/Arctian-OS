@@ -12,6 +12,118 @@
 static tcp_connection_t tcp_connections[TCP_MAX_CONNECTIONS];
 static uint16_t tcp_ephemeral_port = 1024;
 static uint32_t tcp_ticks = 0;
+static uint32_t s_isn_counter = 0;
+
+/* F2: Dinamik sira disi (OOO) yeniden birlestirme kuyrugu (yalniz OOO gelince kmalloc) */
+typedef struct {
+    bool     used;
+    uint32_t seq;
+    uint16_t len;
+    uint8_t *data;
+} tcp_ooo_slot_t;
+
+typedef struct {
+    tcp_ooo_slot_t slots[TCP_OOO_SLOTS];
+} tcp_ooo_queue_t;
+
+static inline uint64_t tcp_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline bool tcp_rdrand64(uint64_t *out) {
+    static int has_rdrand = -1;
+    if (has_rdrand < 0) {
+        uint32_t eax, ebx, ecx, edx;
+        __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+        has_rdrand = (ecx & (1u << 30)) ? 1 : 0;
+    }
+    if (!has_rdrand) return false;
+    for (int i = 0; i < 8; i++) {
+        uint8_t ok = 0;
+        uint64_t val = 0;
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
+        if (ok) { *out = val; return true; }
+    }
+    return false;
+}
+
+static inline uint64_t tcp_avalanche64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+/* F2: Kriptografik karisimli / entropi tabanli ISN uretici */
+static uint32_t tcp_gen_isn(const uint8_t local_ip[4], uint16_t local_port,
+                            const uint8_t remote_ip[4], uint16_t remote_port) {
+    uint64_t tsc = tcp_rdtsc();
+    uint64_t ms  = clock_ms();
+    uint32_t seq_cnt = __atomic_add_fetch(&s_isn_counter, 1u, __ATOMIC_RELAXED);
+    uint64_t rdr = 0;
+    (void)tcp_rdrand64(&rdr);
+
+    uint64_t lip = ((uint64_t)local_ip[0] << 24) | ((uint64_t)local_ip[1] << 16) |
+                   ((uint64_t)local_ip[2] << 8)  | (uint64_t)local_ip[3];
+    uint64_t rip = ((uint64_t)remote_ip[0] << 24) | ((uint64_t)remote_ip[1] << 16) |
+                   ((uint64_t)remote_ip[2] << 8)  | (uint64_t)remote_ip[3];
+    uint64_t tuple1 = (lip << 32) | rip;
+    uint64_t tuple2 = ((uint64_t)local_port << 16) | (uint64_t)remote_port | ((uint64_t)seq_cnt << 32);
+
+    uint64_t h = tcp_avalanche64(tsc ^ 0x517cc1b727220a95ULL);
+    h = tcp_avalanche64(h ^ rdr ^ (ms * 0x9e3779b97f4a7c15ULL));
+    h = tcp_avalanche64(h ^ tuple1);
+    h = tcp_avalanche64(h ^ tuple2);
+
+    uint32_t isn = (uint32_t)(h ^ (h >> 32));
+    return isn ? isn : 0x9E3779B9u;
+}
+
+static void tcp_ooo_free_all(tcp_connection_t *c) {
+    if (!c || !c->ooo) return;
+    tcp_ooo_queue_t *q = (tcp_ooo_queue_t *)c->ooo;
+    for (int i = 0; i < TCP_OOO_SLOTS; i++) {
+        if (q->slots[i].used && q->slots[i].data) {
+            kfree(q->slots[i].data);
+        }
+        q->slots[i].data = 0;
+        q->slots[i].used = false;
+    }
+    kfree(q);
+    c->ooo = 0;
+}
+
+static void tcp_newreno_init(tcp_connection_t *c) {
+    c->cwnd = 10u * TCP_MSS;  /* RFC 6928 IW10 */
+    c->ssthresh = 65535u;
+    c->dup_acks = 0;
+    c->in_recovery = 0;
+    c->recover_seq = c->send_seq;
+    c->fin_received = 0;
+    c->fin_seq = 0;
+}
+
+static void tcp_release_conn(tcp_connection_t *c) {
+    if (!c) return;
+    tcp_ooo_free_all(c);
+    if (c->recv_buffer) {
+        kfree(c->recv_buffer);
+        c->recv_buffer = 0;
+    }
+    c->state = TCP_STATE_CLOSED;
+    c->send_buf_len = 0;
+    c->recv_buf_head = 0;
+    c->recv_buf_tail = 0;
+    c->child_id = -1;
+    c->dup_acks = 0;
+    c->in_recovery = 0;
+    c->fin_received = 0;
+    c->fin_seq = 0;
+}
 
 /* Zamanlayici saatleri clock_ms'in 32-bit kesiti olarak tutulur;
  * karsilastirmalar wrap-safe yapilir. Eskiden retransmit_timer bir
@@ -42,6 +154,7 @@ void tcp_init(void) {
     for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
         tcp_connections[i].state = TCP_STATE_CLOSED;
         tcp_connections[i].send_buf_len = 0;
+        tcp_connections[i].recv_buffer = 0;
         tcp_connections[i].recv_buf_head = 0;
         tcp_connections[i].recv_buf_tail = 0;
         tcp_connections[i].send_seq = 0;
@@ -53,13 +166,22 @@ void tcp_init(void) {
         tcp_connections[i].child_id = -1;
         tcp_connections[i].peer_window = 0;
         tcp_connections[i].idle_ms = 0;
+        tcp_connections[i].ooo = 0;
+        tcp_newreno_init(&tcp_connections[i]);
     }
+#ifdef ARCTIAN_NET_SELFTEST
+    tcp_10_selftest();
+#endif
 }
 
-static int tcp_alloc_conn(void) {
+static int tcp_alloc_conn(uint8_t init_state) {
+    uint64_t fl = sched_irq_save();
     for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
         if (tcp_connections[i].state == TCP_STATE_CLOSED) {
             tcp_connection_t *c = &tcp_connections[i];
+            /* Slotu hemen sahiplen ki paralel tcp_connect cagrilari cakismasin */
+            c->state = init_state;
+            sched_irq_restore(fl);
             c->send_buf_len = 0;
             c->recv_buf_head = 0;
             c->recv_buf_tail = 0;
@@ -72,10 +194,15 @@ static int tcp_alloc_conn(void) {
              * ilk bildirim gercek degeriyle ezilir. */
             c->peer_window = TCP_MSS;
             c->idle_ms = tcp_now();
-            /* F3: alim tamponunu yuvada yeniden kullan (fragmentasyonu onler) */
+            tcp_ooo_free_all(c);
+            tcp_newreno_init(c);
+            /* F3: alim tamponunu yuvada gerekince ayir */
             if (!c->recv_buffer) {
                 c->recv_buffer = (uint8_t *)kmalloc(TCP_RXBUF_SIZE);
-                if (!c->recv_buffer) return -1;
+                if (!c->recv_buffer) {
+                    c->state = TCP_STATE_CLOSED;
+                    return -1;
+                }
             }
             c->wscale_shift = TCP_WSCALE_SHIFT;
             c->peer_wscale = 0;
@@ -85,6 +212,7 @@ static int tcp_alloc_conn(void) {
             return i;
         }
     }
+    sched_irq_restore(fl);
     return -1;
 }
 
@@ -120,6 +248,7 @@ static uint16_t tcp_calc_checksum(const uint8_t *src_ip, const uint8_t *dst_ip,
 
 /* F3: dairesel RX tamponu — her tcp_receive'de memmove yok (O(1)). */
 static inline void tcp_rx_write(tcp_connection_t *c, const uint8_t *src, uint32_t len) {
+    if (!c->recv_buffer || len == 0) return;
     uint32_t pos = c->recv_buf_tail & TCP_RXBUF_MASK;
     uint32_t first = TCP_RXBUF_SIZE - pos;
     if (first > len) first = len;
@@ -129,12 +258,121 @@ static inline void tcp_rx_write(tcp_connection_t *c, const uint8_t *src, uint32_
 }
 
 static inline void tcp_rx_read(tcp_connection_t *c, uint8_t *dst, uint32_t len) {
+    if (!c->recv_buffer || len == 0) return;
     uint32_t pos = c->recv_buf_head & TCP_RXBUF_MASK;
     uint32_t first = TCP_RXBUF_SIZE - pos;
     if (first > len) first = len;
     memcpy(dst, &c->recv_buffer[pos], first);
     if (len > first) memcpy(dst + first, &c->recv_buffer[0], len - first);
     c->recv_buf_head += len;
+}
+
+/* F2: Dinamik OOO kuyruguna sira disi segment ekle */
+static void tcp_ooo_insert(tcp_connection_t *c, uint32_t seq, const uint8_t *data, uint16_t len) {
+    if (!c || !data || len == 0) return;
+    int32_t diff = (int32_t)(seq - c->recv_ack);
+    if (diff <= 0 || (uint32_t)diff >= TCP_RXBUF_SIZE) return;
+
+    tcp_ooo_queue_t *q = (tcp_ooo_queue_t *)c->ooo;
+    if (!q) {
+        q = (tcp_ooo_queue_t *)kmalloc(sizeof(tcp_ooo_queue_t));
+        if (!q) return;
+        memset(q, 0, sizeof(*q));
+        c->ooo = q;
+    }
+
+    int free_idx = -1;
+    int far_idx = -1;
+    int32_t far_diff = diff;
+
+    for (int i = 0; i < TCP_OOO_SLOTS; i++) {
+        tcp_ooo_slot_t *s = &q->slots[i];
+        if (!s->used) {
+            if (free_idx < 0) free_idx = i;
+            continue;
+        }
+        /* Mevcut slot yeni segmenti tamamen kapsiyorsa yineleme ekleme */
+        int32_t sd = (int32_t)(seq - s->seq);
+        if (sd >= 0 && (uint32_t)sd + len <= s->len) {
+            return;
+        }
+        int32_t s_diff = (int32_t)(s->seq - c->recv_ack);
+        if (s_diff > far_diff) {
+            far_diff = s_diff;
+            far_idx = i;
+        }
+    }
+
+    int idx = free_idx;
+    if (idx < 0) {
+        if (far_idx < 0) return; /* Tum yuvalar daha yakin segmentlerle dolu */
+        if (q->slots[far_idx].data) kfree(q->slots[far_idx].data);
+        q->slots[far_idx].data = 0;
+        q->slots[far_idx].used = false;
+        idx = far_idx;
+    }
+
+    uint8_t *copy = (uint8_t *)kmalloc(len);
+    if (!copy) return;
+    memcpy(copy, data, len);
+    q->slots[idx].used = true;
+    q->slots[idx].seq  = seq;
+    q->slots[idx].len  = len;
+    q->slots[idx].data = copy;
+}
+
+/* F2: recv_ack ilerledikce bitisik/ortusen OOO segmentlerini RX halkasina bosalt */
+static uint32_t tcp_ooo_drain(tcp_connection_t *c) {
+    if (!c || !c->ooo || !c->recv_buffer) return 0;
+    tcp_ooo_queue_t *q = (tcp_ooo_queue_t *)c->ooo;
+    uint32_t drained = 0;
+
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < TCP_OOO_SLOTS; i++) {
+            if (!q->slots[i].used) continue;
+            int32_t diff = (int32_t)(q->slots[i].seq - c->recv_ack);
+            if (diff <= 0) {
+                if (best < 0 || (int32_t)(q->slots[i].seq - q->slots[best].seq) < 0)
+                    best = i;
+            }
+        }
+        if (best < 0) break;
+
+        tcp_ooo_slot_t *s = &q->slots[best];
+        int32_t diff = (int32_t)(s->seq - c->recv_ack);
+        int32_t end_diff = diff + (int32_t)s->len;
+        if (end_diff <= 0) {
+            if (s->data) kfree(s->data);
+            s->data = 0;
+            s->used = false;
+            continue;
+        }
+
+        uint32_t ov = (diff < 0) ? (uint32_t)(-diff) : 0u;
+        uint32_t nl = (uint32_t)s->len - ov;
+        uint32_t used = c->recv_buf_tail - c->recv_buf_head;
+        uint32_t sp = (used < TCP_RXBUF_SIZE) ? (TCP_RXBUF_SIZE - used) : 0u;
+        uint32_t take = (nl < sp) ? nl : sp;
+        if (take == 0) break;
+
+        tcp_rx_write(c, s->data + ov, take);
+        c->recv_ack += take;
+        drained += take;
+
+        if (take == nl) {
+            if (s->data) kfree(s->data);
+            s->data = 0;
+            s->used = false;
+        } else {
+            uint16_t rem = (uint16_t)(nl - take);
+            memmove(s->data, s->data + ov + take, rem);
+            s->seq = c->recv_ack;
+            s->len = rem;
+            break;
+        }
+    }
+    return drained;
 }
 
 /* Segment gonderir; seq cagiran tarafindan verilir. Eskiden fonksiyon
@@ -203,7 +441,7 @@ int tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port) {
         return -1;
     }
 
-    int id = tcp_alloc_conn();
+    int id = tcp_alloc_conn(TCP_STATE_SYN_SENT);
     if (id < 0) return -1;
 
     tcp_connection_t *conn = &tcp_connections[id];
@@ -212,10 +450,13 @@ int tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port) {
         conn->remote_ip[i] = dst_ip[i];
     }
     conn->local_port  = tcp_ephemeral_port++;
+    if (tcp_ephemeral_port < 1024u) tcp_ephemeral_port = 1024u;
     conn->remote_port = dst_port;
-    conn->send_seq = 0x12345678;
+    conn->send_seq = tcp_gen_isn(conn->local_ip, conn->local_port,
+                                 conn->remote_ip, conn->remote_port);
     conn->recv_ack = 0;
     conn->send_unack = conn->send_seq;
+    conn->recover_seq = conn->send_seq;
     conn->state = TCP_STATE_SYN_SENT;
     conn->retransmit_count = 0;
     conn->retransmit_timer = tcp_now();
@@ -225,7 +466,7 @@ int tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port) {
 
     if (!tcp_send_segment(id, conn->send_seq, TCP_FLAG_SYN, 0, 0)) {
         serial_printf("[tcp] SYN gonderilemedi\n");
-        conn->state = TCP_STATE_CLOSED;
+        tcp_release_conn(conn);
         return -1;
     }
     conn->send_seq++;
@@ -241,13 +482,13 @@ int tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port) {
     serial_printf("[tcp] connect %d.%d.%d.%d:%d basarisiz (son durum=%d)\n",
                   dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
                   conn->state);
-    conn->state = TCP_STATE_CLOSED;
+    tcp_release_conn(conn);
     return -1;
 }
 
 int tcp_listen(uint16_t port) {
     if (port == 0) return -1;
-    int id = tcp_alloc_conn();
+    int id = tcp_alloc_conn(TCP_STATE_LISTEN);
     if (id < 0) return -1;
 
     tcp_connection_t *conn = &tcp_connections[id];
@@ -304,8 +545,9 @@ bool tcp_send(int conn_id, const uint8_t *data, uint16_t length) {
         if (conn->state != TCP_STATE_ESTABLISHED) return false;
 
         uint32_t inflight = conn->send_seq - conn->send_unack;
-        uint32_t allow = conn->peer_window > inflight
-                       ? conn->peer_window - inflight : 0;
+        uint32_t eff_win = conn->peer_window < conn->cwnd
+                         ? conn->peer_window : conn->cwnd;
+        uint32_t allow = eff_win > inflight ? eff_win - inflight : 0;
         uint32_t space = TCP_WINDOW_SIZE - conn->send_buf_len;
         uint32_t room = allow < space ? allow : space;
         if (room == 0) {
@@ -314,8 +556,10 @@ bool tcp_send(int conn_id, const uint8_t *data, uint16_t length) {
                 return false;
             }
             tcp_poll();
+            eff_win = conn->peer_window < conn->cwnd
+                    ? conn->peer_window : conn->cwnd;
             if (conn->state == TCP_STATE_ESTABLISHED &&
-                conn->peer_window <= (conn->send_seq - conn->send_unack))
+                eff_win <= (conn->send_seq - conn->send_unack))
                 sched_sleep_ms(1);
             continue;
         }
@@ -360,11 +604,95 @@ static void tcp_ack_send(tcp_connection_t *conn, uint32_t ack) {
     if ((int32_t)(ack - conn->send_seq) > 0) conn->send_seq = ack;
 }
 
+/* F2: RFC 6582 NewReno tikaniklik denetimi (yavas baslangic, kacinma,
+ * 3 yinelenen ACK ile hizli yeniden gonderim & hizli toparlanma). */
+static void tcp_newreno_on_rto(tcp_connection_t *c) {
+    uint32_t half = c->cwnd / 2u;
+    c->ssthresh = (half > 2u * TCP_MSS) ? half : (2u * TCP_MSS);
+    c->cwnd = TCP_MSS;
+    c->dup_acks = 0;
+    c->in_recovery = 0;
+    c->recover_seq = c->send_seq;
+}
+
+static void tcp_newreno_on_ack(tcp_connection_t *conn, int conn_id,
+                               uint32_t ack, uint32_t old_peer_win,
+                               uint32_t new_peer_win, uint16_t data_len,
+                               uint8_t flags, int *want_retx_out) {
+    int32_t acked = (int32_t)(ack - conn->send_unack);
+    if (acked > 0) {
+        tcp_ack_send(conn, ack);
+        if (conn->in_recovery) {
+            if ((int32_t)(ack - conn->recover_seq) >= 0) {
+                /* Tam ACK: hizli toparlanmadan cik */
+                conn->cwnd = conn->ssthresh;
+                conn->in_recovery = 0;
+                conn->dup_acks = 0;
+            } else {
+                /* Kismi ACK (RFC 6582): pencereyi indir ve ilk onaysiz segmenti hemen gonder */
+                uint32_t acku = (uint32_t)acked;
+                if (conn->cwnd > acku + TCP_MSS) conn->cwnd -= acku;
+                else conn->cwnd = TCP_MSS;
+                if (acku >= TCP_MSS) conn->cwnd += TCP_MSS;
+                conn->dup_acks = 0;
+                if (conn->send_buf_len > 0) {
+                    if (want_retx_out) *want_retx_out = 1;
+                    if (conn_id >= 0) {
+                        uint16_t n = conn->send_buf_len < TCP_MSS ? conn->send_buf_len : TCP_MSS;
+                        tcp_send_segment(conn_id, conn->send_unack,
+                                         TCP_FLAG_PSH | TCP_FLAG_ACK,
+                                         conn->send_buffer, n);
+                    }
+                    conn->retransmit_timer = tcp_now();
+                }
+            }
+        } else {
+            conn->dup_acks = 0;
+            if (conn->cwnd < conn->ssthresh) {
+                uint32_t inc = (uint32_t)acked;
+                if (inc > TCP_MSS) inc = TCP_MSS;
+                conn->cwnd += inc;
+            } else {
+                uint32_t d = conn->cwnd ? conn->cwnd : TCP_MSS;
+                uint32_t inc = (TCP_MSS * TCP_MSS) / d;
+                if (inc == 0) inc = 1;
+                conn->cwnd += inc;
+            }
+            if (conn->cwnd > (1024u * 1024u)) conn->cwnd = 1024u * 1024u;
+        }
+    } else if (acked == 0 && data_len == 0 &&
+               !(flags & (TCP_FLAG_SYN | TCP_FLAG_FIN)) &&
+               conn->send_buf_len > 0 && new_peer_win == old_peer_win) {
+        if (!conn->in_recovery) {
+            conn->dup_acks++;
+            if (conn->dup_acks == 3) {
+                uint32_t half = conn->cwnd / 2u;
+                conn->ssthresh = (half > 2u * TCP_MSS) ? half : (2u * TCP_MSS);
+                conn->cwnd = conn->ssthresh + 3u * TCP_MSS;
+                conn->in_recovery = 1;
+                conn->recover_seq = conn->send_seq;
+                if (want_retx_out) *want_retx_out = 1;
+                if (conn_id >= 0) {
+                    uint16_t n = conn->send_buf_len < TCP_MSS ? conn->send_buf_len : TCP_MSS;
+                    tcp_send_segment(conn_id, conn->send_unack,
+                                     TCP_FLAG_PSH | TCP_FLAG_ACK,
+                                     conn->send_buffer, n);
+                }
+                conn->retransmit_timer = tcp_now();
+            }
+        } else {
+            conn->cwnd += TCP_MSS;
+            if (conn->cwnd > (1024u * 1024u)) conn->cwnd = 1024u * 1024u;
+        }
+    }
+}
+
 int tcp_receive(int conn_id, uint8_t *buf, uint16_t buf_size) {
     if (!tcp_id_ok(conn_id)) return -1;
     tcp_connection_t *conn = &tcp_connections[conn_id];
     if (conn->state == TCP_STATE_CLOSED ||
-        conn->state == TCP_STATE_TIME_WAIT) return -1;
+        conn->state == TCP_STATE_TIME_WAIT ||
+        !conn->recv_buffer) return -1;
 
     /* F3: RX tamponu cok dolu degilse agi yokla (halka tasmasin). */
     if ((conn->recv_buf_tail - conn->recv_buf_head) < (TCP_RXBUF_SIZE / 2u))
@@ -375,6 +703,7 @@ int tcp_receive(int conn_id, uint8_t *buf, uint16_t buf_size) {
     if (available > buf_size) available = buf_size;
 
     tcp_rx_read(conn, buf, available);
+    if (conn->ooo) tcp_ooo_drain(conn);
 
     /* F3: her okumada gereksiz ACK gonderme; pencere anlamli olcude
      * acildiysa (veya darsa) karsi tarafi guncelle. */
@@ -396,10 +725,10 @@ bool tcp_close(int conn_id) {
 
     if (conn->state == TCP_STATE_LISTEN) {
         if (conn->child_id >= 0) {
-            tcp_connections[conn->child_id].state = TCP_STATE_CLOSED;
+            tcp_release_conn(&tcp_connections[conn->child_id]);
             conn->child_id = -1;
         }
-        conn->state = TCP_STATE_CLOSED;
+        tcp_release_conn(conn);
         return true;
     }
 
@@ -418,12 +747,12 @@ bool tcp_close(int conn_id) {
     uint64_t deadline = clock_ms() + 1000;
     for (;;) {
         tcp_poll();
-        if (conn->state == TCP_STATE_CLOSED ||
-            conn->state == TCP_STATE_TIME_WAIT) return true;
+        if (conn->state == TCP_STATE_CLOSED) return true;
+        if (conn->state == TCP_STATE_TIME_WAIT) return true;
         if ((int64_t)(clock_ms() - deadline) >= 0) break;
         sched_sleep_ms(1);   /* F2: pause-spin yerine uyku */
     }
-    conn->state = TCP_STATE_CLOSED;
+    tcp_release_conn(conn);
     return true;
 }
 
@@ -435,12 +764,8 @@ void tcp_abort(int conn_id) {
     if (c->state == TCP_STATE_ESTABLISHED || c->state == TCP_STATE_CLOSE_WAIT)
         tcp_send_segment(conn_id, c->send_seq, TCP_FLAG_RST, 0, 0);
     if (c->state == TCP_STATE_LISTEN && c->child_id >= 0)
-        tcp_connections[c->child_id].state = TCP_STATE_CLOSED;
-    c->state = TCP_STATE_CLOSED;
-    c->send_buf_len = 0;
-    c->recv_buf_head = 0;
-    c->recv_buf_tail = 0;
-    c->child_id = -1;
+        tcp_release_conn(&tcp_connections[c->child_id]);
+    tcp_release_conn(c);
 }
 
 int tcp_state(int conn_id) {
@@ -451,7 +776,7 @@ int tcp_state(int conn_id) {
 uint32_t tcp_rx_avail(int conn_id) {
     if (!tcp_id_ok(conn_id)) return 0;
     tcp_connection_t *c = &tcp_connections[conn_id];
-    if (c->state == TCP_STATE_CLOSED) return 0;
+    if (c->state == TCP_STATE_CLOSED || !c->recv_buffer) return 0;
     return c->recv_buf_tail - c->recv_buf_head;
 }
 
@@ -511,7 +836,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
             const uint8_t *data = packet + hdr_len;
 
             if (flags & TCP_FLAG_RST) {
-                conn->state = TCP_STATE_CLOSED;
+                tcp_release_conn(conn);
                 return true;
             }
 
@@ -531,6 +856,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                     conn->peer_window = (uint32_t)htons16(hdr->window);
                     conn->send_seq = ack;
                     conn->send_unack = ack;   /* kendi SYN'umuz onaylandi */
+                    tcp_newreno_init(conn);
                     conn->state = TCP_STATE_ESTABLISHED;
                     /* El sikismayi TAMAMLA: son ACK gonderilmezse bazi
                      * yiginlar (slirp dahil) baglantiyi yarim acik sayar ve
@@ -544,6 +870,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                 if (flags & TCP_FLAG_ACK) {
                     conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
                     tcp_ack_send(conn, ack);   /* SYN okteti dusulur */
+                    tcp_newreno_init(conn);
                     conn->state = TCP_STATE_ESTABLISHED;
                 }
                 return true;
@@ -574,15 +901,17 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                 if (flags & TCP_FLAG_ACK) {
                     tcp_ack_send(conn, ack);
                     if ((int32_t)(ack - conn->send_seq) >= 0)
-                        conn->state = TCP_STATE_CLOSED;
+                        tcp_release_conn(conn);
                 }
                 return true;
             }
 
             if (conn->state == TCP_STATE_CLOSE_WAIT) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
-                    tcp_ack_send(conn, ack);
+                    uint32_t old_win = conn->peer_window;
+                    uint32_t new_win = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
+                    conn->peer_window = new_win;
+                    tcp_newreno_on_ack(conn, i, ack, old_win, new_win, data_len, flags, 0);
                 }
                 if (data_len > 0) {
                     int32_t diff = (int32_t)(seq - conn->recv_ack);
@@ -597,6 +926,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                             if (take > 0) {
                                 tcp_rx_write(conn, data + ov, take);
                                 conn->recv_ack += take;
+                                if (conn->ooo) tcp_ooo_drain(conn);
                             }
                         }
                     }
@@ -609,12 +939,13 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
 
             if (conn->state == TCP_STATE_ESTABLISHED) {
                 if (flags & TCP_FLAG_ACK) {
-                    conn->peer_window = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
-                    tcp_ack_send(conn, ack);
+                    uint32_t old_win = conn->peer_window;
+                    uint32_t new_win = ((uint32_t)htons16(hdr->window)) << conn->peer_wscale;
+                    conn->peer_window = new_win;
+                    tcp_newreno_on_ack(conn, i, ack, old_win, new_win, data_len, flags, 0);
                 }
 
-                /* Sira kontrolu (RFC 793): siradisi paketleri tampona kopyalayip
-                 * TLS akisini bozma; yinelenen/kismi ortusen paketleri ayikla. */
+                /* F2: Sira kontrolu + OOO yeniden siralama tamponu */
                 bool immediate_ack = false;
                 if (data_len > 0) {
                     int32_t diff = (int32_t)(seq - conn->recv_ack);
@@ -630,6 +961,9 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                             if (take > 0) {
                                 tcp_rx_write(conn, data + ov, take);
                                 conn->recv_ack += take;
+                                if (conn->ooo) {
+                                    if (tcp_ooo_drain(conn) > 0) immediate_ack = true;
+                                }
                             }
                         }
                         if (take > 0) {
@@ -640,20 +974,27 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                             immediate_ack = true;
                         }
                     } else {
-                        /* Siradisi paket: hizli yeniden gonderim icin hemen dup-ACK. */
+                        /* Sira disi segment: OOO tamponuna sakla + dup-ACK gonder */
+                        tcp_ooo_insert(conn, seq, data, data_len);
                         immediate_ack = true;
                     }
                 }
 
-                /* FIN yalnizca onceki tum veriler sirali alindiysa islenir. */
-                if ((flags & TCP_FLAG_FIN) && (seq + data_len == conn->recv_ack)) {
-                    conn->recv_ack = seq + data_len + 1;
+                if (flags & TCP_FLAG_FIN) {
+                    conn->fin_received = 1;
+                    conn->fin_seq = seq + data_len;
+                }
+
+                /* FIN yalnizca onceki tum veriler (OOO dahil) sirali alindiysa islenir. */
+                if (conn->fin_received && conn->recv_ack == conn->fin_seq) {
+                    conn->fin_received = 0;
+                    conn->recv_ack = conn->fin_seq + 1;
                     conn->state = TCP_STATE_CLOSE_WAIT;
                     tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
                     return true;
                 }
 
-                if (immediate_ack || (flags & TCP_FLAG_FIN)) {
+                if (immediate_ack) {
                     tcp_send_segment(i, conn->send_seq, TCP_FLAG_ACK, 0, 0);
                 }
                 return true;
@@ -675,7 +1016,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
                 l->child_id = -1;
             }
 
-            int cid = tcp_alloc_conn();
+            int cid = tcp_alloc_conn(TCP_STATE_SYN_RECEIVED);
             if (cid < 0) continue;
 
             tcp_connection_t *c = &tcp_connections[cid];
@@ -687,8 +1028,10 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
             c->remote_port = src_port;
             c->recv_seq = htonl32(hdr->seq_num);
             c->recv_ack = c->recv_seq + 1;
-            c->send_seq = 0x20000000u + tcp_ticks * 7919u;
+            c->send_seq = tcp_gen_isn(c->local_ip, c->local_port,
+                                      c->remote_ip, c->remote_port);
             c->send_unack = c->send_seq;
+            c->recover_seq = c->send_seq;
             c->send_buf_len = 0;
             c->recv_buf_head = 0;
             c->recv_buf_tail = 0;
@@ -712,7 +1055,7 @@ bool tcp_receive_packet(const uint8_t *src_ip, const uint8_t *packet, uint16_t l
             c->child_id = -1;
 
             if (!tcp_send_segment(cid, c->send_seq, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0)) {
-                c->state = TCP_STATE_CLOSED;
+                tcp_release_conn(c);
                 continue;
             }
             c->send_seq++;
@@ -739,14 +1082,14 @@ void tcp_poll(void) {
         switch (c->state) {
         case TCP_STATE_SYN_SENT:
             if (tcp_ms_due(c->retransmit_timer, tcp_rto(c->retransmit_count))) {
-                if (++c->retransmit_count > 5) { c->state = TCP_STATE_CLOSED; break; }
+                if (++c->retransmit_count > 5) { tcp_release_conn(c); break; }
                 c->retransmit_timer = now;
-                tcp_send_segment(i, c->send_seq, TCP_FLAG_SYN, 0, 0);
+                tcp_send_segment(i, c->send_unack, TCP_FLAG_SYN, 0, 0);
             }
             break;
         case TCP_STATE_SYN_RECEIVED:
             if (tcp_ms_due(c->retransmit_timer, tcp_rto(c->retransmit_count))) {
-                if (++c->retransmit_count > 5) { c->state = TCP_STATE_CLOSED; break; }
+                if (++c->retransmit_count > 5) { tcp_release_conn(c); break; }
                 c->retransmit_timer = now;
                 tcp_send_segment(i, c->send_unack, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
             }
@@ -756,9 +1099,10 @@ void tcp_poll(void) {
                 tcp_ms_due(c->retransmit_timer, tcp_rto(c->retransmit_count))) {
                 if (++c->retransmit_count > 8) {
                     serial_printf("[tcp] slot %d onaysiz veri, kapatiliyor\n", i);
-                    c->state = TCP_STATE_CLOSED;
+                    tcp_release_conn(c);
                     break;
                 }
+                tcp_newreno_on_rto(c);
                 c->retransmit_timer = now;
                 uint16_t n = c->send_buf_len < TCP_MSS ? c->send_buf_len : TCP_MSS;
                 tcp_send_segment(i, c->send_unack, TCP_FLAG_PSH | TCP_FLAG_ACK,
@@ -768,20 +1112,118 @@ void tcp_poll(void) {
         case TCP_STATE_FIN_WAIT1:
         case TCP_STATE_LAST_ACK:
             if (tcp_ms_due(c->retransmit_timer, tcp_rto(c->retransmit_count))) {
-                if (++c->retransmit_count > 5) { c->state = TCP_STATE_CLOSED; break; }
+                if (++c->retransmit_count > 5) { tcp_release_conn(c); break; }
                 c->retransmit_timer = now;
                 tcp_send_segment(i, c->send_seq - 1, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
             }
             break;
         case TCP_STATE_FIN_WAIT2:
             /* Karsi taraf FIN gondermezse slot sonsuza dek dolu kalirdi. */
-            if (tcp_ms_due(c->idle_ms, 10000)) c->state = TCP_STATE_CLOSED;
+            if (tcp_ms_due(c->idle_ms, 10000)) tcp_release_conn(c);
             break;
         case TCP_STATE_TIME_WAIT:
-            if (tcp_ms_due(c->idle_ms, 5000)) c->state = TCP_STATE_CLOSED;
+            if (tcp_ms_due(c->idle_ms, 5000)) tcp_release_conn(c);
             break;
         default:
             break;
         }
     }
+}
+
+void tcp_10_selftest(void) {
+    /* 1. ISN benzersizligi (32 ardisik uretim) */
+    uint8_t lip[4] = {10, 0, 2, 15};
+    uint8_t rip[4] = {1, 1, 1, 1};
+    uint32_t isns[32];
+    int isn_ok = 1;
+    for (int i = 0; i < 32; i++) {
+        isns[i] = tcp_gen_isn(lip, (uint16_t)(40000 + (i & 3)), rip, 443);
+        if (isns[i] == 0) isn_ok = 0;
+        for (int j = 0; j < i; j++) {
+            if (isns[j] == isns[i]) isn_ok = 0;
+        }
+    }
+
+    /* 2. RFC 6582 NewReno durum makinesi */
+    int nr_ok = 1;
+    tcp_connection_t tc;
+    memset(&tc, 0, sizeof(tc));
+    tc.state = TCP_STATE_ESTABLISHED;
+    tc.send_unack = 10000u;
+    tc.send_seq = 10000u + 4u * TCP_MSS;
+    tc.send_buf_len = 4u * TCP_MSS;
+    tc.peer_window = 65535u;
+    tcp_newreno_init(&tc);
+    if (tc.cwnd != 10u * TCP_MSS || tc.ssthresh != 65535u) nr_ok = 0;
+
+    /* Yavas baslangic: 1 MSS ACK -> cwnd += TCP_MSS */
+    int retx = 0;
+    tcp_newreno_on_ack(&tc, -1, 10000u + TCP_MSS, 65535u, 65535u, 0, TCP_FLAG_ACK, &retx);
+    if (tc.cwnd != 11u * TCP_MSS || retx != 0) nr_ok = 0;
+
+    /* 3 dup-ACK -> fast retransmit + fast recovery */
+    uint32_t pre_cwnd = tc.cwnd;
+    uint32_t exp_ssthresh = pre_cwnd / 2u;
+    for (int d = 0; d < 3; d++) {
+        retx = 0;
+        tcp_newreno_on_ack(&tc, -1, tc.send_unack, 65535u, 65535u, 0, TCP_FLAG_ACK, &retx);
+    }
+    if (!tc.in_recovery || tc.ssthresh != exp_ssthresh ||
+        tc.cwnd != exp_ssthresh + 3u * TCP_MSS || retx != 1) nr_ok = 0;
+
+    /* Kismi ACK -> toparlanmada kal + hemen yeniden gonder */
+    retx = 0;
+    tcp_newreno_on_ack(&tc, -1, tc.send_unack + TCP_MSS, 65535u, 65535u, 0, TCP_FLAG_ACK, &retx);
+    if (!tc.in_recovery || retx != 1) nr_ok = 0;
+
+    /* Tam ACK -> toparlanmadan cik (cwnd = ssthresh) */
+    tcp_newreno_on_ack(&tc, -1, tc.recover_seq, 65535u, 65535u, 0, TCP_FLAG_ACK, &retx);
+    if (tc.in_recovery || tc.cwnd != tc.ssthresh || tc.dup_acks != 0) nr_ok = 0;
+
+    /* Tikaniklik kacinma (cwnd >= ssthresh) */
+    uint32_t ca_before = tc.cwnd;
+    tc.send_seq += TCP_MSS;
+    tc.send_buf_len = TCP_MSS;
+    tcp_newreno_on_ack(&tc, -1, tc.send_unack + TCP_MSS, 65535u, 65535u, 0, TCP_FLAG_ACK, &retx);
+    if (tc.cwnd <= ca_before) nr_ok = 0;
+
+    /* RTO zaman asimi -> cwnd = TCP_MSS */
+    tcp_newreno_on_rto(&tc);
+    if (tc.cwnd != TCP_MSS || tc.in_recovery || tc.dup_acks != 0) nr_ok = 0;
+
+    /* 3. OOO yeniden siralama + RX teslimi */
+    int ooo_ok = 1;
+    int cid = tcp_alloc_conn(TCP_STATE_ESTABLISHED);
+    if (cid < 0) {
+        ooo_ok = 0;
+    } else {
+        tcp_connection_t *oc = &tcp_connections[cid];
+        oc->recv_ack = 5000u;
+        oc->recv_buf_head = 0;
+        oc->recv_buf_tail = 0;
+        tcp_ooo_insert(oc, 5005u, (const uint8_t *)"WORLD", 5);
+        tcp_ooo_insert(oc, 5010u, (const uint8_t *)"!", 1);
+        tcp_ooo_insert(oc, 5005u, (const uint8_t *)"WORLD", 5); /* duplicate */
+        if (oc->recv_ack != 5000u || oc->recv_buf_tail != 0) ooo_ok = 0;
+
+        tcp_rx_write(oc, (const uint8_t *)"HELLO", 5);
+        oc->recv_ack += 5;
+        uint32_t drained = tcp_ooo_drain(oc);
+        if (drained != 6u || oc->recv_ack != 5011u || tcp_rx_avail(cid) != 11u) ooo_ok = 0;
+
+        uint8_t out[16];
+        memset(out, 0, sizeof(out));
+        tcp_rx_read(oc, out, 11);
+        if (memcmp(out, "HELLOWORLD!", 11) != 0) ooo_ok = 0;
+
+        tcp_release_conn(oc);
+        if (oc->ooo != 0 || oc->recv_buffer != 0 || oc->state != TCP_STATE_CLOSED) ooo_ok = 0;
+    }
+
+    serial_printf("[tcp10] selftest: max_conn=%d ISN=%s NewReno=%s OOO=%s -> %s\n",
+                  TCP_MAX_CONNECTIONS,
+                  isn_ok ? "OK" : "FAIL",
+                  nr_ok ? "OK" : "FAIL",
+                  ooo_ok ? "OK" : "FAIL",
+                  (isn_ok && nr_ok && ooo_ok) ? "PASS" : "FAIL");
 }

@@ -3,11 +3,69 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
-## 0.9.2 (geliştirme devam ediyor) — POSIX/C++20, B3 İzolasyonu ve Ağ Hızlandırma
+## 1.0 — Donanım Hızlandırma, Dinamik Ölçekleme, Ağ & OOM Kurtarma
 
-Sürüm `version.json` üzerinden `0.9.2`'dedir (1.0 yayınlanmadan önce altyapı ve belgelendirme
-tamamlanmaktadır). Güncel durum tablosu: [docs/1.0-durum.md](docs/1.0-durum.md) ve
-[docs/1.0-yol-haritasi.md](docs/1.0-yol-haritasi.md).
+**Bellek Yönetimi, Dinamik Görev Ölçekleme & OOM Kurtarma**
+
+- `vmm_init()` ile `1 GB` üstü kurulu RAM için 2 MB huge page dinamik kimlik eşlemesi ve
+  `>4 GB` yüksek fiziksel bellek havuzu; per-CPU çerçeve önbelleği (`VMM_PCPU_MAX_CPUS = 16`)
+  ve `PAT` Write-Combining (`vmm_map_wc_range`).
+- Bellek haritası (`include/arctian/memory_map.h`): çekirdek heap `HEAP_BASE = 0x0A100000`
+  (63 MB) ve Ring-3 fiziksel çerçeve havuzu `VMM_POOL_BASE = 0x0E000000` (96 MB yedek
+  varsayılan + dinamik yüksek RAM havuzu) ayrıldı.
+- Dinamik RAM-ölçekli görev ve süreç tabloları: `sched.c` (`SCHED_MAX_TASKS = 16384`,
+  `SCHED_TASK_HARD_CAP = 4096`), `proc.c` dinamik dilimli süreç tablosu (8192 sürece kadar),
+  `posix_proc.c` dinamik dilimli POSIX tabloları (2048 süreç, 8192 thread, 1024 pencere).
+- **"RAM Doldu!" OOM Kurtarma Arayüzü (`desktop/oom_ui.c`, `sched.c`, `proc.c`):** Kritik bellek
+  eşiğinde (`VMM_OOM_CRITICAL`) veya `Ctrl+Shift+M` ile açılır; kullanıcı/WLF/POSIX görevlerini
+  `TASK_FROZEN` ile dondurup masaüstünü ayakta tutar, uygulamaları RAM kullanımına göre sıralayıp
+  sonlandırmaya veya bellek açılınca masaüstüne geri çözmeye izin verir.
+
+**Grafik, GPU & Ses Alt Sistemi**
+
+- Modüler GPU yöneticisi (`kernel_plus/drivers/gpu*.c`): PCI Display sınıfı taramasıyla
+  **VirtIO-GPU 2D** (`gpu_virtio.c`), **Intel UHD/Iris Xe/Arc** (`gpu_intel.c`), **NVIDIA**
+  (`gpu_nvidia.c`), **Bochs/QEMU BGA** (`gpu_bga.c`) ve UEFI GOP / BIOS VBE LFB yedeği;
+  SSE2/AVX2 hızlandırmalı blitter (`gpu_simd.c`), VSync `flip()` ve kirli bölge `present_rect()`.
+- Ses arka uçları (`kernel_plus/drivers/audio.c`): **Intel HDA** (`hda.c`), **VirtIO-Sound**
+  (`virtio_snd.c`), **AC97** (`ac97.c`) ve **PC Speaker** yedek yolu.
+
+**Depolama & AFS v6**
+
+- **AHCI** (`lib/blk_ahci.c`): 64-PRDT 64-bit scatter-gather DMA (`AHCI_MAX_PRDT = 64`).
+- **NVMe** (`lib/blk_nvme.c`): 64-bit PRP1/PRP2/PRP-List DMA ve dinamik `kmalloc` kuyrukları.
+- **AFS v6 (`lib/afs.c`):** Bellek içi sıralı boş-alan (`free-extent`) geri kazanımı (bitişik
+  blok birleştirme + `data_next` kuyruk geri çekme), **255 bayta** kadar uzun yol desteği
+  (`AFS_PATH_MAX = 256`, `.afs_longnames` tablosu) ve 1024 dosyaya kadar dinamik `kmalloc` tablosu.
+
+**Ağ Yığını & Sürücüler**
+
+- **VirtIO-Net (`kernel_plus/drivers/virtio_net.c`):** Modern (1.0/1.2) + Transitional PCI sürücüsü.
+- **IPv6 Dual-Stack Temeli (`kernel_plus/net/ipv6.c`):** EUI-64 link-local, ICMPv6 Echo, NDP
+  NS/NA/RS/RA ve otomatik SLAAC önek yapılandırması.
+- **TCP (`kernel_plus/net/tcp.c`):** RFC 6582 NewReno tıkanıklık denetimi, dinamik sıra dışı
+  (OOO) yeniden birleştirme (`TCP_OOO_SLOTS = 8`), entropi tabanlı ISN, **64 eşzamanlı TCP
+  bağlantısı** (`TCP_MAX_CONNECTIONS = 64`) ve 128 KB dairesel RX halkası (`TCP_RXBUF_SIZE`).
+- **HTTP/HTTPS & WebSocket (`kernel_plus/tls/https.c`):** Tam HTTP yöntemleri (`http_request`),
+  `gzip`/`deflate` açma (`inflate_gzip.h`) ve RFC 6455 WebSocket (`ws_open`/`ws_send`/`ws_recv`).
+
+**UEFI, Hibrit ISO, Kurulum & Uygulamalar**
+
+- **UEFI & Hibrit ISO (`boot/uefi/`, `tools/arctianpack.py`):** 64-bit `>4 GB` GOP çerçeve
+  tamponu (`uefi_info.fb_phys/fb_size`), Çift El Torito + ISOHybrid MBR/GPT **Hibrit BIOS+UEFI ISO**
+  (FAT32 ESP içinde `BOOTX64.EFI` + `KERNEL.ELF`) ve isteğe bağlı kurulum paketleri
+  (`WEBKIT.ELF`, `DEJAVU.TTF`, `CACERT.PEM`).
+- **Kurulum Sihirbazı (`install/installer.c`):** Grafiksel disk seçimi ve ilerleme ekranı, en az
+  **5 GiB** (`10485760` sektör) kurulum diski denetimi, kurulum sonrası LBA 0/superblock/tablo/AFS
+  doğrulaması ve isteğe bağlı `C:/webkit.elf` kurulumu.
+- **Masaüstü, SDK & Tarayıcı:** Pencere kaydı limiti `MAX_WINS = 256` + geri dönüşüm havuzu
+  (`desktop/windows.c`); `sdk/webkit/` WPE WebKit köprüsü + `arctian-pkg-config` / `arctian.cmake`;
+  yerleşik Tarayıcı için JPEG/GIF/BMP çözücü (`browser_img.h`), `<canvas>` 2D rasterizer
+  (`browser_canvas.h`), yerleşik PDF görüntüleyici (`browser_pdf.h`) ve `PAGE_RAW_MAX = 2 MB`.
+
+## 0.9.2 — POSIX/C++20, B3 İzolasyonu ve Ağ Hızlandırma
+
+Güncel 1.0 durum özeti: [docs/1.0-durum.md](docs/1.0-durum.md).
 
 **Ring-3 POSIX & C++20 Alt Sistemi (`kernel_plus/posix/`, `sdk/toolchain/`)**
 
@@ -38,7 +96,7 @@ tamamlanmaktadır). Güncel durum tablosu: [docs/1.0-durum.md](docs/1.0-durum.md
 **Ağ Performansı**
 
 - 4 MB HTTP indirme QEMU'da **76 sn (55 KB/sn) → 1,11 sn (3,77 MB/sn, 68× hızlanma)**.
-- TCP: 256 KB dairesel alıcı halkası (sıfır `memmove`), SYN `MSS=1460` + RFC 7323 pencere ölçekleme
+- TCP: 128 KB dairesel alıcı halkası (sıfır `memmove`), SYN `MSS=1460` + RFC 7323 pencere ölçekleme
   (`shift=3`), 32-bit `peer_window`, birleştirilmiş ACK.
 - e1000: 128 RX / 32 TX halka, toplu RDT (16'lı) ve ITR=256µs, `netbg` 16 ms yield, bekleme
   döngülerinde `sched_sleep_ms(1)`.
@@ -59,7 +117,7 @@ tamamlanmaktadır). Güncel durum tablosu: [docs/1.0-durum.md](docs/1.0-durum.md
 ## 0.9 — UEFI iskeleti, DPI ölçekleme ve SMP
 
 Bu bölüm 0.9 dalgasında tamamlanan altyapıyı toplar. Güncel 1.0 hazırlık durumu için
-[docs/1.0-durum.md](docs/1.0-durum.md) (arşiv: [docs/0.9-durum.md](docs/0.9-durum.md)).
+[docs/1.0-durum.md](docs/1.0-durum.md).
 
 **UEFI ve grafik**
 

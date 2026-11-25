@@ -76,10 +76,52 @@ def build_amod(name, mtype, load_addr, image, bss_size, flags=0):
     return hdr + b"\x00" * (SECTOR - len(hdr)) + image
 
 
+def build_efi_esp_img(bootx64_path: str, kernel_elf_path: str, out_img: str) -> int:
+    r"""FAT32 EFI System Partition imaji uretir (\EFI\BOOT\BOOTX64.EFI + \EFI\ARCTIAN\KERNEL.ELF)."""
+    for tool in ("mformat", "mmd", "mcopy"):
+        if not shutil.which(tool):
+            raise SystemExit(f"  HATA: UEFI ESP imaji icin '{tool}' (mtools) gerekli")
+
+    need_bytes = os.path.getsize(bootx64_path) + os.path.getsize(kernel_elf_path) + 2 * 1024 * 1024
+    # FAT32 sartnamesi >= 65525 kume (cluster) gerektirir (~33 MB+); OVMF FatDxe
+    # 32 MB altindaki zorlanmis FAT32 hacimlerini reddeder.
+    mb = max(36, (need_bytes + (1024 * 1024 - 1)) // (1024 * 1024))
+    img_bytes = mb * 1024 * 1024
+
+    with open(out_img, "wb") as f:
+        f.truncate(img_bytes)
+
+    def _run(args):
+        r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            raise SystemExit(
+                f"  HATA: {' '.join(args)} basarisiz (RC={r.returncode}): "
+                + (r.stderr or b"").decode(errors="replace").strip()
+            )
+
+    _run(["mformat", "-i", out_img, "-F", "-v", "ARCTIAN_EFI", "::"])
+    _run(["mmd", "-i", out_img, "::/EFI", "::/EFI/BOOT", "::/EFI/ARCTIAN"])
+    _run(["mcopy", "-o", "-i", out_img, bootx64_path, "::/EFI/BOOT/BOOTX64.EFI"])
+    _run(["mcopy", "-o", "-i", out_img, kernel_elf_path, "::/EFI/ARCTIAN/KERNEL.ELF"])
+    return img_bytes
+
+
+def _find_optional_file(env_name: str, candidates) -> str:
+    env_val = os.environ.get(env_name, "").strip()
+    if env_val:
+        return env_val if os.path.isfile(env_val) else ""
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
 def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=b""):
     stage1_iso = bytearray(read(cfg["boot"]["stage1_iso"]))
 
     payload = bytes(stage2) + main_kernel
+    if len(payload) > 0xFFFFFFFF:
+        raise SystemExit("  HATA: ISO boot payload 4 GiB sinirini asiyor (%d)" % len(payload))
     mag = stage1_iso.find(b"PBYT")
     if mag < 4:
         print("  UYARI: stage1_iso 'PBYT' isareti bulunamadi; ISO payload yamalanmadi")
@@ -89,7 +131,11 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
     boot_iso = pad(bytes(stage1_iso) + payload, 2048)
     boot_sectors = len(boot_iso) // SECTOR
 
-    iso_root = os.path.join(os.path.dirname(cfg["output"]["img"]), "iso_root")
+    out_iso = os.environ.get("ARCTIAN_OUT_ISO", cfg["output"]["iso"])
+    os.makedirs(os.path.dirname(os.path.abspath(out_iso)), exist_ok=True)
+    iso_root = os.path.join(
+        os.path.dirname(os.path.abspath(out_iso)), f".iso_root_{os.getpid()}"
+    )
     shutil.rmtree(iso_root, ignore_errors=True)
     os.makedirs(iso_root, exist_ok=True)
     with open(os.path.join(iso_root, "boot_iso.img"), "wb") as f:
@@ -101,14 +147,74 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
         with open(os.path.join(iso_root, fname), "wb") as f:
             f.write(disk)
 
-    out_iso = cfg["output"]["iso"]
+    # Opsiyonel kurulum icerigi: WPE WebKit + DejaVuSans.ttf + CA sertifikalari
+    # (iso9660.c 8.3 buyuk harf adlariyla dogrudan okunur)
+    bundled = []
+    webkit_src = _find_optional_file(
+        "ARCTIAN_WEBKIT_ELF",
+        ["/home/duck/webkit-build/tmp/arctian_webkit.stripped.elf"],
+    )
+    if webkit_src:
+        shutil.copyfile(webkit_src, os.path.join(iso_root, "WEBKIT.ELF"))
+        bundled.append(("WEBKIT.ELF", os.path.getsize(webkit_src)))
+
+    dejavu_src = _find_optional_file(
+        "ARCTIAN_DEJAVU_TTF",
+        ["design/font/DejaVuSans.ttf"],
+    )
+    if dejavu_src:
+        shutil.copyfile(dejavu_src, os.path.join(iso_root, "DEJAVU.TTF"))
+        bundled.append(("DEJAVU.TTF", os.path.getsize(dejavu_src)))
+
+    cacert_src = _find_optional_file(
+        "ARCTIAN_CACERT_PEM",
+        ["/etc/ssl/certs/ca-certificates.crt", "design/certs/cacert.pem"],
+    )
+    if cacert_src:
+        shutil.copyfile(cacert_src, os.path.join(iso_root, "CACERT.PEM"))
+        bundled.append(("CACERT.PEM", os.path.getsize(cacert_src)))
+
+    # Hibrit BIOS + UEFI (Cift El Torito + ISOHybrid MBR/GPT)
+    bootx64_src = _find_optional_file("ARCTIAN_UEFI_EFI", ["build/uefi/BOOTX64.EFI"])
+    default_kelf = os.path.splitext(cfg["boot"]["main_kernel"])[0] + ".elf"
+    kelf_src = _find_optional_file("ARCTIAN_UEFI_KERNEL_ELF", [default_kelf])
+
+    has_uefi = bool(bootx64_src and kelf_src)
+    if os.environ.get("ARCTIAN_REQUIRE_UEFI") == "1" and not has_uefi:
+        raise SystemExit(
+            f"  HATA: UEFI Hibrit ISO icin BOOTX64.EFI ({bootx64_src}) ve "
+            f"KERNEL.ELF ({kelf_src}) gerekli"
+        )
+
     tmp_iso = out_iso + ".part"
-    cmd = [
-        "xorriso", "-as", "mkisofs", "-R", "-r", "-J",
-        "-b", "boot_iso.img", "-no-emul-boot",
-        "-boot-load-size", str(boot_sectors),
-        "-o", tmp_iso, iso_root,
-    ]
+    if has_uefi:
+        efi_img_path = os.path.join(iso_root, "efi.img")
+        efi_bytes = build_efi_esp_img(bootx64_src, kelf_src, efi_img_path)
+        os.makedirs(os.path.join(iso_root, "EFI", "BOOT"), exist_ok=True)
+        os.makedirs(os.path.join(iso_root, "EFI", "ARCTIAN"), exist_ok=True)
+        shutil.copyfile(bootx64_src, os.path.join(iso_root, "EFI", "BOOT", "BOOTX64.EFI"))
+        shutil.copyfile(kelf_src, os.path.join(iso_root, "EFI", "ARCTIAN", "KERNEL.ELF"))
+        cmd = [
+            "xorriso", "-as", "mkisofs", "-R", "-r", "-J", "-iso-level", "3",
+            "-V", "ARCTIAN_OS",
+            "-part_like_isohybrid",
+            "-b", "boot_iso.img", "-no-emul-boot",
+            "-boot-load-size", str(boot_sectors),
+            "-eltorito-alt-boot",
+            "-e", "efi.img", "-no-emul-boot",
+            "-isohybrid-gpt-basdat",
+            "-o", tmp_iso, iso_root,
+        ]
+    else:
+        print("  UYARI: BOOTX64.EFI veya main_kernel.elf bulunamadi; yalnizca BIOS El Torito ISO uretiliyor")
+        cmd = [
+            "xorriso", "-as", "mkisofs", "-R", "-r", "-J", "-iso-level", "3",
+            "-V", "ARCTIAN_OS",
+            "-b", "boot_iso.img", "-no-emul-boot",
+            "-boot-load-size", str(boot_sectors),
+            "-o", tmp_iso, iso_root,
+        ]
+
     # ISO, imaj kadar birincil ciktidir: basarisizsa paketleme HATALI sayilir
     # (eskiden sadece uyari basiliyor, `make`/build.bat RC=0 donduruyordu).
     r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -119,7 +225,10 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
         raise SystemExit("  HATA: ISO uretildi ama bos/kucuk: " + tmp_iso)
     os.replace(tmp_iso, out_iso)          # atomik: yarim ISO birakmaz
     shutil.rmtree(iso_root, ignore_errors=True)
-    print(f"  ISO     : {out_iso} ({os.path.getsize(out_iso)} byte, boot {boot_sectors} sektor)")
+    mode_str = f"Hibrit BIOS+UEFI (ESP {efi_bytes // (1024 * 1024)} MB)" if has_uefi else "BIOS El Torito"
+    print(f"  ISO     : {out_iso} ({os.path.getsize(out_iso)} byte, boot {boot_sectors} sektor, {mode_str})")
+    for bname, bsz in bundled:
+        print(f"  Bundle  : {bname:<12} ({bsz} byte)")
 
 
 def main():
@@ -191,10 +300,11 @@ def main():
     if next_lba > SLOTB_TABLE_LBA:
         raise SystemExit("  HATA: modul bolgesi bitisi %d > B tablosu %d"
                          % (next_lba, SLOTB_TABLE_LBA))
+    if next_lba > 0xFFFFFFFF:
+        raise SystemExit("  HATA: LBA 32-bit sinirini asti: %d" % next_lba)
 
-    total_sectors = max(next_lba + 64, cfg.get("min_sectors", 131072))
-    img = bytearray(total_sectors * SECTOR)
-    img[0:len(boot_image)] = boot_image
+    total_sectors = max(next_lba + 64, int(cfg.get("min_sectors", 524288)))
+    total_bytes = total_sectors * SECTOR
 
     sb = struct.pack(
         "<IHHIIIIIII",
@@ -203,22 +313,24 @@ def main():
         cfg["state_lba"], 0, 0,
     )
     sb = sb[:-4] + struct.pack("<I", cksum(sb[:-4]))
-    img[sb_lba * SECTOR: sb_lba * SECTOR + len(sb)] = sb
 
-    mt = cfg["module_table_lba"] * SECTOR
-    img[mt:mt + len(module_table)] = module_table
-    for lba, disk in module_images:
-        off = lba * SECTOR
-        img[off:off + len(disk)] = disk
-
-    out_img = cfg["output"]["img"]
-    os.makedirs(os.path.dirname(out_img), exist_ok=True)
+    out_img = os.environ.get("ARCTIAN_OUT_IMG", cfg["output"]["img"])
+    os.makedirs(os.path.dirname(os.path.abspath(out_img)), exist_ok=True)
     tmp_img = out_img + ".part"
     with open(tmp_img, "wb") as f:
-        f.write(img)
+        f.truncate(total_bytes)
+        f.seek(0)
+        f.write(boot_image)
+        f.seek(sb_lba * SECTOR)
+        f.write(sb)
+        f.seek(cfg["module_table_lba"] * SECTOR)
+        f.write(module_table)
+        for lba, disk in module_images:
+            f.seek(lba * SECTOR)
+            f.write(disk)
         f.flush()
         os.fsync(f.fileno())
-    if os.path.getsize(tmp_img) != len(img):
+    if os.path.getsize(tmp_img) != total_bytes:
         raise SystemExit("  HATA: imaj tam yazilamadi: " + tmp_img)
     os.replace(tmp_img, out_img)          # atomik: kesilen derleme 0 byte .img birakmaz
 
@@ -230,10 +342,11 @@ def main():
         lba = struct.unpack_from("<I", m, 44)[0]
         sec = struct.unpack_from("<I", m, 48)[0]
         print(f"  Modul   : {name:<12} LBA {lba} ({sec} sektor)")
-    print(f"  Imaj    : {out_img} ({total_sectors} sektor, {total_sectors * 512 // 1024} KB)")
+    print(f"  Imaj    : {out_img} ({total_sectors} sektor, {total_bytes // 1024} KB)")
 
     # ---------- ISO ----------
-    build_iso(cfg, stage2, main_kernel, module_payloads, bytes(img), boot_image)
+    if not os.environ.get("ARCTIAN_SKIP_ISO"):
+        build_iso(cfg, stage2, main_kernel, module_payloads, b"", boot_image)
 
 
 if __name__ == "__main__":

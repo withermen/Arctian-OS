@@ -1,36 +1,41 @@
 /**
- * ArctianFS (AFS) v2 - diske kalici basit dosya sistemi (tek seviye)
+ * ArctianFS (AFS) v6 - diske kalici dosya sistemi
  *
- * Dinamik kapasite: alan ve dosya sayisi secili diskin gercek boyutundan
- * turetilir. Dosya tablosu header icindedir; header boyu dosya sayisina gore
- * buyur. Boylece 250 GB'lik bir SSD'de yuzlerce uygulama saklanabilir.
- *
- * Yerlesim: [header N sektor][veri alani...]
- *
- * Header alanlari (little-endian, packed):
- *   0  magic        "!AFS"
- *   4  version      AFS_VERSION
- *   8  max_files    dosya tablosu kapasitesi (32..512)
- *   12 count        kullanilan dosya sayisi
- *   16 data_next    veri alaninda siradaki bos LBA
- *   20 hdr_sectors  header'in sektor sayisi
- *   24 capacity     kullanilabilir son LBA (haric, 64 bit)
- *   32 flags        rezerve
- *   36 files[max_files]
+ * Ozellikler:
+ *  - AFS v6 on-disk uyumlulugu (magic 0x53464121, version 6, 92B girdi)
+ *  - Dinamik dosya tablosu (1024 dosyaya kadar) + 256-sektor metadata gunlugu
+ *  - Bellek-ici sirali bos-alan (free-extent) tablosu: silme/uzerine yazma/
+ *    kirpma sonrasinda bitisik bloklari birlestirir (coalesce) ve data_next'i
+ *    kuyruktan geri ceker (tail trim)
+ *  - 255 bayta kadar uzun yol destegi (AFS_PATH_MAX=256): >=64B yollar
+ *    kisa @LN_<hex8>_<tail> belirteci + gizli .afs_longnames tablosuyla
+ *    v6 disk yapisini bozmadan saklanir
+ *  - Tum buyuk tamponlar kmalloc() uzerinden ayrilir (main_kernel BSS guvenli)
  */
 #include "afs.h"
 #include "storage.h"
 #include "diskcrypt_hdr.h"
+#include "alloc.h"
+#include "serial.h"
 #include <stddef.h>
 
-#define AFS_MAGIC          0x53464121u  /* "!AFS" */
-#define AFS_MAX_FILES_HARD  512u
-#define AFS_HEADER_BASE     36u         /* magic..flags + 64 bit kapasite */
-#define AFS_ENTRY_SIZE      (AFS_NAME_MAX + 28u)  /* ad + lba + size + used + uid + gid + mode + pad */
+#define AFS_MAGIC            0x53464121u  /* "!AFS" */
+#define AFS_MAX_FILES_HARD   1024u
+#define AFS_HEADER_BASE      36u          /* magic..flags + 64 bit kapasite */
+#define AFS_ENTRY_SIZE       (AFS_NAME_MAX + 28u)  /* 92 byte */
 #define AFS_HDR_MAX_SEC \
     ((AFS_HEADER_BASE + AFS_MAX_FILES_HARD * AFS_ENTRY_SIZE + 511u) / 512u)
-#define AFS_CLUSTER_SEC     4096u       /* dosya basina ortalama rezerv (max_files hesabi) */
-#define AFS_RESERVE_SEC     2048u       /* diskin sonunda birakilan emniyet alani */
+#define AFS_CLUSTER_SEC      2048u
+#define AFS_RESERVE_SEC      2048u        /* diskin sonunda birakilan emniyet alani */
+
+#define AFS_JOURNAL_MAGIC    0x4A464121u  /* "!AFJ" */
+#define AFS_JOURNAL_SEC      256u         /* 185-sektor header + 1-sektor kayit sigar */
+
+#define AFS_LONGNAME_FILE    ".afs_longnames"
+#define AFS_LN_MAGIC         0x4E4C4641u  /* "AFLN" */
+#define AFS_LN_VERSION       1u
+#define AFS_MAX_LONGNAMES    AFS_MAX_FILES_HARD
+#define AFS_MAX_FREE_EXTENTS (AFS_MAX_FILES_HARD + 64u)
 
 typedef struct __attribute__((packed)) {
     char     name[AFS_NAME_MAX];
@@ -50,20 +55,108 @@ typedef struct __attribute__((packed)) {
     uint32_t count;
     uint32_t data_next;
     uint32_t hdr_sectors;
-    uint64_t capacity;   /* 5. surumde 64 bite cikti; 2 TB ustu disklerde
-                          * 32 bitlik alan tasiyor ve erisilemeyen alan
-                          * olusuyordu */
+    uint64_t capacity;
     uint32_t flags;
     afs_file_t files[AFS_MAX_FILES_HARD];
 } afs_hdr_t;
 
-static afs_hdr_t H;
-static int mounted = 0;
-static int s_locked = 0;
+typedef struct {
+    uint32_t start;
+    uint32_t count;
+} afs_ext_t;
 
-/* Etkin taban LBA. Eski diskler legacy (20000), yeni kurulumlar 65536;
- * afs_mount probe ile secimi yapar, afs_format yeni duzeni kurar. */
-static uint32_t s_base = AFS_BASE_LEGACY_LBA;
+typedef struct {
+    char     token[AFS_NAME_MAX];
+    char     path[AFS_PATH_MAX];
+} afs_ln_ent_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t count;
+    uint32_t crc32;
+} afs_ln_hdr_t;
+
+typedef struct __attribute__((packed)) {
+    char     token[AFS_NAME_MAX];
+    uint16_t path_len;
+    char     path[AFS_PATH_MAX];
+} afs_ln_disk_ent_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t seq;
+    uint32_t hdr_sectors;
+    uint32_t crc;
+    uint32_t state;
+    uint32_t prev_crc;
+} afs_jrec_t;
+
+_Static_assert(sizeof(afs_file_t) == 92u, "afs_file_t must remain 92 bytes");
+_Static_assert(AFS_HDR_MAX_SEC + 1u <= AFS_JOURNAL_SEC, "header must fit inside journal");
+
+/* Tum buyuk tablolar kmalloc() ile ayrilir; BSS boyutu < 2 KB kalir. */
+static afs_hdr_t    *s_hdr = 0;
+#define H            (*s_hdr)
+static uint8_t      *s_hbuf = 0;
+static uint32_t     *s_hgen = 0;
+static afs_ext_t    *s_free_exts = 0;
+static afs_ext_t    *s_tmp_exts = 0;
+static uint32_t      s_free_count = 0;
+static uint32_t      s_reclaimed_secs = 0;
+static uint32_t      s_reused_secs = 0;
+
+static afs_ln_ent_t *s_ln_tab = 0;
+static uint32_t      s_ln_count = 0;
+
+static int           mounted = 0;
+static int           s_locked = 0;
+static uint32_t      s_base = AFS_BASE_LEGACY_LBA;
+static uint32_t      s_uid = 0;
+static uint32_t      s_gid = 0;
+static uint32_t      s_jseq = 0;
+static uint32_t      s_crc32_tab[256];
+static int           s_crc32_ready = 0;
+
+static void zero_mem(void *p, size_t n) {
+    uint8_t *b = (uint8_t *)p;
+    for (size_t i = 0; i < n; i++) b[i] = 0;
+}
+
+static int afs_ensure_mem(void) {
+    if (!s_hdr) {
+        s_hdr = (afs_hdr_t *)kmalloc(sizeof(afs_hdr_t));
+        if (!s_hdr) return -1;
+        zero_mem(s_hdr, sizeof(afs_hdr_t));
+    }
+    if (!s_hbuf) {
+        s_hbuf = (uint8_t *)kmalloc((size_t)AFS_HDR_MAX_SEC * 512u);
+        if (!s_hbuf) return -1;
+        zero_mem(s_hbuf, (size_t)AFS_HDR_MAX_SEC * 512u);
+    }
+    if (!s_hgen) {
+        s_hgen = (uint32_t *)kmalloc((size_t)AFS_MAX_FILES_HARD * sizeof(uint32_t));
+        if (!s_hgen) return -1;
+        zero_mem(s_hgen, (size_t)AFS_MAX_FILES_HARD * sizeof(uint32_t));
+    }
+    if (!s_free_exts) {
+        s_free_exts = (afs_ext_t *)kmalloc((size_t)AFS_MAX_FREE_EXTENTS * sizeof(afs_ext_t));
+        if (!s_free_exts) return -1;
+        zero_mem(s_free_exts, (size_t)AFS_MAX_FREE_EXTENTS * sizeof(afs_ext_t));
+    }
+    if (!s_tmp_exts) {
+        s_tmp_exts = (afs_ext_t *)kmalloc((size_t)AFS_MAX_FILES_HARD * sizeof(afs_ext_t));
+        if (!s_tmp_exts) return -1;
+        zero_mem(s_tmp_exts, (size_t)AFS_MAX_FILES_HARD * sizeof(afs_ext_t));
+    }
+    if (!s_ln_tab) {
+        s_ln_tab = (afs_ln_ent_t *)kmalloc((size_t)AFS_MAX_LONGNAMES * sizeof(afs_ln_ent_t));
+        if (!s_ln_tab) return -1;
+        zero_mem(s_ln_tab, (size_t)AFS_MAX_LONGNAMES * sizeof(afs_ln_ent_t));
+    }
+    return 0;
+}
+
 uint32_t afs_base(void) { return s_base; }
 
 void afs_set_locked(int v) { s_locked = v ? 1 : 0; }
@@ -75,9 +168,6 @@ int afs_disk_is_encrypted(void) {
     return hdr[0] == DISKCRYPT_MAGIC &&
            (hdr[1] == DISKCRYPT_VERSION || hdr[1] == 1u);
 }
-
-static uint32_t s_uid = 0;
-static uint32_t s_gid = 0;
 
 void afs_set_subject(int uid, int gid) {
     s_uid = (uint32_t)uid;
@@ -105,11 +195,6 @@ static int perm_ok(uint32_t fuid, uint32_t fgid, uint32_t mode, uint32_t want) {
 static void set_owner(afs_file_t *f, int is_dir) {
     f->uid = s_uid;
     f->gid = s_gid;
-    /* Varsayilan 0755/0644 iken boot sirasinda cekirdek (uid 0) tarafindan
-     * olusturulan agaca uid 1000 ile kosan uygulamalar yazamiyordu; sistem
-     * tek kullanici uzerinden dondugu icin grup/diger bitleri acik
-     * baslar. Kisitlama isteyen chmod ile kapatabilir; uygulama seviyesi
-     * izin kararlari ayrica perm.c karar katmaninda verilir. */
     f->mode = is_dir ? 0777u : 0666u;
     f->pad = 0;
 }
@@ -117,34 +202,40 @@ static void set_owner(afs_file_t *f, int is_dir) {
 static void afs_ensure_tree(void);
 
 static int seq(const char *a, const char *b) {
-    int i = 0; for (; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
+    int i = 0;
+    for (; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
     return a[i] == b[i];
 }
-static void cpy(char *d, const char *s) {
-    int i = 0; for (; s[i] && i < (int)AFS_NAME_MAX - 1; i++) d[i] = s[i]; d[i] = '\0';
+
+static void cpy_cap(char *d, const char *s, int cap) {
+    int i = 0;
+    for (; s && s[i] && i < cap - 1; i++) d[i] = s[i];
+    d[i] = '\0';
 }
 
-static int slen(const char *s) { int n = 0; while (s && s[n]) n++; return n; }
+static void cpy(char *d, const char *s) {
+    cpy_cap(d, s, (int)AFS_NAME_MAX);
+}
+
+static int slen(const char *s) {
+    int n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
 
 static int prefix_of(const char *s, const char *p) {
     for (int i = 0; p[i]; i++) if (s[i] != p[i]) return 0;
     return 1;
 }
 
-/* Disk boyutundan kullanilabilir son LBA'yi hesaplar. Dis sect.
- * Kapasite alani 5. surumde 64 bite cikti; dosya girdilerindeki LBA
- * hala 32 bit oldugu icin kullanim siniri simdilik 2 TB'da kaliyor,
- * suruculerin uctan uca 64 bit LBA destegi gelince bu tavan kalkar. */
 static uint64_t compute_capacity(void) {
     uint64_t secs = storage_sector_count();
-    if (secs == 0) {              /* storage henuz hazir degilse tembel baslat */
+    if (secs == 0) {
         storage_init();
         secs = storage_sector_count();
     }
     uint64_t cap;
-    if (secs == 0) {
-        return s_base + 65536u;   /* bilinmeyen disk: guvenli varsayilan */
-    }
+    if (secs == 0) return s_base + 65536u;
     cap = secs > AFS_RESERVE_SEC ? secs - AFS_RESERVE_SEC : secs;
     if (cap > 0xFFFFFFFEull) cap = 0xFFFFFFFEull;
     if (cap < (uint64_t)s_base + AFS_CLUSTER_SEC) cap = (uint64_t)s_base + AFS_CLUSTER_SEC;
@@ -155,41 +246,6 @@ static void hdr_sync_size(void) {
     uint32_t bytes = AFS_HEADER_BASE + H.max_files * AFS_ENTRY_SIZE;
     H.hdr_sectors = (bytes + 511u) / 512u;
 }
-
-/* ---- Butunluk katmani: CRC32 + metadata gunlugu (journal) ----
- * Header, dosya sisteminin tek commit noktasidir. Yazma sirasinda reset/guc
- * kesintisi header'i yarim birakabilir. Bunu onlemek icin once niyet (yeni
- * header goruntusu) diskin sonundaki gunluk bolgesine yazilir ve commit
- * edilir; sonra header'a uygulanir. Acilista yarim kalan commit gunlukten
- * geri oynatilir (replay). Boylece FS daima son tutarli duruma doner.
- *
- * Journal konumu diskin sonuna yakin sabittir; yeni formatlarda capacity
- * AFS_JOURNAL_SEC kadar kirpilir, boylece gunluk sifreli bolgenin icinde
- * kalir. Eski disklerde gunluk yalnizca veriyle cakismadigi surece kullanilir. */
-
-#define AFS_JOURNAL_MAGIC  0x4A464121u   /* "!AFJ" */
-#define AFS_JOURNAL_SEC    128u          /* gunluk icin ayrilan sektor sayisi */
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t seq;
-    uint32_t hdr_sectors;
-    uint32_t crc;
-    uint32_t state;      /* 1 = gecerli (commit edilmis) */
-    uint32_t prev_crc;   /* bu kaydun uzerine yazildigi eski header'in CRC'si
-                          * (eskiden "reserved"; bayat kayit denetimi icin
-                          * doldurulur, eski disklerde 0 okunur) */
-} afs_jrec_t;
-
-static uint32_t s_jseq = 0;
-
-/* CRC32 (cokterm 0xEDB88320) tablo destekli: her bayt icin 8 kere kaydirma
- * yerine tek tablo bakmasi. Sonuc bit-bit surumle birebir aynidir, boylece
- * eski disklerdeki header/gunluk CRC'leri degismez. hdr_commit her dosya
- * isleminde header'in tamamini (bayt binlerce) iki kez tarar; bu yol
- * dosya sisteminin en sicak hesap kismidir. */
-static uint32_t s_crc32_tab[256];
-static int      s_crc32_ready = 0;
 
 static void crc32_tab_init(void) {
     for (uint32_t i = 0; i < 256; i++) {
@@ -214,29 +270,22 @@ static uint32_t hdr_bytes(void) {
     return AFS_HEADER_BASE + H.max_files * AFS_ENTRY_SIZE;
 }
 
-/* Header yapisi 47140 bayt; sektor katrovasi 93 sektor = 47616 bayt.
- * Eskiden 93 sektor dogrudan &H'ye okunup &H'den yaziliyordu; fazlalik
- * ~476 bayt ya diskteki artiktan BSS'in yanina tasiyor (mounted/s_uid/
- * crc tabli bozuluyordu) ya da BSS icerigi diske siziyordu. Okuma ve
- * yazma artik tam boy tampon uzerinden gecer; slack daima sifirlanir. */
-static uint8_t s_hbuf[AFS_HDR_MAX_SEC * 512u];
-
 static int hdr_load_at(uint32_t lba, uint32_t hs) {
     if (hs == 0 || hs > AFS_HDR_MAX_SEC) return -1;
     if (storage_read(lba, hs, s_hbuf) != 0) return -1;
-    uint8_t *d = (uint8_t *)&H;
+    uint8_t *d = (uint8_t *)s_hdr;
     uint32_t n = hs * 512u;
-    if (n > (uint32_t)sizeof(H)) n = (uint32_t)sizeof(H);
+    if (n > (uint32_t)sizeof(afs_hdr_t)) n = (uint32_t)sizeof(afs_hdr_t);
     uint32_t i;
     for (i = 0; i < n; i++) d[i] = s_hbuf[i];
-    for (; i < (uint32_t)sizeof(H); i++) d[i] = 0;
+    for (; i < (uint32_t)sizeof(afs_hdr_t); i++) d[i] = 0;
     return 0;
 }
 
 static int hdr_save_at(uint32_t lba, uint32_t hs) {
     if (hs == 0 || hs > AFS_HDR_MAX_SEC) return -1;
-    uint8_t *s = (uint8_t *)&H;
-    uint32_t n = (uint32_t)sizeof(H);
+    uint8_t *s = (uint8_t *)s_hdr;
+    uint32_t n = (uint32_t)sizeof(afs_hdr_t);
     if (n > hs * 512u) n = hs * 512u;
     uint32_t i;
     for (i = 0; i < n; i++) s_hbuf[i] = s[i];
@@ -244,16 +293,14 @@ static int hdr_save_at(uint32_t lba, uint32_t hs) {
     return storage_write(lba, hs, s_hbuf);
 }
 
-/* Header'in kendi CRC'si (flags alani sifirlanarak hesaplanir). */
 static uint32_t hdr_crc(void) {
     uint32_t saved = H.flags;
     H.flags = 0;
-    uint32_t c = crc32_buf(&H, hdr_bytes());
+    uint32_t c = crc32_buf(s_hdr, hdr_bytes());
     H.flags = saved;
     return c;
 }
 
-/* Gunluk bolgesinin LBA'si; 0 = gunluk kullanilamaz (dogrudan yazim). */
 static uint32_t journal_lba(void) {
     uint64_t secs = storage_sector_count();
     uint64_t base = (uint64_t)s_base + AFS_RESERVE_SEC + AFS_JOURNAL_SEC;
@@ -274,51 +321,42 @@ static void journal_clear(uint32_t jl) {
     storage_flush();
 }
 
-/* Header'i diske yazar; once gunluge niyet yazip commit eder (crash-safe). */
 static int hdr_commit(void) {
     H.version = AFS_VERSION;
     hdr_sync_size();
+    uint32_t prev_crc = H.flags;
     H.flags = 0;
     H.flags = hdr_crc();
 
     uint32_t jl = journal_lba();
     if (jl == 0 || H.data_next > jl || H.hdr_sectors + 1u > AFS_JOURNAL_SEC) {
-        /* Gunluk yok ya da veriyle cakisir: dogrudan yaz (geriye uyumlu). */
         return hdr_save_at(s_base, H.hdr_sectors);
     }
 
-    /* H.flags az once eski header'in CRC'sini tasiryordu; eski deger kayit
-     * oncesinde okunup niyet kayduna konur, boylece replay hangi header'in
-     * uzerine yazildigini bilebilir. */
-    uint32_t prev_crc = H.flags;
-
-    /* 1) Yeni header'i gunluk yukune yaz. */
     if (hdr_save_at(jl + 1u, H.hdr_sectors) != 0) return -1;
     storage_flush();
-    /* 2) Gunluk kaydini commit et (state=1). Kayit tek sektore sigar; tampon
-     *    512 bayt olmali cunku storage katmani daima 1 tam sektor yazar. */
+
     uint8_t sec[512];
     afs_jrec_t *rec = (afs_jrec_t *)sec;
     for (int i = 0; i < 512; i++) sec[i] = 0;
     rec->magic = AFS_JOURNAL_MAGIC;
     rec->seq = ++s_jseq;
     rec->hdr_sectors = H.hdr_sectors;
-    rec->crc = crc32_buf(&H, hdr_bytes());
+    rec->crc = crc32_buf(s_hdr, hdr_bytes());
     rec->state = 1;
     rec->prev_crc = prev_crc;
     if (storage_write(jl, 1, sec) != 0) return -1;
     storage_flush();
-    /* 3) Header'a uygula. */
+
     if (hdr_save_at(s_base, H.hdr_sectors) != 0) return -1;
     storage_flush();
-    /* 4) Gunlugu temizle (state=0). */
+
     rec->state = 0;
     storage_write(jl, 1, sec);
     storage_flush();
     return 0;
 }
 
-/* Yarim kalan commit'i geri oynat (acilista cagrilir). */
 static void journal_replay(void) {
     uint32_t jl = journal_lba();
     if (jl == 0) return;
@@ -328,12 +366,7 @@ static void journal_replay(void) {
     if (rec->magic != AFS_JOURNAL_MAGIC || rec->state != 1 ||
         rec->hdr_sectors == 0 || rec->hdr_sectors > AFS_HDR_MAX_SEC) return;
 
-    /* Bayat kayit denetimi: kayit hangi header'in uzerine yazilmisti? Diskte
-     * henuz o header duruyorsa ("yarim commit") replay gerekir. Diskte baska,
-     * saglam bir header duruyorsa bu kayit onceki oturumdan kalmistir ve
-     * uygulanmaz; eskiden yalniz CRC'ye bakildigi icin eski bir gunluk kaydi
-     * guncel tablonun ustune yazilabiliyordu. */
-    uint32_t cur_hdr[9];
+    uint32_t cur_hdr[128];
     if (storage_read(s_base, 1, cur_hdr) != 0) return;
     if (cur_hdr[0] == AFS_MAGIC && cur_hdr[8] != rec->prev_crc) {
         journal_clear(jl);
@@ -343,26 +376,438 @@ static void journal_replay(void) {
     if (hdr_load_at(jl + 1u, rec->hdr_sectors) != 0) return;
     if (H.magic != AFS_MAGIC || (H.version != AFS_VERSION && H.version != 5u) ||
         H.max_files < 32u || H.max_files > AFS_MAX_FILES_HARD) { journal_clear(jl); return; }
-    if (crc32_buf(&H, hdr_bytes()) != rec->crc) { journal_clear(jl); return; }
+    if (crc32_buf(s_hdr, hdr_bytes()) != rec->crc) { journal_clear(jl); return; }
     hdr_save_at(s_base, rec->hdr_sectors);
     storage_flush();
     journal_clear(jl);
 }
 
+/* ---- Bos-alan (free-extent) yonetimi + birlestirme + kuyruk kirpma ---- */
+
+static uint32_t afs_data_start(void) {
+    return s_base + H.hdr_sectors;
+}
+
+static uint32_t file_secs(const afs_file_t *f) {
+    uint32_t s = (f->size + 511u) / 512u;
+    return s ? s : 1u;
+}
+
+static void free_ext_trim_tail(void) {
+    uint32_t ds = afs_data_start();
+    while (s_free_count > 0) {
+        afs_ext_t *last = &s_free_exts[s_free_count - 1u];
+        if ((uint64_t)last->start + last->count >= (uint64_t)H.data_next) {
+            if (last->start < H.data_next)
+                H.data_next = last->start;
+            s_free_count--;
+        } else {
+            break;
+        }
+    }
+    if (H.data_next < ds) H.data_next = ds;
+}
+
+static void free_ext_remove_at(uint32_t idx) {
+    for (uint32_t k = idx; k + 1u < s_free_count; k++)
+        s_free_exts[k] = s_free_exts[k + 1u];
+    if (s_free_count > 0) s_free_count--;
+}
+
+static void free_ext_add(uint32_t start, uint32_t count) {
+    if (!s_free_exts || count == 0) return;
+    uint32_t ds = afs_data_start();
+    if (start < ds) {
+        if ((uint64_t)start + count <= ds) return;
+        count -= (ds - start);
+        start = ds;
+    }
+    if (start >= H.data_next) return;
+    if ((uint64_t)start + count > H.data_next)
+        count = H.data_next - start;
+    if (count == 0) return;
+
+    uint32_t pos = 0;
+    while (pos < s_free_count && s_free_exts[pos].start < start) pos++;
+
+    /* Cift-serbest birakma korumasi */
+    if (pos > 0) {
+        uint32_t prev_end = s_free_exts[pos - 1u].start + s_free_exts[pos - 1u].count;
+        if (prev_end > start) {
+            uint32_t ov = prev_end - start;
+            if (ov >= count) return;
+            start += ov;
+            count -= ov;
+        }
+    }
+    if (pos < s_free_count && start + count > s_free_exts[pos].start) {
+        if (start >= s_free_exts[pos].start) return;
+        count = s_free_exts[pos].start - start;
+        if (count == 0) return;
+    }
+
+    int merge_prev = (pos > 0 &&
+                      s_free_exts[pos - 1u].start + s_free_exts[pos - 1u].count == start);
+    int merge_next = (pos < s_free_count &&
+                      start + count == s_free_exts[pos].start);
+
+    if (merge_prev && merge_next) {
+        s_free_exts[pos - 1u].count += count + s_free_exts[pos].count;
+        free_ext_remove_at(pos);
+    } else if (merge_prev) {
+        s_free_exts[pos - 1u].count += count;
+    } else if (merge_next) {
+        s_free_exts[pos].start = start;
+        s_free_exts[pos].count += count;
+    } else if (s_free_count < AFS_MAX_FREE_EXTENTS) {
+        for (uint32_t k = s_free_count; k > pos; k--)
+            s_free_exts[k] = s_free_exts[k - 1u];
+        s_free_exts[pos].start = start;
+        s_free_exts[pos].count = count;
+        s_free_count++;
+    }
+
+    s_reclaimed_secs += count;
+    free_ext_trim_tail();
+}
+
+static uint32_t free_ext_alloc(uint32_t secs) {
+    if (secs == 0) secs = 1;
+    int best = -1;
+    uint32_t best_cnt = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < s_free_count; i++) {
+        uint32_t c = s_free_exts[i].count;
+        if (c >= secs && c < best_cnt) {
+            best = (int)i;
+            best_cnt = c;
+            if (c == secs) break;
+        }
+    }
+    if (best >= 0) {
+        uint32_t idx = (uint32_t)best;
+        uint32_t lba = s_free_exts[idx].start;
+        if (s_free_exts[idx].count == secs) {
+            free_ext_remove_at(idx);
+        } else {
+            s_free_exts[idx].start += secs;
+            s_free_exts[idx].count -= secs;
+        }
+        s_reused_secs += secs;
+        return lba;
+    }
+
+    if ((uint64_t)H.data_next + secs > H.capacity) return 0;
+    uint32_t lba = H.data_next;
+    H.data_next += secs;
+    return lba;
+}
+
+static int free_ext_consume_at(uint32_t start, uint32_t secs) {
+    for (uint32_t i = 0; i < s_free_count; i++) {
+        if (s_free_exts[i].start == start && s_free_exts[i].count >= secs) {
+            if (s_free_exts[i].count == secs) free_ext_remove_at(i);
+            else {
+                s_free_exts[i].start += secs;
+                s_free_exts[i].count -= secs;
+            }
+            s_reused_secs += secs;
+            return 1;
+        }
+        if (s_free_exts[i].start > start) break;
+    }
+    return 0;
+}
+
+static void free_ext_rebuild(void) {
+    if (!s_free_exts || !s_tmp_exts || !s_hdr) return;
+    s_free_count = 0;
+    uint32_t ds = afs_data_start();
+    uint32_t dn = H.data_next;
+    if (dn <= ds) return;
+
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < H.max_files; i++) {
+        if (!H.files[i].used) continue;
+        uint32_t lba = H.files[i].lba;
+        if (lba < ds || lba >= dn) continue;
+        uint32_t secs = file_secs(&H.files[i]);
+        if ((uint64_t)lba + secs > dn) secs = dn - lba;
+        if (secs == 0) continue;
+        s_tmp_exts[n].start = lba;
+        s_tmp_exts[n].count = secs;
+        n++;
+    }
+
+    /* Shell sort (n <= 1024) */
+    for (uint32_t gap = n / 2u; gap > 0; gap /= 2u) {
+        for (uint32_t i = gap; i < n; i++) {
+            afs_ext_t tmp = s_tmp_exts[i];
+            uint32_t j = i;
+            while (j >= gap && s_tmp_exts[j - gap].start > tmp.start) {
+                s_tmp_exts[j] = s_tmp_exts[j - gap];
+                j -= gap;
+            }
+            s_tmp_exts[j] = tmp;
+        }
+    }
+
+    uint32_t cursor = ds;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t st = s_tmp_exts[i].start;
+        uint32_t end = st + s_tmp_exts[i].count;
+        if (st > cursor && s_free_count < AFS_MAX_FREE_EXTENTS) {
+            s_free_exts[s_free_count].start = cursor;
+            s_free_exts[s_free_count].count = st - cursor;
+            s_free_count++;
+        }
+        if (end > cursor) cursor = end;
+    }
+    if (cursor < dn && s_free_count < AFS_MAX_FREE_EXTENTS) {
+        s_free_exts[s_free_count].start = cursor;
+        s_free_exts[s_free_count].count = dn - cursor;
+        s_free_count++;
+    }
+}
+
+void afs_free_extent_stats(afs_reclaim_stats_t *out) {
+    if (!out) return;
+    if (!mounted) afs_mount();
+    uint32_t fsecs = 0;
+    for (uint32_t i = 0; i < s_free_count; i++)
+        fsecs += s_free_exts[i].count;
+    out->free_extents = s_free_count;
+    out->free_sectors = fsecs;
+    out->reclaimed_sectors = s_reclaimed_secs;
+    out->reused_sectors = s_reused_secs;
+    out->data_next = s_hdr ? H.data_next : 0;
+    out->data_start = s_hdr ? afs_data_start() : 0;
+    out->capacity = s_hdr ? (uint32_t)H.capacity : 0;
+}
+
+/* ---- Uzun yol tablosu (@LN_<hex8>_<tail> <-> .afs_longnames) ---- */
+
+static int is_ln_token(const char *s) {
+    return s && s[0] == '@' && s[1] == 'L' && s[2] == 'N' && s[3] == '_';
+}
+
+static int find_raw_idx(const char *name) {
+    for (uint32_t i = 0; i < H.max_files; i++)
+        if (H.files[i].used && seq(H.files[i].name, name)) return (int)i;
+    return -1;
+}
+
+static int ln_find_by_token(const char *tok) {
+    for (uint32_t i = 0; i < s_ln_count; i++)
+        if (seq(s_ln_tab[i].token, tok)) return (int)i;
+    return -1;
+}
+
+static int ln_find_by_path(const char *path) {
+    for (uint32_t i = 0; i < s_ln_count; i++)
+        if (seq(s_ln_tab[i].path, path)) return (int)i;
+    return -1;
+}
+
+static const char *entry_full_name(uint32_t idx) {
+    const char *nm = H.files[idx].name;
+    if (is_ln_token(nm)) {
+        int k = ln_find_by_token(nm);
+        if (k >= 0) return s_ln_tab[k].path;
+    }
+    return nm;
+}
+
+static void ln_make_token(const char *full_path, int is_dir, char out[AFS_NAME_MAX]) {
+    static const char hex[] = "0123456789ABCDEF";
+    int plen = slen(full_path);
+    int core_len = (is_dir && plen > 0 && full_path[plen - 1] == '/') ? (plen - 1) : plen;
+    uint32_t base_h = crc32_buf(full_path, (uint32_t)plen);
+
+    /* "@LN_" (4) + 8 hex (8) + "_" (1) = 13 byte onek */
+    int max_tail = (int)AFS_NAME_MAX - 1 - 13 - (is_dir ? 1 : 0);
+    int tlen = core_len < max_tail ? core_len : max_tail;
+    int tstart = core_len - tlen;
+
+    for (uint32_t salt = 0; ; salt++) {
+        uint32_t h = base_h ^ (salt * 0x9E3779B9u);
+        int o = 0;
+        out[o++] = '@'; out[o++] = 'L'; out[o++] = 'N'; out[o++] = '_';
+        for (int b = 28; b >= 0; b -= 4)
+            out[o++] = hex[(h >> b) & 0xFu];
+        out[o++] = '_';
+        for (int k = 0; k < tlen; k++)
+            out[o++] = full_path[tstart + k];
+        if (is_dir) out[o++] = '/';
+        out[o] = '\0';
+
+        if (ln_find_by_token(out) < 0 && find_raw_idx(out) < 0)
+            return;
+    }
+}
+
+static void ln_remove_token(const char *tok) {
+    int k = ln_find_by_token(tok);
+    if (k < 0) return;
+    for (uint32_t i = (uint32_t)k; i + 1u < s_ln_count; i++)
+        s_ln_tab[i] = s_ln_tab[i + 1u];
+    if (s_ln_count > 0) s_ln_count--;
+}
+
+static int ln_add_entry(const char *tok, const char *path) {
+    if (s_ln_count >= AFS_MAX_LONGNAMES) return -1;
+    cpy_cap(s_ln_tab[s_ln_count].token, tok, (int)AFS_NAME_MAX);
+    cpy_cap(s_ln_tab[s_ln_count].path, path, (int)AFS_PATH_MAX);
+    s_ln_count++;
+    return 0;
+}
+
+static void ln_load(void) {
+    s_ln_count = 0;
+    int idx = find_raw_idx(AFS_LONGNAME_FILE);
+    if (idx < 0) return;
+    uint32_t sz = H.files[idx].size;
+    if (sz < (uint32_t)sizeof(afs_ln_hdr_t)) return;
+    uint32_t secs = file_secs(&H.files[idx]);
+    uint8_t *buf = (uint8_t *)kmalloc((size_t)secs * 512u);
+    if (!buf) return;
+    if (storage_read(H.files[idx].lba, secs, buf) != 0) {
+        kfree(buf);
+        return;
+    }
+    const afs_ln_hdr_t *lh = (const afs_ln_hdr_t *)buf;
+    if (lh->magic != AFS_LN_MAGIC || lh->version != AFS_LN_VERSION ||
+        lh->count > AFS_MAX_LONGNAMES) {
+        kfree(buf);
+        return;
+    }
+    uint32_t need = (uint32_t)sizeof(afs_ln_hdr_t) +
+                    lh->count * (uint32_t)sizeof(afs_ln_disk_ent_t);
+    if (sz < need) {
+        kfree(buf);
+        return;
+    }
+    const afs_ln_disk_ent_t *ents = (const afs_ln_disk_ent_t *)(buf + sizeof(afs_ln_hdr_t));
+    if (lh->count > 0 &&
+        crc32_buf(ents, lh->count * (uint32_t)sizeof(afs_ln_disk_ent_t)) != lh->crc32) {
+        kfree(buf);
+        return;
+    }
+    for (uint32_t i = 0; i < lh->count; i++) {
+        cpy_cap(s_ln_tab[s_ln_count].token, ents[i].token, (int)AFS_NAME_MAX);
+        cpy_cap(s_ln_tab[s_ln_count].path, ents[i].path, (int)AFS_PATH_MAX);
+        s_ln_count++;
+    }
+    kfree(buf);
+}
+
+/* .afs_longnames icerigini diske yazar; hdr_commit() cagiran tarafindan yapilir. */
+static int ln_persist_no_commit(void) {
+    int idx = find_raw_idx(AFS_LONGNAME_FILE);
+    if (s_ln_count == 0) {
+        if (idx >= 0) {
+            uint32_t secs = file_secs(&H.files[idx]);
+            free_ext_add(H.files[idx].lba, secs);
+            H.files[idx].used = 0;
+            H.files[idx].size = 0;
+            H.files[idx].lba = 0;
+            H.files[idx].name[0] = 0;
+            s_hgen[idx]++;
+            if (H.count) H.count--;
+        }
+        return 0;
+    }
+
+    uint32_t data_sz = (uint32_t)sizeof(afs_ln_hdr_t) +
+                       s_ln_count * (uint32_t)sizeof(afs_ln_disk_ent_t);
+    uint32_t secs = (data_sz + 511u) / 512u;
+    if (secs == 0) secs = 1;
+    uint8_t *buf = (uint8_t *)kmalloc((size_t)secs * 512u);
+    if (!buf) return -1;
+    zero_mem(buf, (size_t)secs * 512u);
+
+    afs_ln_hdr_t *lh = (afs_ln_hdr_t *)buf;
+    afs_ln_disk_ent_t *ents = (afs_ln_disk_ent_t *)(buf + sizeof(afs_ln_hdr_t));
+    for (uint32_t i = 0; i < s_ln_count; i++) {
+        cpy_cap(ents[i].token, s_ln_tab[i].token, (int)AFS_NAME_MAX);
+        cpy_cap(ents[i].path, s_ln_tab[i].path, (int)AFS_PATH_MAX);
+        ents[i].path_len = (uint16_t)slen(s_ln_tab[i].path);
+    }
+    lh->magic = AFS_LN_MAGIC;
+    lh->version = AFS_LN_VERSION;
+    lh->count = s_ln_count;
+    lh->crc32 = crc32_buf(ents, s_ln_count * (uint32_t)sizeof(afs_ln_disk_ent_t));
+
+    if (idx < 0) {
+        /* Kullanici indekslerini kirletmemek icin en yuksek bos yuvayi sec. */
+        for (int k = (int)H.max_files - 1; k >= 0; k--) {
+            if (!H.files[k].used) { idx = k; break; }
+        }
+        if (idx < 0) { kfree(buf); return -1; }
+        uint32_t lba = free_ext_alloc(secs);
+        if (lba == 0) { kfree(buf); return -1; }
+        if (storage_write(lba, secs, buf) != 0) {
+            free_ext_add(lba, secs);
+            kfree(buf);
+            return -1;
+        }
+        H.files[idx].used = 1;
+        H.files[idx].lba = lba;
+        H.files[idx].size = data_sz;
+        H.files[idx].uid = 0;
+        H.files[idx].gid = 0;
+        H.files[idx].mode = 0600u;
+        H.files[idx].pad = 0;
+        cpy(H.files[idx].name, AFS_LONGNAME_FILE);
+        H.count++;
+        s_hgen[idx]++;
+    } else {
+        uint32_t old_lba = H.files[idx].lba;
+        uint32_t old_secs = file_secs(&H.files[idx]);
+        if (secs <= old_secs) {
+            if (storage_write(old_lba, secs, buf) != 0) { kfree(buf); return -1; }
+            if (secs < old_secs)
+                free_ext_add(old_lba + secs, old_secs - secs);
+            H.files[idx].size = data_sz;
+        } else {
+            uint32_t new_lba = free_ext_alloc(secs);
+            if (new_lba == 0) { kfree(buf); return -1; }
+            if (storage_write(new_lba, secs, buf) != 0) {
+                free_ext_add(new_lba, secs);
+                kfree(buf);
+                return -1;
+            }
+            free_ext_add(old_lba, old_secs);
+            H.files[idx].lba = new_lba;
+            H.files[idx].size = data_sz;
+        }
+    }
+    kfree(buf);
+    return 0;
+}
+
+/* ---- Format & Mount ---- */
+
 void afs_format(void) {
-    s_base = AFS_BASE_LBA;     /* yeni kurulum: moduller B bolgesiyle celismesin */
+    if (afs_ensure_mem() != 0) return;
+    s_base = AFS_BASE_LBA;
     H.magic = AFS_MAGIC;
     H.version = AFS_VERSION;
     H.capacity = compute_capacity();
-    /* Gunluk icin sonda AFS_JOURNAL_SEC sektor birak (sifreli bolgede kalir). */
     if (H.capacity > s_base + AFS_JOURNAL_SEC)
         H.capacity -= AFS_JOURNAL_SEC;
     H.flags = 0;
 
     uint32_t room = (uint32_t)(H.capacity - s_base);
-    uint32_t mf = room / AFS_CLUSTER_SEC;
-    if (mf < 32u) mf = 32u;
-    if (mf > AFS_MAX_FILES_HARD) mf = AFS_MAX_FILES_HARD;
+    uint32_t mf;
+    if (room >= 32768u) {
+        mf = AFS_MAX_FILES_HARD;
+    } else if (room >= 4096u) {
+        mf = room / 32u;
+        if (mf < 128u) mf = 128u;
+        if (mf > AFS_MAX_FILES_HARD) mf = AFS_MAX_FILES_HARD;
+    } else {
+        mf = 32u;
+    }
     H.max_files = mf;
     H.count = 0;
     hdr_sync_size();
@@ -377,22 +822,23 @@ void afs_format(void) {
         H.files[i].mode = 0;
         H.files[i].pad = 0;
         H.files[i].name[0] = 0;
+        s_hgen[i]++;
     }
+    s_free_count = 0;
+    s_reclaimed_secs = 0;
+    s_reused_secs = 0;
+    s_ln_count = 0;
     mounted = 1;
     hdr_commit();
     afs_ensure_tree();
 }
 
 void afs_mount(void) {
-    uint32_t first[128];   /* 512-byte ilk sektor */
+    uint32_t first[128];
     if (s_locked) return;
+    if (afs_ensure_mem() != 0) return;
     if (storage_sector_count() == 0) storage_init();
 
-    /* Taban secimi (0.8.2): once yeni duzen (65536, surum 6 sartiyla),
-     * sonra legacy (20000; surum 5 veya 6). Eski kullanicinin dosyalari
-     * legacy tabanda kalir; yeni kurulumlar ve yeniden formatlamalar
-     * surum 6 kaydini 65536'ya yazar, boylece eski-basak yeni-kayit
-     * ayrimi surum alaniyla netlesir. */
     int have = 0;
     if (storage_read(AFS_BASE_LBA, 1, first) == 0 &&
         first[0] == AFS_MAGIC && first[1] == AFS_VERSION) {
@@ -407,7 +853,7 @@ void afs_mount(void) {
         afs_format();
         return;
     }
-    journal_replay();      /* yarim kalan commit'i tamamla */
+    journal_replay();
     if (storage_read(s_base, 1, first) != 0 ||
         first[0] != AFS_MAGIC ||
         (first[1] != AFS_VERSION && first[1] != 5u)) {
@@ -435,10 +881,6 @@ void afs_mount(void) {
         afs_format();
         return;
     }
-    /* Header CRC dogrula. flags==0 kacagi eskiden buradaydi; surum zaten
-     * AFS_VERSION'a esit olmak zorunda oldugu icin o haliyle yalniz
-     * bozuk/sifirlanmis tabloyu sessizce kabul ediyordu (gercek CRC'si 0
-     * cikan disk zaten 0==0 ile gecer). */
     if (hdr_crc() != H.flags) {
         if (afs_disk_is_encrypted()) return;
         afs_format();
@@ -446,100 +888,132 @@ void afs_mount(void) {
     }
     mounted = 1;
     if (H.version != AFS_VERSION) {
-        /* Eski (surum 5) disk: icerik ayni, yalniz surum alanini ve taban
-         * kaydini yeni duzene tas. Veri bloklarinin yeri degismez. */
         H.version = AFS_VERSION;
         hdr_commit();
     }
+    s_reclaimed_secs = 0;
+    s_reused_secs = 0;
+    ln_load();
+    free_ext_rebuild();
     afs_ensure_tree();
+    serial_printf("[afs] mount ver=%u max_files=%u count=%u free_extents=%u reclaimed=%u data_next=%u\n",
+                  H.version, H.max_files, H.count, s_free_count, s_reclaimed_secs, H.data_next);
 }
 
-int afs_count(void) { if (!mounted) afs_mount(); return (int)H.count; }
+int afs_count(void) { if (!mounted) afs_mount(); return s_hdr ? (int)H.count : 0; }
 
-uint32_t afs_data_next(void) { if (!mounted) afs_mount(); return H.data_next; }
+uint32_t afs_data_next(void) { if (!mounted) afs_mount(); return s_hdr ? H.data_next : 0; }
 
 static int find_idx(const char *name) {
-    for (uint32_t i = 0; i < H.max_files; i++)
-        if (H.files[i].used && seq(H.files[i].name, name)) return (int)i;
-    return -1;
+    if (!name || !name[0] || !s_hdr) return -1;
+    int nlen = slen(name);
+    if (nlen < (int)AFS_NAME_MAX) {
+        for (uint32_t i = 0; i < H.max_files; i++)
+            if (H.files[i].used && seq(H.files[i].name, name)) return (int)i;
+        return -1;
+    }
+    if (nlen >= (int)AFS_PATH_MAX) return -1;
+    int k = ln_find_by_path(name);
+    if (k < 0) return -1;
+    return find_raw_idx(s_ln_tab[k].token);
 }
 
-/* Bir yolun icerisindeki dizinin girdi indeksini doner ("C:/a/b.txt" ->
- * "C:/a/"). Duzenli tek parca adlarda ya da depoda karsiligi olmayan
- * dizinlerde -1 doner; cagiran taraf o zaman eski denetime duser. */
 static int parent_idx(const char *path) {
-    char p[AFS_NAME_MAX];
+    char p[AFS_PATH_MAX];
     int n = 0;
     for (; path && path[n] && n < (int)sizeof(p) - 2; n++) p[n] = path[n];
     p[n] = 0;
-    if (n > 0 && p[n - 1] == '/') p[--n] = 0;      /* klasor adindaki egik cizgi */
+    if (n > 0 && p[n - 1] == '/') p[--n] = 0;
     int cut = -1;
     for (int i = 0; i < n; i++) if (p[i] == '/') cut = i;
     if (cut < 0) return -1;
-    p[cut + 1] = 0;                                 /* "C:/a" -> "C:/" */
+    p[cut + 1] = 0;
     return find_idx(p);
 }
 
-/* ---- Tutamak yasam dongusu ----
- * Tutamak eskiden ham slot numarasiydi; dosya silinip slot yeniden
- * kullanilinca eldeki eski tutamak yeni dosyaya baglanir, kimse fark
- * etmezdi. Slot basina bellek-ici bir nesil sayaci tutulur; tutamaga
- * nesil de kodlanir, silme/olusturma sayaci yukseltir. Bayat tutamak
- * bir daha hicbir dosyaya baglanmaz. */
-static uint32_t s_hgen[AFS_MAX_FILES_HARD];
-
 static void *hnd_enc(int slot) {
-    /* duzen: slot << 14 | (nesil & 0x1FFF) << 1 | 1
-     * Eskiden slot 13. biteden basliyordu; nesil alani 13 bit oldugu icin
-     * (gen << 1) bit 13'e kadar tasiyor, slot ile kavisiyordu. Tek
-     * numarali slotlarda slot'un bit 0'i neslin 12. bitine sizar, tutamak
-     * daha kendi nesnesiyle bile eslesmezdi (tumuyle calismazdi). */
     return (void *)(uintptr_t)(((uint32_t)slot << 14) | ((s_hgen[slot] & 0x1FFFu) << 1) | 1u);
 }
 
 static int hnd_dec(void *h) {
+    if (!mounted || !s_hdr || !s_hgen) return -1;
     uint32_t v = (uint32_t)(uintptr_t)h;
     if ((v & 1u) == 0) return -1;
     int slot = (int)(v >> 14);
     if (slot < 0 || slot >= (int)H.max_files || !H.files[slot].used) return -1;
-    if (((v >> 1) & 0x1FFFu) != (s_hgen[slot] & 0x1FFFu)) return -1;  /* bayat tutamak */
+    if (((v >> 1) & 0x1FFFu) != (s_hgen[slot] & 0x1FFFu)) return -1;
     return slot;
 }
 
 void *afs_create_handle(const char *name) {
     if (!mounted) afs_mount();
-    /* Ad sigmiyorsa kirpik adla dosya uretme; iki farkli dosya ayni
-     * kirpiga dusup birbirinin uzerine yazilabiliyordu. */
-    if (!name || !name[0] || slen(name) >= (int)AFS_NAME_MAX) return 0;
-    /* Tek gecis: ad arayisi ve bos slot bulma ayni taramada yapilir.
-     * Eskiden tablo (512 girise kadar) iki kez dolasiyordu. */
+    if (!s_hdr || !name || !name[0]) return 0;
+    int nlen = slen(name);
+    if (nlen >= (int)AFS_PATH_MAX) return 0;
+    if (seq(name, AFS_LONGNAME_FILE)) return 0;
+
+    int existing = find_idx(name);
+    if (existing >= 0) return hnd_enc(existing);
+
     int first_free = -1;
+    int free_slots = 0;
     for (uint32_t i = 0; i < H.max_files; i++) {
         if (!H.files[i].used) {
             if (first_free < 0) first_free = (int)i;
-            continue;
+            free_slots++;
         }
-        if (seq(H.files[i].name, name))
-            return hnd_enc((int)i);
     }
     if (first_free < 0) return 0;
-    /* Yeni girdiyi icerisindeki dizinin W biti belirler (dosyanin kendi
-     * modu olusumu engelleyemez); depo duz duzenliyse denetim dusulur. */
-    uint32_t i = (uint32_t)first_free;
+
+    int is_long = (nlen >= (int)AFS_NAME_MAX);
+    int need_ln_slot = (is_long && find_raw_idx(AFS_LONGNAME_FILE) < 0);
+    if (free_slots < (need_ln_slot ? 2 : 1)) return 0;
+
     int pi = parent_idx(name);
     if (pi >= 0 &&
         !perm_ok(H.files[pi].uid, H.files[pi].gid, H.files[pi].mode, AFS_W)) return 0;
-    /* data_next create aninda ilerletilir: onceki haliyle lba ayrilip
-     * data_next yalniz ilk yazmayla yukseliyordu; hic yazilmadan ikinci bir
-     * dosya olusturulursa iki dosya ayni LBA'yi paylasip verileri ust uste
-     * biniyordu. Bos dosya en az bir sektor rezerve eder. */
-    if ((uint64_t)H.data_next + 1u > H.capacity) return 0;
+
+    uint32_t i = (uint32_t)first_free;
+    int isd = afs_is_dir(name);
+    char disk_name[AFS_NAME_MAX];
+
+    if (is_long) {
+        ln_make_token(name, isd, disk_name);
+        if (ln_add_entry(disk_name, name) != 0) return 0;
+        if (ln_persist_no_commit() != 0) {
+            ln_remove_token(disk_name);
+            return 0;
+        }
+        /* ln_persist_no_commit en yuksek yuvayi secmis olsa da emin ol */
+        if (H.files[i].used) {
+            int alt = -1;
+            for (uint32_t k = 0; k < H.max_files; k++)
+                if (!H.files[k].used) { alt = (int)k; break; }
+            if (alt < 0) {
+                ln_remove_token(disk_name);
+                ln_persist_no_commit();
+                return 0;
+            }
+            i = (uint32_t)alt;
+        }
+    } else {
+        cpy(disk_name, name);
+    }
+
+    uint32_t lba = free_ext_alloc(1u);
+    if (lba == 0) {
+        if (is_long) {
+            ln_remove_token(disk_name);
+            ln_persist_no_commit();
+        }
+        return 0;
+    }
+
     H.files[i].used = 1;
     H.files[i].size = 0;
-    H.files[i].lba = H.data_next;
-    H.data_next++;
-    set_owner(&H.files[i], afs_is_dir(name));
-    cpy(H.files[i].name, name);
+    H.files[i].lba = lba;
+    set_owner(&H.files[i], isd);
+    cpy(H.files[i].name, disk_name);
     H.count++;
     s_hgen[i]++;
     hdr_commit();
@@ -552,45 +1026,38 @@ void *afs_find_handle(const char *name) {
     return i < 0 ? 0 : hnd_enc(i);
 }
 
-/* ---- Yeniden adlandirma / tasima (0.6) ----
- * Yerel rename: veri kopyalanmaz, yalnizca ad degisir. Klasorlerde alt
- * ogelerin on eki de guncellenir. Donus: 0 = tamam, -1 = kaynak yok/izin,
- * -2 = hedef zaten var, -3 = ad cok uzun. */
 int afs_rename(const char *from, const char *to) {
     if (!mounted) afs_mount();
-    if (!from || !to || !from[0] || !to[0]) return -1;
+    if (!s_hdr || !from || !to || !from[0] || !to[0]) return -1;
+    if (slen(from) >= (int)AFS_PATH_MAX || slen(to) >= (int)AFS_PATH_MAX) return -3;
 
-    /* Klasorler depoda "/" ile biten adla durur: "C:/a" -> "C:/a/".
-     * Cagiran taraf sonda egik cizgi vermeyebilir; iki bicimi de dene (0.6). */
-    char fbuf[AFS_NAME_MAX], tbuf[AFS_NAME_MAX];
-    /* Uzunluk denetimi kopyalamadan once: cpy kirpiyordu, sonra yapilan
-     * "uzun mu?" kontrolu kirpik degere baktigi icin hic tutulmuyordu. */
-    if (slen(from) >= (int)AFS_NAME_MAX || slen(to) >= (int)AFS_NAME_MAX) return -3;
-    cpy(fbuf, from);
-    cpy(tbuf, to);
+    char fbuf[AFS_PATH_MAX], tbuf[AFS_PATH_MAX];
+    cpy_cap(fbuf, from, (int)sizeof(fbuf));
+    cpy_cap(tbuf, to, (int)sizeof(tbuf));
+
     int fi = find_idx(fbuf);
     if (fi < 0) {
         int l = slen(fbuf);
-        if (l > 0 && l < (int)AFS_NAME_MAX - 1 && fbuf[l - 1] != '/') {
+        if (l > 0 && l < (int)AFS_PATH_MAX - 1 && fbuf[l - 1] != '/') {
             fbuf[l] = '/'; fbuf[l + 1] = '\0';
             fi = find_idx(fbuf);
         }
     }
     if (fi < 0) return -1;
+    if (seq(H.files[fi].name, AFS_LONGNAME_FILE)) return -1;
 
-    int isd = afs_is_dir(fbuf);
+    const char *orig_full = entry_full_name((uint32_t)fi);
+    int isd = afs_is_dir(orig_full);
     if (isd) {
         int l = slen(tbuf);
-        if (l > 0 && l < (int)AFS_NAME_MAX - 1 && tbuf[l - 1] != '/') {
+        if (l > 0 && l < (int)AFS_PATH_MAX - 1 && tbuf[l - 1] != '/') {
             tbuf[l] = '/'; tbuf[l + 1] = '\0';
         }
+        if (l == (int)AFS_PATH_MAX - 1 && tbuf[l - 1] != '/') return -3;
     }
-    if (slen(tbuf) >= (int)AFS_NAME_MAX) return -3;
+    if (slen(tbuf) >= (int)AFS_PATH_MAX) return -3;
     if (find_idx(tbuf) >= 0) return -2;
 
-    /* Tasima her iki yonde de dizin izni ister: kaynak dizinden cikarma
-     * ve hedef dizine girme. Kaynak dizin girdisi yoksa eski dosya
-     * deneti gecerli kalir. */
     int spi = parent_idx(fbuf);
     if (spi >= 0) {
         if (!perm_ok(H.files[spi].uid, H.files[spi].gid, H.files[spi].mode, AFS_W))
@@ -603,101 +1070,174 @@ int afs_rename(const char *from, const char *to) {
         !perm_ok(H.files[tpi].uid, H.files[tpi].gid, H.files[tpi].mode, AFS_W))
         return -1;
 
+    int ln_dirty = 0;
     int fl = slen(fbuf);
-    cpy(H.files[fi].name, tbuf);
 
-    /* Klasor: "eski/..." -> "yeni/..." */
+    /* Hedef uzun adsa once .afs_longnames yuvasinin da yeterli oldugunu kontrol et */
+    if (slen(tbuf) >= (int)AFS_NAME_MAX) {
+        char ntok[AFS_NAME_MAX];
+        ln_make_token(tbuf, isd, ntok);
+        if (is_ln_token(H.files[fi].name)) {
+            int k = ln_find_by_token(H.files[fi].name);
+            if (k >= 0) {
+                cpy_cap(s_ln_tab[k].token, ntok, (int)AFS_NAME_MAX);
+                cpy_cap(s_ln_tab[k].path, tbuf, (int)AFS_PATH_MAX);
+            } else if (ln_add_entry(ntok, tbuf) != 0) {
+                return -1;
+            }
+        } else {
+            if (ln_add_entry(ntok, tbuf) != 0) return -1;
+        }
+        cpy(H.files[fi].name, ntok);
+        ln_dirty = 1;
+    } else {
+        if (is_ln_token(H.files[fi].name)) {
+            ln_remove_token(H.files[fi].name);
+            ln_dirty = 1;
+        }
+        cpy(H.files[fi].name, tbuf);
+    }
+
     if (isd) {
         for (uint32_t j = 0; j < H.max_files; j++) {
             if ((int)j == fi || !H.files[j].used) continue;
-            if (!prefix_of(H.files[j].name, fbuf)) continue;
-            char nb[AFS_NAME_MAX];
-            /* Yeni ad tasacaksa bu alt ogreyi oldugu birakmak, yarim
-             * (kirpik) adla kaydetmekten guvenlidir. */
-            if (slen(tbuf) + slen(H.files[j].name) - fl >= (int)AFS_NAME_MAX) continue;
+            if (seq(H.files[j].name, AFS_LONGNAME_FILE)) continue;
+            const char *cf = entry_full_name(j);
+            if (!prefix_of(cf, fbuf)) continue;
+            int cl = slen(cf);
+            if (slen(tbuf) + (cl - fl) >= (int)AFS_PATH_MAX) continue;
+            char nb[AFS_PATH_MAX];
             int n = 0;
-            for (int k = 0; tbuf[k] && n < (int)AFS_NAME_MAX - 1; k++) nb[n++] = tbuf[k];
-            for (int k = fl; H.files[j].name[k] && n < (int)AFS_NAME_MAX - 1; k++)
-                nb[n++] = H.files[j].name[k];
+            for (int k = 0; tbuf[k] && n < (int)AFS_PATH_MAX - 1; k++) nb[n++] = tbuf[k];
+            for (int k = fl; cf[k] && n < (int)AFS_PATH_MAX - 1; k++) nb[n++] = cf[k];
             nb[n] = '\0';
-            cpy(H.files[j].name, nb);
+
+            int child_dir = afs_is_dir(nb);
+            if (slen(nb) >= (int)AFS_NAME_MAX) {
+                char ctok[AFS_NAME_MAX];
+                ln_make_token(nb, child_dir, ctok);
+                if (is_ln_token(H.files[j].name)) {
+                    int k = ln_find_by_token(H.files[j].name);
+                    if (k >= 0) {
+                        cpy_cap(s_ln_tab[k].token, ctok, (int)AFS_NAME_MAX);
+                        cpy_cap(s_ln_tab[k].path, nb, (int)AFS_PATH_MAX);
+                    } else if (ln_add_entry(ctok, nb) != 0) {
+                        continue;
+                    }
+                } else if (ln_add_entry(ctok, nb) != 0) {
+                    continue;
+                }
+                cpy(H.files[j].name, ctok);
+                ln_dirty = 1;
+            } else {
+                if (is_ln_token(H.files[j].name)) {
+                    ln_remove_token(H.files[j].name);
+                    ln_dirty = 1;
+                }
+                cpy(H.files[j].name, nb);
+            }
         }
     }
+
+    if (ln_dirty) (void)ln_persist_no_commit();
     hdr_commit();
     return 0;
-}
-
-/* Tahsisli bolgelerin sonu: data_next tek basina yaniltici olabilir,
- * cunku buyuk bir yazim data_next'i komsumun LBA'sinin Otesine tasimisti
- * (eski hatali davranis). Bu, bos bolgenin gercek baslangicini bulur. */
-static uint32_t afs_tail_lba(void) {
-    uint64_t end = H.data_next;
-    for (uint32_t j = 0; j < H.max_files; j++) {
-        if (!H.files[j].used) continue;
-        uint64_t s = ((uint64_t)H.files[j].size + 511u) / 512u;
-        if (s == 0) s = 1;                       /* bos dosya 1 sektor */
-        if ((uint64_t)H.files[j].lba + s > end) end = (uint64_t)H.files[j].lba + s;
-    }
-    if (end > H.capacity) end = H.capacity;
-    return (uint32_t)end;
 }
 
 int afs_write_handle(void *h, const void *data, uint32_t size) {
     int i = hnd_dec(h);
     if (i < 0) return -1;
     if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_W)) return -1;
-    uint64_t secs = ((uint64_t)size + 511) / 512;
-    if (secs == 0) secs = 1;
-    /* LBA ve kapasite 32 bitlik alanlarda duruyor (disk bicimi); 32 bitlik
-     * toplamada tasma olmasin, boyut siniri asilsin. */
-    if ((uint64_t)H.files[i].lba + secs > (uint64_t)H.capacity) return -1;
-    /* Yerinde yazim ancak sonraki komsumun LBA'si yeni araligin disinda
-     * kaliyorsa guvenli. Buyuyen paket eski hali uzerine yazildiginda
-     * komsum dosyanin ustune yazilip onu bozuyordu (ornegin yeni surum
-     * .wlf kurulumunda). Sigmiyorsa dosya bos bolgeye tasinar. */
-    uint32_t lba = H.files[i].lba;
-    int fit = 1;
-    for (uint32_t j = 0; j < H.max_files; j++) {
-        if (j == (uint32_t)i || !H.files[j].used) continue;
-        if ((uint64_t)H.files[j].lba > (uint64_t)lba &&
-            (uint64_t)H.files[j].lba < (uint64_t)lba + secs) { fit = 0; break; }
+
+    uint32_t old_lba = H.files[i].lba;
+    uint32_t old_secs = file_secs(&H.files[i]);
+    uint64_t secs64 = ((uint64_t)size + 511u) / 512u;
+    if (secs64 == 0) secs64 = 1;
+    if (secs64 > 0xFFFFFFFFull) return -1;
+    uint32_t new_secs = (uint32_t)secs64;
+
+    if (new_secs <= old_secs) {
+        if ((uint64_t)old_lba + new_secs > H.capacity) return -1;
+        if (storage_write(old_lba, new_secs, data) != 0) return -1;
+        H.files[i].size = size;
+        if (new_secs < old_secs)
+            free_ext_add(old_lba + new_secs, old_secs - new_secs);
+        hdr_commit();
+        return 0;
     }
-    if (!fit) {
-        lba = afs_tail_lba();
-        if ((uint64_t)lba + secs > (uint64_t)H.capacity) return -1;   /* disk dolu */
+
+    /* Buyuyen yazim: once yerinde genisleme mumkun mu kontrol et */
+    uint32_t extra = new_secs - old_secs;
+    uint32_t tail_lba = old_lba + old_secs;
+    if (tail_lba == H.data_next && (uint64_t)old_lba + new_secs <= H.capacity) {
+        if (storage_write(old_lba, new_secs, data) != 0) return -1;
+        H.files[i].size = size;
+        H.data_next = old_lba + new_secs;
+        hdr_commit();
+        return 0;
     }
-    if (storage_write(lba, (uint32_t)secs, data) != 0) return -1;
-    H.files[i].lba = lba;
+    if (free_ext_consume_at(tail_lba, extra)) {
+        if (storage_write(old_lba, new_secs, data) != 0) {
+            free_ext_add(tail_lba, extra);
+            return -1;
+        }
+        H.files[i].size = size;
+        hdr_commit();
+        return 0;
+    }
+
+    /* Bos-alan tablosundan veya data_next'ten yeni yer ayir ve eski alani iade et */
+    uint32_t new_lba = free_ext_alloc(new_secs);
+    if (new_lba == 0) return -1;
+    if (storage_write(new_lba, new_secs, data) != 0) {
+        free_ext_add(new_lba, new_secs);
+        return -1;
+    }
+    H.files[i].lba = new_lba;
     H.files[i].size = size;
-    if ((uint64_t)lba + secs > (uint64_t)H.data_next)
-        H.data_next = (uint32_t)(lba + secs);
+    free_ext_add(old_lba, old_secs);
     hdr_commit();
     return 0;
 }
 
-/* Ofsetli okuma. Eskiden yalniz bastan okunabiliyordu; SYS_READ'i dongu
- * icinde cagiran ring3 uygulamasi EOF hic goremiyordu. Ayrica toplu
- * okuma, cagiranin tamponundan sektore yuvarlanmis boyuta kadar
- * yazabiliyordu (ornegin 1000 baytlik tampona 1024 bayt); burada kopya
- * her seferinde yalniz istenen araliga yapilir. */
 uint32_t afs_read_at(void *h, void *buf, uint32_t size, uint32_t off) {
     int i = hnd_dec(h);
     if (i < 0) return 0;
     if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_R)) return 0;
-    if (off >= H.files[i].size) return 0;          /* dosya sonu */
+    if (off >= H.files[i].size) return 0;
     uint32_t n = H.files[i].size - off;
     if (size < n) n = size;
+    if (n == 0) return 0;
 
-    static uint8_t s_sec[512];
+    uint8_t sec[512];
     uint8_t *p = (uint8_t *)buf;
     uint32_t pos = off, done = 0;
-    while (done < n) {
-        uint32_t inoff = pos % 512u;
+
+    uint32_t inoff = pos % 512u;
+    if (inoff != 0) {
         uint32_t chunk = 512u - inoff;
-        if (chunk > n - done) chunk = n - done;
-        if (storage_read(H.files[i].lba + pos / 512u, 1, s_sec) != 0) break;
-        for (uint32_t k = 0; k < chunk; k++) p[done + k] = s_sec[inoff + k];
-        done += chunk; pos += chunk;
+        if (chunk > n) chunk = n;
+        if (storage_read(H.files[i].lba + pos / 512u, 1, sec) != 0) return 0;
+        for (uint32_t k = 0; k < chunk; k++) p[done + k] = sec[inoff + k];
+        done += chunk;
+        pos += chunk;
+    }
+
+    while (n - done >= 512u) {
+        uint32_t secs = (n - done) / 512u;
+        if (secs > 512u) secs = 512u;
+        if (storage_read(H.files[i].lba + pos / 512u, secs, p + done) != 0) break;
+        uint32_t bytes = secs * 512u;
+        done += bytes;
+        pos += bytes;
+    }
+
+    if (done < n && (pos % 512u) == 0) {
+        uint32_t rem = n - done;
+        if (storage_read(H.files[i].lba + pos / 512u, 1, sec) == 0) {
+            for (uint32_t k = 0; k < rem; k++) p[done + k] = sec[k];
+            done += rem;
+        }
     }
     return done;
 }
@@ -706,13 +1246,22 @@ uint32_t afs_read_handle(void *h, void *buf, uint32_t size) {
     return afs_read_at(h, buf, size, 0);
 }
 
+int afs_write_path(const char *path, const void *data, uint32_t size) {
+    if (!mounted) afs_mount();
+    if (!path || !path[0]) return -1;
+    void *h = afs_find_handle(path);
+    if (!h) h = afs_create_handle(path);
+    if (!h) return -1;
+    return afs_write_handle(h, data, size);
+}
+
 int afs_remove(const char *name) {
     if (!mounted) afs_mount();
+    if (!s_hdr || !name || !name[0]) return -1;
+    if (seq(name, AFS_LONGNAME_FILE)) return -1;
     int i = find_idx(name);
     if (i < 0) return -1;
-    /* Silmeye icerisindeki dizin karar verir (POSIX): modu kilitli bir
-     * dosya yazilabilir bir dizinden silinebilir, yazilamayan dizindeki
-     * dosya silinemez. Dizin girdisi yoksa eski dosya deneti gecerli. */
+
     int pi = parent_idx(name);
     if (pi >= 0) {
         if (!perm_ok(H.files[pi].uid, H.files[pi].gid, H.files[pi].mode, AFS_W))
@@ -720,24 +1269,40 @@ int afs_remove(const char *name) {
     } else if (!perm_ok(H.files[i].uid, H.files[i].gid, H.files[i].mode, AFS_W)) {
         return -1;
     }
+
+    uint32_t old_lba = H.files[i].lba;
+    uint32_t old_secs = file_secs(&H.files[i]);
+    int was_long = is_ln_token(H.files[i].name);
+    char old_tok[AFS_NAME_MAX];
+    if (was_long) cpy(old_tok, H.files[i].name);
+
     H.files[i].used = 0;
     H.files[i].size = 0;
+    H.files[i].lba = 0;
     H.files[i].name[0] = 0;
-    s_hgen[i]++;                     /* bu slota ait eski tutamaklar olur */
+    s_hgen[i]++;
     if (H.count) H.count--;
+
+    free_ext_add(old_lba, old_secs);
+    if (was_long) {
+        ln_remove_token(old_tok);
+        (void)ln_persist_no_commit();
+    }
     hdr_commit();
     return 0;
 }
 
 const char *afs_name(int idx) {
     if (!mounted) afs_mount();
-    if (idx < 0 || idx >= (int)H.max_files || !H.files[idx].used) return 0;
-    return H.files[idx].name;
+    if (!s_hdr || idx < 0 || idx >= (int)H.max_files || !H.files[idx].used) return 0;
+    if (seq(H.files[idx].name, AFS_LONGNAME_FILE)) return 0;
+    return entry_full_name((uint32_t)idx);
 }
 
 uint32_t afs_size(int idx) {
     if (!mounted) afs_mount();
-    if (idx < 0 || idx >= (int)H.max_files || !H.files[idx].used) return 0;
+    if (!s_hdr || idx < 0 || idx >= (int)H.max_files || !H.files[idx].used) return 0;
+    if (seq(H.files[idx].name, AFS_LONGNAME_FILE)) return 0;
     return H.files[idx].size;
 }
 
@@ -805,8 +1370,6 @@ int afs_perm_selftest(void) {
     afs_set_subject(1000, 1000);
     chown_deny = (afs_chown("afs_perm_test", 1000, 1000) != 0);
 
-    /* Ebeveyn dizin denetimi: yazilamayan dizine 1000 kullanici dosya
-     * koyamaz; W bitini acinca koyabilmelidir. */
     afs_set_subject(0, 0);
     afs_remove("C:/afs_pd/alt.txt");
     afs_remove("C:/afs_pd/");
@@ -827,11 +1390,9 @@ int afs_perm_selftest(void) {
     return (owner_ok && other_deny && chown_deny && mk_deny && mk_ok) ? 0 : -4;
 }
 
-/* ---- Denetim (fsck) ----
- * Header icindeki dosya tablosunu dogrular: isim, LBA/sinir tutarliligi,
- * count ve data_next. fix=1 ise tutarsiz girdileri budar ve duzeltir. */
 int afs_fsck(int fix, int *problems, int *fixed) {
     if (!mounted) afs_mount();
+    if (!s_hdr) return -1;
     int prob = 0, fixd = 0;
     uint32_t data_start = s_base + H.hdr_sectors;
     uint32_t max_end = data_start;
@@ -843,13 +1404,20 @@ int afs_fsck(int fix, int *problems, int *fixed) {
         used++;
         int isd = afs_is_dir(f->name);
         int bad = 0;
-        if (f->name[0] == 0) bad = 1;
-        else if (!isd) {
-            uint32_t secs = (f->size + 511u) / 512u;
-            if (secs == 0) secs = 1;
+        if (f->name[0] == 0) {
+            bad = 1;
+        } else if (is_ln_token(f->name) && ln_find_by_token(f->name) < 0) {
+            bad = 1;
+        } else if (!isd) {
+            uint32_t secs = file_secs(f);
             if (f->lba < data_start || f->lba >= H.capacity ||
                 secs > H.capacity - f->lba) bad = 1;
             else if (f->lba + secs > max_end) max_end = f->lba + secs;
+        } else {
+            uint32_t secs = file_secs(f);
+            if (f->lba >= data_start && f->lba < H.capacity &&
+                secs <= H.capacity - f->lba && f->lba + secs > max_end)
+                max_end = f->lba + secs;
         }
         if (bad) {
             prob++;
@@ -865,30 +1433,295 @@ int afs_fsck(int fix, int *problems, int *fixed) {
     }
     if (H.count != used) { prob++; if (fix) { H.count = used; fixd++; } }
     if (H.data_next < max_end) { prob++; if (fix) { H.data_next = max_end; fixd++; } }
-    if (H.data_next > H.capacity) { prob++; if (fix) { H.data_next = H.capacity; fixd++; } }
+    if (H.data_next > H.capacity) { prob++; if (fix) { H.data_next = (uint32_t)H.capacity; fixd++; } }
 
-    if (fix && prob) hdr_commit();
+    if (fix && prob) {
+        hdr_commit();
+        free_ext_rebuild();
+    }
     if (problems) *problems = prob;
     if (fixed) *fixed = fixd;
     return prob ? 1 : 0;
 }
 
-/* Journal + CRC + fsck self-testi. Gercek bir "yazma sirasinda reset"
- * senaryosunu taklit eder: gecerli bir journal kaydi yazip header'a
- * uygulamadan yeniden baglanir; replay'in girdiyi geri getirdigini dogrular. */
+/* ---- Free-extent, uzun yol ve yuksek kapasite oz-testleri ---- */
+
+int afs_reclaim_selftest(void) {
+    if (!mounted) afs_mount();
+    if (!s_hdr) return -1;
+    afs_set_subject(0, 0);
+
+    afs_reclaim_stats_t st0;
+    afs_free_extent_stats(&st0);
+    uint32_t base_dn = H.data_next;
+
+    /* 1) Sira disi silme + birlestirme (coalesce) + kuyruk kirpma (tail trim) */
+    uint8_t blk4k[4096];
+    for (int i = 0; i < 4096; i++) blk4k[i] = (uint8_t)(i ^ 0x5Au);
+
+    void *ha = afs_create_handle("C:/recl_a.bin");
+    if (!ha || afs_write_handle(ha, blk4k, sizeof(blk4k)) != 0) { afs_remove("C:/recl_a.bin"); return -2; }
+    void *hb = afs_create_handle("C:/recl_b.bin");
+    if (!hb || afs_write_handle(hb, blk4k, sizeof(blk4k)) != 0) { afs_remove("C:/recl_a.bin"); afs_remove("C:/recl_b.bin"); return -2; }
+    void *hc = afs_create_handle("C:/recl_c.bin");
+    if (!hc || afs_write_handle(hc, blk4k, sizeof(blk4k)) != 0) { afs_remove("C:/recl_a.bin"); afs_remove("C:/recl_b.bin"); afs_remove("C:/recl_c.bin"); return -2; }
+    void *hd = afs_create_handle("C:/recl_d.bin");
+    if (!hd || afs_write_handle(hd, blk4k, sizeof(blk4k)) != 0) {
+        afs_remove("C:/recl_a.bin"); afs_remove("C:/recl_b.bin");
+        afs_remove("C:/recl_c.bin"); afs_remove("C:/recl_d.bin");
+        return -3;
+    }
+
+    /* A ve C sil -> 2 ayrik delik; B sil -> A+B+C tek delige birlesmeli */
+    uint32_t ext_before = s_free_count;
+    afs_remove("C:/recl_a.bin");
+    afs_remove("C:/recl_c.bin");
+    if (s_free_count != ext_before + 2u) {
+        afs_remove("C:/recl_b.bin"); afs_remove("C:/recl_d.bin");
+        return -4;
+    }
+    afs_remove("C:/recl_b.bin");
+    if (s_free_count != ext_before + 1u) {
+        afs_remove("C:/recl_d.bin");
+        return -5;
+    }
+
+    /* 12 KB dosya E olustur -> birlesen A+B+C deligini kullanmali (data_next artmaz) */
+    uint8_t blk12k[12288];
+    for (int i = 0; i < 12288; i++) blk12k[i] = (uint8_t)(i + 7);
+    uint32_t dn_before_e = H.data_next;
+    void *he = afs_create_handle("C:/recl_e.bin");
+    if (!he || afs_write_handle(he, blk12k, sizeof(blk12k)) != 0) {
+        afs_remove("C:/recl_d.bin"); afs_remove("C:/recl_e.bin");
+        return -6;
+    }
+    if (H.data_next != dn_before_e) {
+        afs_remove("C:/recl_d.bin"); afs_remove("C:/recl_e.bin");
+        return -7;
+    }
+
+    /* D ve E'yi sil -> kuyruk kirpma data_next'i baslangic degerine indirmeli */
+    afs_remove("C:/recl_d.bin");
+    afs_remove("C:/recl_e.bin");
+    if (H.data_next != base_dn) return -8;
+
+    /* 2) Uzerine yazma / kirpma geri kazanimi */
+    void *ht = afs_create_handle("C:/recl_trunc.bin");
+    if (!ht || afs_write_handle(ht, blk12k, sizeof(blk12k)) != 0) {
+        afs_remove("C:/recl_trunc.bin");
+        return -9;
+    }
+    uint32_t dn_12k = H.data_next;
+    if (afs_write_handle(ht, blk4k, sizeof(blk4k)) != 0) {
+        afs_remove("C:/recl_trunc.bin");
+        return -10;
+    }
+    if (H.data_next >= dn_12k) {
+        afs_remove("C:/recl_trunc.bin");
+        return -11;
+    }
+    afs_remove("C:/recl_trunc.bin");
+    if (H.data_next != base_dn) return -12;
+
+    /* 3) 20x 2 MB olustur + yaz + sil dongusu (sifir sizinti dogrulamasi) */
+    const uint32_t big_sz = 2u * 1024u * 1024u;
+    uint32_t big_secs = big_sz / 512u;
+    if ((uint64_t)H.data_next + big_secs + 64u <= H.capacity) {
+        uint8_t *big = (uint8_t *)kmalloc(big_sz);
+        if (!big) return -13;
+        for (uint32_t k = 0; k < big_sz; k += 512u) {
+            big[k] = (uint8_t)(k >> 9);
+            big[k + 511u] = (uint8_t)~(k >> 9);
+        }
+        for (int iter = 0; iter < 20; iter++) {
+            void *hf = afs_create_handle("C:/recl_2mb.bin");
+            if (!hf || afs_write_handle(hf, big, big_sz) != 0) {
+                afs_remove("C:/recl_2mb.bin");
+                kfree(big);
+                return -14;
+            }
+            if (afs_remove("C:/recl_2mb.bin") != 0) {
+                kfree(big);
+                return -15;
+            }
+            if (H.data_next != base_dn) {
+                kfree(big);
+                return -16;
+            }
+        }
+        kfree(big);
+    }
+
+    afs_reclaim_stats_t st1;
+    afs_free_extent_stats(&st1);
+    serial_printf("[afs] free_extents=%u reclaimed=%u reused=%u data_next=%u->%u (20x2MB OK)\n",
+                  st1.free_extents, st1.reclaimed_sectors - st0.reclaimed_sectors,
+                  st1.reused_sectors - st0.reused_sectors, base_dn, H.data_next);
+    return 0;
+}
+
+static int afs_longpath_selftest(void) {
+    if (!mounted) afs_mount();
+    if (!s_hdr) return -1;
+    afs_set_subject(0, 0);
+    uint32_t base_dn = H.data_next;
+
+    const char *ldir =
+        "C:/long_directory_segment_alpha_0123456789_beta_0123456789_gamma_0123456789";
+    if (afs_ensure_dir(ldir) != 0) return -1;
+
+    char p200[AFS_PATH_MAX];
+    int o = 0;
+    for (int i = 0; ldir[i]; i++) p200[o++] = ldir[i];
+    p200[o++] = '/';
+    const char *sub = "nested_long_folder_level_two_0123456789_abcdef/";
+    for (int i = 0; sub[i]; i++) p200[o++] = sub[i];
+    p200[o] = '\0';
+    if (afs_ensure_dir(p200) != 0) { afs_remove(ldir); return -2; }
+
+    /* ~200B ve 255B uzun dosya yollari olustur */
+    char f200[AFS_PATH_MAX];
+    cpy_cap(f200, p200, (int)sizeof(f200));
+    int fo = slen(f200);
+    while (fo < 196) { f200[fo] = (char)('a' + (fo % 26)); fo++; }
+    f200[fo++] = '.'; f200[fo++] = 't'; f200[fo++] = 'x'; f200[fo++] = 't'; f200[fo] = '\0';
+
+    char f255[AFS_PATH_MAX];
+    cpy_cap(f255, p200, (int)sizeof(f255));
+    int f2 = slen(f255);
+    while (f2 < 251) { f255[f2] = (char)('A' + (f2 % 26)); f2++; }
+    f255[f2++] = '.'; f255[f2++] = 'b'; f255[f2++] = 'i'; f255[f2++] = 'n'; f255[f2] = '\0';
+
+    const char *msg200 = "longpath-200B-payload";
+    const char *msg255 = "longpath-255B-payload-ok";
+    if (afs_write_path(f200, msg200, (uint32_t)slen(msg200)) != 0 ||
+        afs_write_path(f255, msg255, (uint32_t)slen(msg255)) != 0) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -3;
+    }
+
+    char rbuf[64];
+    zero_mem(rbuf, sizeof(rbuf));
+    uint32_t rn1 = afs_read_path(f200, rbuf, sizeof(rbuf) - 1);
+    if (rn1 != (uint32_t)slen(msg200) || !seq(rbuf, msg200)) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -4;
+    }
+    zero_mem(rbuf, sizeof(rbuf));
+    uint32_t rn2 = afs_read_path(f255, rbuf, sizeof(rbuf) - 1);
+    if (rn2 != (uint32_t)slen(msg255) || !seq(rbuf, msg255)) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -5;
+    }
+
+    /* list_dir + .afs_longnames gizliligi kontrolu */
+    int dc = afs_count_dir(p200);
+    if (dc != 2) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -6;
+    }
+    char lname[AFS_PATH_MAX];
+    int isd = 0;
+    if (afs_list_dir(p200, 0, lname, sizeof(lname), &isd) != 0 || isd != 0) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -7;
+    }
+    /* Kok dizinde .afs_longnames gizli olmali */
+    int rc_root = afs_count_dir("C:/");
+    for (int k = 0; k < rc_root; k++) {
+        char rn[AFS_PATH_MAX];
+        if (afs_list_dir("C:/", k, rn, sizeof(rn), &isd) == 0 && seq(rn, AFS_LONGNAME_FILE)) {
+            afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+            return -8;
+        }
+    }
+
+    /* Rename testi (200B -> kisa yol -> sil) */
+    if (afs_rename(f200, "C:/renamed_short.txt") != 0) {
+        afs_remove(f200); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -9;
+    }
+    zero_mem(rbuf, sizeof(rbuf));
+    if (afs_read_path("C:/renamed_short.txt", rbuf, sizeof(rbuf) - 1) != (uint32_t)slen(msg200) ||
+        !seq(rbuf, msg200)) {
+        afs_remove("C:/renamed_short.txt"); afs_remove(f255); afs_remove(p200); afs_remove(ldir);
+        return -10;
+    }
+
+    afs_remove("C:/renamed_short.txt");
+    afs_remove(f255);
+    afs_remove(p200);
+    char ldir_slash[AFS_PATH_MAX];
+    cpy_cap(ldir_slash, ldir, (int)sizeof(ldir_slash));
+    int ls = slen(ldir_slash);
+    ldir_slash[ls++] = '/'; ldir_slash[ls] = '\0';
+    afs_remove(ldir_slash);
+
+    if (H.data_next != base_dn || s_ln_count != 0) return -11;
+    serial_printf("[afs] longpath selftest (200B + 255B + rename + hidden .afs_longnames): OK\n");
+    return 0;
+}
+
+static int afs_capacity_selftest(void) {
+    if (!mounted) afs_mount();
+    if (!s_hdr) return -1;
+    if (H.max_files < 1024u) {
+        serial_printf("[afs] capacity selftest: max_files=%u (<1024) SKIP\n", H.max_files);
+        return 0;
+    }
+    afs_set_subject(0, 0);
+    uint32_t base_dn = H.data_next;
+    uint32_t base_cnt = H.count;
+
+    const int target = 550;   /* eski 512 sinirinin ustu */
+    char path[64];
+    for (int i = 0; i < target; i++) {
+        /* "C:/cap_000" */
+        path[0] = 'C'; path[1] = ':'; path[2] = '/';
+        path[3] = 'c'; path[4] = 'a'; path[5] = 'p'; path[6] = '_';
+        path[7] = (char)('0' + (i / 100) % 10);
+        path[8] = (char)('0' + (i / 10) % 10);
+        path[9] = (char)('0' + (i % 10));
+        path[10] = '\0';
+        void *h = afs_create_handle(path);
+        if (!h) {
+            for (int k = 0; k < i; k++) {
+                path[7] = (char)('0' + (k / 100) % 10);
+                path[8] = (char)('0' + (k / 10) % 10);
+                path[9] = (char)('0' + (k % 10));
+                afs_remove(path);
+            }
+            return -2;
+        }
+    }
+    int ok_cnt = (H.count == base_cnt + (uint32_t)target);
+    for (int i = 0; i < target; i++) {
+        path[0] = 'C'; path[1] = ':'; path[2] = '/';
+        path[3] = 'c'; path[4] = 'a'; path[5] = 'p'; path[6] = '_';
+        path[7] = (char)('0' + (i / 100) % 10);
+        path[8] = (char)('0' + (i / 10) % 10);
+        path[9] = (char)('0' + (i % 10));
+        path[10] = '\0';
+        afs_remove(path);
+    }
+    if (!ok_cnt || H.count != base_cnt || H.data_next != base_dn) return -3;
+    serial_printf("[afs] capacity selftest: max_files=%u created=%d reclaimed data_next=%u -> OK\n",
+                  H.max_files, target, H.data_next);
+    return 0;
+}
+
 int afs_journal_selftest(void) {
     if (!mounted) afs_mount();
+    if (!s_hdr) return -1;
     uint32_t jl = journal_lba();
-    if (jl == 0) return -1;                 /* gunluk kullanilamaz */
+    if (jl == 0) return -1;
 
     afs_set_subject(0, 0);
     afs_remove("afs_jrn_test");
     afs_remove("afs_jrn_replay");
 
-    /* Test oncesi tutarli durumu sakla; sonda aynen geri yukle. */
     uint32_t saved_count = H.count;
     uint32_t saved_dn = H.data_next;
-    uint32_t saved_hdr_crc = H.flags;   /* diskteki header'in CRC'si */
 
     void *h = afs_create_handle("afs_jrn_test");
     if (!h) return -2;
@@ -897,14 +1730,12 @@ int afs_journal_selftest(void) {
         return -3;
     }
 
-    /* Normal commit sonrasi header CRC gecerli olmali. */
     if (H.flags == 0 || hdr_crc() != H.flags) {
         afs_remove("afs_jrn_test");
         return -4;
     }
+    uint32_t disk_crc = H.flags;
 
-    /* Ek girdi iceren bir header'i yalnizca gunluge yaz (header'a uygulama):
-     * commit ile header yazimi arasinda reset olmus gibi. */
     int idx = -1;
     for (uint32_t i = 0; i < H.max_files; i++)
         if (!H.files[i].used) { idx = (int)i; break; }
@@ -927,22 +1758,19 @@ int afs_journal_selftest(void) {
     rec->magic = AFS_JOURNAL_MAGIC;
     rec->seq = ++s_jseq;
     rec->hdr_sectors = H.hdr_sectors;
-    rec->crc = crc32_buf(&H, hdr_bytes());
+    rec->crc = crc32_buf(s_hdr, hdr_bytes());
     rec->state = 1;
-    rec->prev_crc = saved_hdr_crc;   /* diskte bu CRC'ye sahip header duruyor */
+    rec->prev_crc = disk_crc;
     if (hdr_save_at(jl + 1u, H.hdr_sectors) == 0) {
         storage_flush();
         if (storage_write(jl, 1, sec) == 0) {
             storage_flush();
-            /* Header'i diskten geri yukle: commit ile header yazimi arasinda
-             * reset olmus gibi (header eski, gunluk yeni). */
             hdr_load_at(s_base, H.hdr_sectors);
-            journal_replay();   /* yarim kalan commit'i tamamla */
+            journal_replay();
             ok = (find_idx("afs_jrn_replay") >= 0);
         }
     }
 
-    /* Temizlik: sahte girdi + test dosyasi silinir, data_next geri alinir. */
     for (uint32_t i = 0; i < H.max_files; i++) {
         afs_file_t *f = &H.files[i];
         if (!f->used) continue;
@@ -954,15 +1782,35 @@ int afs_journal_selftest(void) {
     H.count = saved_count;
     H.data_next = saved_dn;
     hdr_commit();
+    free_ext_rebuild();
 
     int clean = 0;
     { int p = 0, f = 0; clean = (afs_fsck(0, &p, &f) == 0 && p == 0); }
-    return (ok && clean) ? 0 : (ok ? -7 : -6);
+    if (!ok || !clean) return ok ? -7 : -6;
+
+#ifdef ARCTIAN_AFS_SELFTEST
+    {
+        int rr = afs_reclaim_selftest();
+        if (rr != 0) {
+            serial_printf("[afs] reclaim selftest HATA kod=%d\n", rr);
+            return -10;
+        }
+        int lr = afs_longpath_selftest();
+        if (lr != 0) {
+            serial_printf("[afs] longpath selftest HATA kod=%d\n", lr);
+            return -11;
+        }
+        int cr = afs_capacity_selftest();
+        if (cr != 0) {
+            serial_printf("[afs] capacity selftest HATA kod=%d\n", cr);
+            return -12;
+        }
+    }
+#endif
+    return 0;
 }
 
-/* ---- Klasor (yol tabanli) katman ----
- * Klasorler adi '/' ile biten sifir boyutlu girdilerdir. Adlar '/' ile
- * ayrilir. C: kullanici diski acilista otomatik olusturulur. */
+/* ---- Klasor (yol tabanli) katman ---- */
 
 int afs_is_dir(const char *name) {
     if (!name) return 0;
@@ -976,11 +1824,6 @@ static int pref_match(const char *nm, const char *p, int pl) {
 }
 
 static int direct_child(const char *rest) {
-    /* `rest`, klasor onekinden sonraki kisim: "apps/" veya "a.txt".
-     * Yalnizca dogrudan cocuk kabul edilir: 0 egik cizgi ya da
-     * yalnizca sonda tek egik cizgi (klasor). "etc/users" gibi alt
-     * yollar REDDEDILIR. (Eski surumde kosul hep dogruydu ve alt
-     * klasor dosyalari kok listesine siziyordu.) */
     if (!rest || !rest[0]) return 0;
     for (int i = 0; rest[i]; i++) {
         if (rest[i] == '/') return rest[i + 1] == 0;
@@ -997,21 +1840,37 @@ static int dir_prefix(const char *path, char *prefix, int cap) {
     return o;
 }
 
-static void path_join(char *dst, int cap, const char *dir, const char *name, int is_dir) {
+static int path_join(char *dst, int cap, const char *dir, const char *name, int is_dir) {
     int o = 0;
     if (dir && dir[0]) {
-        for (int i = 0; dir[i] && o < cap - 1; i++) dst[o++] = dir[i];
-        if (o > 0 && dst[o - 1] != '/' && o < cap - 1) dst[o++] = '/';
+        for (int i = 0; dir[i]; i++) {
+            if (o >= cap - 1) return -1;
+            dst[o++] = dir[i];
+        }
+        if (o > 0 && dst[o - 1] != '/') {
+            if (o >= cap - 1) return -1;
+            dst[o++] = '/';
+        }
     }
-    if (name) for (int i = 0; name[i] && o < cap - 1; i++) dst[o++] = name[i];
-    if (is_dir && o > 0 && dst[o - 1] != '/' && o < cap - 1) dst[o++] = '/';
+    if (name) {
+        for (int i = 0; name[i]; i++) {
+            if (o >= cap - 1) return -1;
+            dst[o++] = name[i];
+        }
+    }
+    if (is_dir && o > 0 && dst[o - 1] != '/') {
+        if (o >= cap - 1) return -1;
+        dst[o++] = '/';
+    }
     dst[o] = 0;
+    return 0;
 }
 
 int afs_ensure_dir(const char *path) {
     if (!path || !path[0]) return -1;
     if (!mounted) afs_mount();
-    char buf[AFS_NAME_MAX];
+    if (slen(path) >= (int)AFS_PATH_MAX - 1) return -1;
+    char buf[AFS_PATH_MAX];
     int n = 0;
     for (int i = 0; path[i] && n < (int)sizeof(buf) - 1; i++) buf[n++] = path[i];
     if (n > 0 && buf[n - 1] != '/' && n < (int)sizeof(buf) - 1) buf[n++] = '/';
@@ -1027,17 +1886,13 @@ int afs_ensure_dir(const char *path) {
     return 0;
 }
 
-/* Boot, kullaci agacini cekirdek baglaminda (uid 0) olusturur; agac
- * sonrasi uid/gid 1000'a devredilir cunku tum uygulama processleri o uid
- * ile kosar (proc.c). Cekirdegin kendi agaci (C:/etc, C:/firmware) root'ta
- * kalir. Yalnizca sahibi henuz belirlenmemis (0/0) girdiler tasinir. */
 static void migrate_user_ownership(void) {
     static const char *skip[] = { "C:/etc/", "C:/firmware/" };
     int changed = 0;
     for (uint32_t i = 0; i < H.max_files; i++) {
         if (!H.files[i].used) continue;
         if (H.files[i].uid != 0 || H.files[i].gid != 0) continue;
-        const char *nm = H.files[i].name;
+        const char *nm = entry_full_name(i);
         if (nm[0] == 0 || !prefix_of(nm, AFS_USER_ROOT)) continue;
         int skip_this = 0;
         for (unsigned k = 0; k < sizeof(skip) / sizeof(skip[0]); k++)
@@ -1062,16 +1917,16 @@ static void afs_ensure_tree(void) {
 
 void *afs_create_in(const char *path, const char *name, int is_dir) {
     if (!mounted) afs_mount();
-    char full[AFS_NAME_MAX];
-    path_join(full, sizeof(full), path, name, is_dir);
+    char full[AFS_PATH_MAX];
+    if (path_join(full, sizeof(full), path, name, is_dir) != 0) return 0;
     if (!full[0]) return 0;
     return afs_create_handle(full);
 }
 
 void *afs_find_in(const char *path, const char *name) {
     if (!mounted) afs_mount();
-    char full[AFS_NAME_MAX];
-    path_join(full, sizeof(full), path, name, 0);
+    char full[AFS_PATH_MAX];
+    if (path_join(full, sizeof(full), path, name, 0) != 0) return 0;
     if (!full[0]) return 0;
     return afs_find_handle(full);
 }
@@ -1084,13 +1939,15 @@ uint32_t afs_read_path(const char *path, void *buf, uint32_t size) {
 
 int afs_count_dir(const char *path) {
     if (!mounted) afs_mount();
-    char p[AFS_NAME_MAX];
+    if (!s_hdr) return 0;
+    char p[AFS_PATH_MAX];
     int pl = dir_prefix(path, p, sizeof(p));
     if (pl <= 0) return 0;
     int c = 0;
     for (uint32_t i = 0; i < H.max_files; i++) {
         if (!H.files[i].used) continue;
-        const char *nm = H.files[i].name;
+        if (seq(H.files[i].name, AFS_LONGNAME_FILE)) continue;
+        const char *nm = entry_full_name(i);
         if (!pref_match(nm, p, pl)) continue;
         if (direct_child(nm + pl)) c++;
     }
@@ -1099,13 +1956,15 @@ int afs_count_dir(const char *path) {
 
 int afs_list_dir(const char *path, int idx, char *out, int cap, int *is_dir) {
     if (!mounted) afs_mount();
-    char p[AFS_NAME_MAX];
+    if (!s_hdr) return -1;
+    char p[AFS_PATH_MAX];
     int pl = dir_prefix(path, p, sizeof(p));
     if (pl <= 0) return -1;
     int c = 0;
     for (uint32_t i = 0; i < H.max_files; i++) {
         if (!H.files[i].used) continue;
-        const char *nm = H.files[i].name;
+        if (seq(H.files[i].name, AFS_LONGNAME_FILE)) continue;
+        const char *nm = entry_full_name(i);
         if (!pref_match(nm, p, pl)) continue;
         const char *rest = nm + pl;
         if (!direct_child(rest)) continue;

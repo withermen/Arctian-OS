@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "dpi.h"
 
 /* ---- Terminal koprusu (0.7) ----------------------------------------
  * Terminal bir uygulamadir; kabuk ve rol=cli/runtime .wlf uygulamalari
@@ -239,11 +240,12 @@ void run_app_done(lv_timer_t *t) {
     lv_obj_remove_style_all(body);
     /* Gercek pencere boyutunu kullan: create_window kv'den hatirlanan
      * boyutu uygulamis olabilir (ww/wh'dan farkli). */
+    int tbh = dpi_px(36);
     if (is_fs)
         lv_obj_set_size(body, lv_obj_get_width(win), lv_obj_get_height(win));
     else
-        lv_obj_set_size(body, lv_obj_get_width(win) - 4, lv_obj_get_height(win) - 42);
-    lv_obj_set_pos(body, is_fs ? 0 : 2, is_fs ? 0 : 38);
+        lv_obj_set_size(body, lv_obj_get_width(win) - 4, lv_obj_get_height(win) - (tbh + 6));
+    lv_obj_set_pos(body, is_fs ? 0 : 2, is_fs ? 0 : (tbh + 2));
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
     /* Govde isareti: pencere boyut degisiminde kabuk bu nesneyi birlikte
      * boyutlandirir ve uygulamaya relayout olarak body'yi geri verir. */
@@ -391,6 +393,34 @@ void open_registry_app(int idx) {
                 lv_obj_remove_flag(r->win, LV_OBJ_FLAG_HIDDEN);
             lv_obj_move_foreground(r->win);
             return;
+        }
+        /* WPE WebKit tarayicisi diskte mevcutsa dogrudan onu baslat;
+         * yoksa asagidaki yerlesik tarayiciya guvenle dus. */
+        if (title_eq(a0->name, "browser")) {
+            for (int j = 0; j < MAX_WINS; j++) {
+                winrec_t *r = g_recs[j];
+                if (!r || !r->win || !title_eq(r->title, "Arctian Browser (WebKit 2.44)"))
+                    continue;
+                if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_HIDDEN))
+                    lv_obj_remove_flag(r->win, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_move_foreground(r->win);
+                return;
+            }
+            if (g_asi && g_asi->fs && g_asi->posix && g_asi->posix->spawn_elf_path) {
+                asi_stat_t wst;
+                int have_wk = 0;
+                if (g_asi->fs->stat && g_asi->fs->stat("C:/webkit.elf", &wst) == 0 &&
+                    !wst.is_dir && wst.size >= 64u) {
+                    have_wk = 1;
+                } else if (g_asi->fs->find && g_asi->fs->find(0, "C:/webkit.elf") != 0) {
+                    have_wk = 1;
+                }
+                if (have_wk) {
+                    char *wk_argv[2] = { "/webkit.elf", 0 };
+                    if (g_asi->posix->spawn_elf_path("/webkit.elf", wk_argv, 1) >= 0)
+                        return;
+                }
+            }
         }
     }
     if (idx >= arctian_app_count) {

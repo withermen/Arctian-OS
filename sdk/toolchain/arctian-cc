@@ -11,10 +11,32 @@ CC_BIN="${ARCTIAN_HOST_CC:-gcc}"
 SYS="$ARCTIAN_SYSROOT"
 GLIB="$ARCTIAN_GCC_LIB"
 
-COMPILE_ONLY=0
+PREV=""
 for a in "$@"; do
-    case "$a" in -c|-S|-E) COMPILE_ONLY=1 ;; esac
+    if [ "$a" = "-xc++" ] || { [ "$PREV" = "-x" ] && [ "$a" = "c++" ]; }; then
+        exec "$SCRIPT_DIR/arctian-cxx" "$@"
+    fi
+    PREV="$a"
 done
+
+COMPILE_ONLY=0
+HAS_OUT=0
+[ $# -eq 0 ] && COMPILE_ONLY=1
+for a in "$@"; do
+    case "$a" in
+        -c|-S|-E|-M|-MM|-fsyntax-only|--version|-dumpversion|-dumpfullversion|-dumpmachine|-dumpspecs|-print-*|--help)
+            COMPILE_ONLY=1
+            ;;
+        -o|-o*)
+            HAS_OUT=1
+            ;;
+    esac
+done
+if [ "$COMPILE_ONLY" -eq 0 ] && [ "$HAS_OUT" -eq 0 ]; then
+    for a in "$@"; do
+        case "$a" in -v) COMPILE_ONLY=1 ;; esac
+    done
+fi
 
 CFLAGS=(
     -m64 -fPIE -fno-stack-protector
@@ -29,6 +51,7 @@ if [ "$COMPILE_ONLY" -eq 1 ]; then
     exec "$CC_BIN" "${CFLAGS[@]}" "$@"
 else
     exec "$CC_BIN" "${CFLAGS[@]}" \
+        -fno-use-linker-plugin \
         -nostdlib -static-pie \
         -Wl,-z,noexecstack \
         "$SYS/usr/lib/rcrt1.o" \
@@ -36,7 +59,7 @@ else
         "$GLIB/crtbeginS.o" \
         "$@" \
         -L"$SYS/usr/lib" -L"$GLIB" \
-        -Wl,--start-group -lc -lgcc -lgcc_eh -Wl,--end-group \
+        -Wl,--start-group -latomic -lc -lgcc -lgcc_eh -Wl,--end-group \
         "$GLIB/crtendS.o" \
         "$SYS/usr/lib/crtn.o"
 fi

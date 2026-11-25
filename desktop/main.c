@@ -1,5 +1,6 @@
 #include "dsk.h"
 #include "dpi.h"
+#include "oom_ui.h"
 #include <stdint.h>
 #include <string.h>
 /* Secim araligini gormek icin LVGL ozel basligi (Ctrl+C/X/A): altyapi
@@ -173,10 +174,14 @@ static void switcher_show(void) {
 
     if (!s_sw_panel) {
         const int cw = 210, ch = 150, gap = 14, pad = 10;
+        int sw = (g_asi->gfx && g_asi->gfx->width) ? g_asi->gfx->width() : 1280;
+        int pw = n * (cw + gap) - gap + 2 * pad;
+        if (pw > sw - 40) pw = sw - 40;
         s_sw_panel = lv_obj_create(lv_screen_active());
         lv_obj_remove_style_all(s_sw_panel);
-        lv_obj_remove_flag(s_sw_panel, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(s_sw_panel, n * (cw + gap) - gap + 2 * pad, ch + 2 * pad);
+        if (n * (cw + gap) - gap + 2 * pad <= pw)
+            lv_obj_remove_flag(s_sw_panel, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(s_sw_panel, pw, ch + 2 * pad);
         lv_obj_align(s_sw_panel, LV_ALIGN_TOP_MID, 0, 96);
         lv_obj_set_style_bg_color(s_sw_panel, lv_color_hex(0x0E1015), 0);
         lv_obj_set_style_bg_opa(s_sw_panel, 216, 0);
@@ -404,6 +409,7 @@ void desktop_main(void *arg) {
     build_start_menu(scr);
     build_taskbar(scr);
     assistant_init();   /* asistan paneli — gorev cubugu dugmesiyle acilir */
+    oom_ui_init();      /* RAM Doldu! kurtarma ekrani hazirligi */
 
     qc_init();   /* hizli ayarlar + OSD + bildirim merkezi + perdeler */
     {
@@ -436,11 +442,24 @@ void desktop_main(void *arg) {
 #endif
 
     for (;;) {
-        if (g_asi->wlf && g_asi->wlf->broker_drain)
-            g_asi->wlf->broker_drain();
-        if (g_asi->posix && g_asi->posix->gfx_drain)
-            g_asi->posix->gfx_drain();
-        posix_win_poll_input();
+        /* Ctrl+Shift+M: "RAM Doldu!" kurtarma ekranini manuel tetikle */
+        if (g_asi->input && g_asi->input->ctrl_down && g_asi->input->shift_down &&
+            g_asi->input->ctrl_down() && g_asi->input->shift_down() &&
+            g_asi->input->key_avail && g_asi->input->key_pop &&
+            g_asi->input->key_avail()) {
+            int ch = g_asi->input->key_pop();
+            if (ch == 'M' || ch == 'm') {
+                oom_ui_enter(1);
+            }
+        }
+        if (!oom_ui_is_open()) {
+            if (g_asi->wlf && g_asi->wlf->broker_drain)
+                g_asi->wlf->broker_drain();
+            if (g_asi->posix && g_asi->posix->gfx_drain)
+                g_asi->posix->gfx_drain();
+            posix_win_poll_input();
+        }
+        oom_ui_tick();
         if (g_lock_request) {
             g_lock_request = 0;
             lock_hide_desktop(1);
@@ -471,14 +490,14 @@ void desktop_main(void *arg) {
         }
         /* Uygulamalar keypad grubunu sifirlarken masaustu gezinmesini
          * ayakta tut. */
-        if (g_desktop_group) {
+        if (g_desktop_group && !oom_ui_is_open()) {
             lv_indev_t *kp = lv_port_get_keypad();
             if (kp && !lv_indev_get_group(kp)) lv_indev_set_group(kp, g_desktop_group);
         }
         /* Odak yonetimi: one gelen pencere degistiginde klavye grubunu o
          * pencerenin grubuna gecir. Baslat menusu aciksa dokunma (arama
          * kutusu odakli kalir). */
-        {
+        if (!oom_ui_is_open()) {
             winrec_t *topw = winrec_top();
             static winrec_t *s_last_top;
             /* kayitlar geri donusumlu; kapanip yeni pencereye devredilmis
@@ -566,6 +585,7 @@ void desktop_main(void *arg) {
         if (s_res_pending >= 0) {
             int ri = s_res_pending;
             s_res_pending = -1;
+            oom_ui_reset_after_rebuild();
             shell_apply_resolution(ri);
             g_shell_dirty = 0;
         }
@@ -579,16 +599,22 @@ void desktop_main(void *arg) {
                 rebuild_desktop_ui();
             }
         }
-        /* Kirli bolge sunumu (performans): yalnizca LVGL'in cizdigi alan
-         * kopyalanir. Onceden her karede tam ekran blit yapiliyordu ve TCG'de
-         * kare suresi saniyelere cikiyordu (fare/tiklama kaybi). */
+        /* Kirli bolge sunumu + tam karede VSync atomik sayfa cevirme (flip) */
         {
             int dx, dy, dw, dh;
             if (lv_port_take_dirty(&dx, &dy, &dw, &dh) && dw > 0 && dh > 0) {
-                if (g_asi->gfx->present_rect)
+                int sw = (g_asi->gfx->width) ? g_asi->gfx->width() : 0;
+                int sh = (g_asi->gfx->height) ? g_asi->gfx->height() : 0;
+                int full = (sw > 0 && sh > 0 &&
+                            ((uint64_t)dw * (uint64_t)dh * 2ull >= (uint64_t)sw * (uint64_t)sh));
+                if (full || !g_asi->gfx->present_rect) {
+                    if (g_asi->gfx->flip)
+                        g_asi->gfx->flip();
+                    else
+                        g_asi->gfx->present();
+                } else {
                     g_asi->gfx->present_rect(dx, dy, dw, dh);
-                else
-                    g_asi->gfx->present();
+                }
             }
         }
         asm volatile("hlt");

@@ -43,8 +43,41 @@ static void serial_hexmem(const UINT8 *p, UINTN n) {
     }
 }
 
-static const CHAR16 *g_yol_ana = L"\\EFI\\ARCTIAN\\KERNEL.ELF";
-static const CHAR16 *g_yol_yedek = L"\\EFI\\BOOT\\KERNEL.ELF";
+static const CHAR16 *const g_kernel_paths[] = {
+    L"\\EFI\\ARCTIAN\\KERNEL.ELF",
+    L"\\EFI\\BOOT\\KERNEL.ELF",
+    L"\\ARCTIAN\\KERNEL.ELF",
+    L"\\KERNEL.ELF"
+};
+static const char *const g_kernel_path_names[] = {
+    "\\EFI\\ARCTIAN\\KERNEL.ELF",
+    "\\EFI\\BOOT\\KERNEL.ELF",
+    "\\ARCTIAN\\KERNEL.ELF",
+    "\\KERNEL.ELF"
+};
+
+static int try_open_on_sfs(EFI_SIMPLE_FILE_SYSTEM *sfs,
+                           EFI_FILE_PROTOCOL **out_root,
+                           EFI_FILE_PROTOCOL **out_file,
+                           int *out_idx) {
+    EFI_FILE_PROTOCOL *root = 0, *file = 0;
+    EFI_STATUS s = sfs->OpenVolume(sfs, &root);
+    if (s != EFI_SUCCESS || !root) return -1;
+
+    UINTN npaths = sizeof(g_kernel_paths) / sizeof(g_kernel_paths[0]);
+    for (UINTN i = 0; i < npaths; i++) {
+        s = root->Open(root, &file, (CHAR16 *)g_kernel_paths[i],
+                       EFI_FILE_MODE_READ, 0);
+        if (s == EFI_SUCCESS && file) {
+            *out_root = root;
+            *out_file = file;
+            *out_idx = (int)i;
+            return 0;
+        }
+    }
+    root->Close(root);
+    return -2;
+}
 
 void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
     EFI_SIMPLE_FILE_SYSTEM *sfs = 0;
@@ -56,6 +89,7 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
     EFI_FILE_INFO *fi;
     UINTN infosz, got, kalan, bu;
     UINT8 *buf;
+    int path_idx = -1;
 
     serial_puts("ARCTIAN-UEFI-FS: ");
     if (!st || !st->BootServices) {
@@ -64,52 +98,59 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
     }
     bs = st->BootServices;
 
-    /* Dogru yol: kendi yuklendigimiz aygitin (LoadedImage->DeviceHandle)
-     * SFS'i. Tek bolmeli imajda LocateProtocol ayni yeri gosterir; yine de
-     * Once DeviceHandle denenir, olmazsa LocateProtocol'a dusulur. */
+    /* 1) Once yuklendigimiz aygitin (LoadedImage->DeviceHandle) SFS hacmini dene. */
     s1 = bs->HandleProtocol(ImageHandle, (EFI_GUID *)&g_loadedimage_guid,
                             (void **)&li);
-    s2 = 0x8000000000000003ull;  /* EFI_UNSUPPORTED: adim atlandi isareti */
-    if (s1 == EFI_SUCCESS && li && li->DeviceHandle)
+    s2 = 0x8000000000000003ull;
+    if (s1 == EFI_SUCCESS && li && li->DeviceHandle) {
         s2 = bs->HandleProtocol(li->DeviceHandle, (EFI_GUID *)&g_sfs_guid,
                                 (void **)&sfs);
-    s = s2;
-    if (!sfs) {
-        s = bs->LocateProtocol((EFI_GUID *)&g_sfs_guid, 0, (void **)&sfs);
-        if (!sfs) {
-            serial_puts("hata SFS li=");
-            serial_hex(s1);
-            serial_puts(" dev=");
-            serial_hex(s2);
-            serial_puts(" loc=");
-            serial_hex(s);
-            serial_puts("\r\n");
-            return;
+        if (s2 == EFI_SUCCESS && sfs) {
+            if (try_open_on_sfs(sfs, &root, &file, &path_idx) != 0) {
+                root = 0;
+                file = 0;
+            }
         }
     }
 
-    s = sfs->OpenVolume(sfs, &root);
-    if (s != EFI_SUCCESS || !root) {
-        serial_puts("hata OpenVolume st=");
-        serial_hex(s);
+    /* 2) Bulunamazsa sistemdeki tum SimpleFileSystem hacimlerini tara. */
+    if (!file && bs->LocateHandleBuffer) {
+        typedef EFI_STATUS (EFIAPI *locate_hb_fn)(UINT32, EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
+        locate_hb_fn lhb = (locate_hb_fn)bs->LocateHandleBuffer;
+        EFI_HANDLE *handles = 0;
+        UINTN nhandles = 0;
+        if (lhb(2 /* ByProtocol */, (EFI_GUID *)&g_sfs_guid, 0, &nhandles, &handles) == EFI_SUCCESS && handles) {
+            for (UINTN h = 0; h < nhandles && !file; h++) {
+                EFI_SIMPLE_FILE_SYSTEM *hsfs = 0;
+                if (bs->HandleProtocol(handles[h], (EFI_GUID *)&g_sfs_guid, (void **)&hsfs) == EFI_SUCCESS && hsfs) {
+                    if (try_open_on_sfs(hsfs, &root, &file, &path_idx) != 0) {
+                        root = 0;
+                        file = 0;
+                    }
+                }
+            }
+            if (bs->FreePool) bs->FreePool(handles);
+        }
+    }
+
+    /* 3) Son care: LocateProtocol tekil SFS dene. */
+    if (!file && bs->LocateProtocol) {
+        EFI_SIMPLE_FILE_SYSTEM *lsfs = 0;
+        if (bs->LocateProtocol((EFI_GUID *)&g_sfs_guid, 0, (void **)&lsfs) == EFI_SUCCESS && lsfs) {
+            if (try_open_on_sfs(lsfs, &root, &file, &path_idx) != 0) {
+                root = 0;
+                file = 0;
+            }
+        }
+    }
+
+    if (!file) {
+        serial_puts("KERNEL.ELF bulunamadi (yedek: firmware'e donus) li=");
+        serial_hex(s1);
+        serial_puts(" dev=");
+        serial_hex(s2);
         serial_puts("\r\n");
         return;
-    }
-
-    /* Once birincil yol; olmazsa yedek yol. Ikisinin de status'u yazilir. */
-    s1 = root->Open(root, &file, (CHAR16 *)g_yol_ana, EFI_FILE_MODE_READ, 0);
-    if (s1 != EFI_SUCCESS) {
-        s2 = root->Open(root, &file, (CHAR16 *)g_yol_yedek,
-                        EFI_FILE_MODE_READ, 0);
-        if (s2 != EFI_SUCCESS) {
-            serial_puts("hata Open st1=");
-            serial_hex(s1);
-            serial_puts(" st2=");
-            serial_hex(s2);
-            serial_puts("\r\n");
-            root->Close(root);
-            return;
-        }
     }
 
     infosz = sizeof(infobuf);
@@ -170,7 +211,9 @@ void fs_load_kernel(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *st) {
         return;
     }
 
-    serial_puts("ok boyut=");
+    serial_puts("ok yol=");
+    serial_puts(path_idx >= 0 ? g_kernel_path_names[path_idx] : "?");
+    serial_puts(" boyut=");
     serial_dec(got);
     serial_puts(" ilk8=");
     serial_hexmem(buf, 8);

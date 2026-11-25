@@ -88,8 +88,9 @@ void update_app_indicators(void) {
 
 
 /* Kapali pencerelerin kaydlari burada geri donusturulur; her acilista yeni
- * bellek istenmez, kayip da birikmez. */
-static winrec_t *s_rec_free[MAX_WINS * 2];
+ * bellek istenmez, kayip da birikmez. Fazlasi serbest birakilir (.bss kucuk kalir). */
+#define REC_FREE_CAP 64
+static winrec_t *s_rec_free[REC_FREE_CAP];
 static int s_rec_free_n;
 
 void win_close_rec(winrec_t *r) {
@@ -102,14 +103,12 @@ void win_close_rec(winrec_t *r) {
     if (r->btn) lv_obj_delete(r->btn);
     if (r->win) lv_obj_delete(r->win);
     r->btn = 0; r->win = 0;
-    /* Slot temizlenir, kayit serbest listeye alinir. Eskiden ikisi de
-     * yapilmiyordu: tablo 8 kayitla dolup tasiyor, kapanan pencerenin
-     * kayiti kayboluyordu. Liste dolarsa kayit burada kalir (siztir) ama
-     * bozuk durum olusmaz. */
     for (int i = 0; i < MAX_WINS; i++)
         if (g_recs[i] == r) { g_recs[i] = 0; break; }
-    if (s_rec_free_n < (int)(sizeof(s_rec_free) / sizeof(s_rec_free[0])))
+    if (s_rec_free_n < REC_FREE_CAP)
         s_rec_free[s_rec_free_n++] = r;
+    else if (g_asi && g_asi->mem && g_asi->mem->free)
+        g_asi->mem->free(r);
     update_app_indicators();
 }
 
@@ -205,6 +204,56 @@ static void win_rel_defer(winrec_t *r) {
     lv_timer_set_repeat_count(s_rel_timer, 1);
 }
 
+static void win_layout_children(winrec_t *r) {
+    if (!r || !r->win) return;
+    int W = lv_obj_get_width(r->win);
+    int H = lv_obj_get_height(r->win);
+    /* tam ekran (USER_3): baslik cubugu yok; govde ekranin tamamini kaplar */
+    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) {
+        lv_obj_t *fsb = win_body_of(r->win);
+        if (fsb) {
+            lv_obj_set_pos(fsb, 0, 0);
+            lv_obj_set_size(fsb, W, H);
+        }
+        return;
+    }
+    int is_max = lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_1);
+    lv_obj_t *tb = lv_obj_get_child(r->win, 0);
+    int tbh = dpi_px(36);            /* baslik cubugu tabani 36 px, dpi olcekli */
+    if (tb) {
+        lv_obj_set_size(tb, is_max ? W : (W - 2), tbh);
+        lv_obj_align(tb, LV_ALIGN_TOP_MID, 0, is_max ? 0 : 1);
+    }
+    lv_obj_t *body = win_body_of(r->win);
+    if (body) {
+        if (is_max) {
+            lv_obj_set_pos(body, 0, tbh);
+            lv_obj_set_size(body, W, H - tbh);
+        } else {
+            lv_obj_set_pos(body, 2, tbh + 2);
+            lv_obj_set_size(body, W - 4, H - (tbh + 6));
+        }
+    }
+}
+
+static void win_apply_chrome(winrec_t *r, int max) {
+    if (!r || !r->win) return;
+    lv_obj_t *w = r->win;
+    lv_obj_t *tb = lv_obj_get_child(w, 0);
+    if (max) {
+        lv_obj_set_style_radius(w, 0, 0);
+        lv_obj_set_style_border_width(w, 0, 0);
+        if (tb) lv_obj_set_style_radius(tb, 0, 0);
+    } else {
+        int def_r = kv_get_int("roundwin", 1) ? 10 : 0;
+        int wr = r->max_saved_r >= 0 ? r->max_saved_r : def_r;
+        int tbr = r->max_saved_tb_r >= 0 ? r->max_saved_tb_r : def_r;
+        lv_obj_set_style_radius(w, wr, 0);
+        lv_obj_set_style_border_width(w, 1, 0);
+        if (tb) lv_obj_set_style_radius(tb, tbr, 0);
+    }
+}
+
 /* pencere boyutu degince: baslik cubugu genislesin + icerik yeniden aksin.
  * launch.c'nin olusturdugu govde (USER2 isaretli) pencereyle birlikte
  * boyutlandirilir; uygulamalar icerigi govdeye cizdigi icin relayout da
@@ -212,20 +261,7 @@ static void win_rel_defer(winrec_t *r) {
 static void win_size_cb(lv_event_t *e) {
     winrec_t *r = (winrec_t *)lv_event_get_user_data(e);
     if (!r || !r->win) return;
-    int W = lv_obj_get_width(r->win);
-    int H = lv_obj_get_height(r->win);
-    /* tam ekran (USER_3): baslik cubugu yok; govde ekranin tamamini kaplar */
-    if (lv_obj_has_flag(r->win, LV_OBJ_FLAG_USER_3)) {
-        lv_obj_t *fsb = win_body_of(r->win);
-        if (fsb) lv_obj_set_size(fsb, W, H);
-        if (r->relayout) win_rel_defer(r);
-        return;
-    }
-    lv_obj_t *tb = lv_obj_get_child(r->win, 0);
-    int tbh = dpi_px(36);            /* baslik cubugu tabani 36 px, dpi olcekli */
-    if (tb) lv_obj_set_size(tb, W - 2, tbh);
-    lv_obj_t *body = win_body_of(r->win);
-    if (body) lv_obj_set_size(body, W - 4, H - (tbh + 6));
+    win_layout_children(r);
     if (r->relayout) win_rel_defer(r);
 }
 
@@ -436,6 +472,8 @@ enum { SNAP_LEFT = 1, SNAP_RIGHT = 2, SNAP_MAX = 3 };
  * olcekli). Cok kucuk ekranda tam yukseklige donulur. */
 static int snap_bottom(void) {
     int sh = g_asi->gfx->height();
+    if (g_taskbar && lv_obj_has_flag(g_taskbar, LV_OBJ_FLAG_HIDDEN) && win_fs_active())
+        return sh;
     int bottom = sh - (TB_BH + TB_Y_OFF);
     if (bottom < dpi_px(200)) bottom = sh;
     return bottom;
@@ -477,23 +515,33 @@ static void snap_move_to(lv_obj_t *w, int x, int y, int ww, int hh) {
     snap_anim_prop(w, snap_anim_h, lv_obj_get_height(w), hh);
 }
 
-/* Maksimize: mevcut geometriyi hatirla, kenar bosluklari dpi olcekli. */
+/* Maksimize: mevcut geometriyi ve kose/kenarlik bicimini hatirla; ekrani sifir
+ * boslukla (sol/sag/ust=0, alt=dock ust kenari) doldur. */
 static void win_apply_max(winrec_t *r) {
     lv_obj_t *w = r->win;
-    r->max_saved_w = lv_obj_get_width(w);
-    r->max_saved_h = lv_obj_get_height(w);
-    r->max_saved_x = lv_obj_get_x(w);
-    r->max_saved_y = lv_obj_get_y(w);
+    if (!lv_obj_has_flag(w, LV_OBJ_FLAG_USER_1)) {
+        lv_obj_update_layout(w);
+        r->max_saved_w = lv_obj_get_width(w);
+        r->max_saved_h = lv_obj_get_height(w);
+        r->max_saved_x = lv_obj_get_x(w);
+        r->max_saved_y = lv_obj_get_y(w);
+        r->max_saved_r = lv_obj_get_style_radius(w, 0);
+        lv_obj_t *tb = lv_obj_get_child(w, 0);
+        r->max_saved_tb_r = tb ? lv_obj_get_style_radius(tb, 0) : r->max_saved_r;
+    }
     lv_obj_add_flag(w, LV_OBJ_FLAG_USER_1);
-    snap_move_to(w, dpi_px(20), dpi_px(20),
-                 g_asi->gfx->width() - dpi_px(40),
-                 g_asi->gfx->height() - dpi_px(120));
+    lv_obj_set_style_align(w, LV_ALIGN_DEFAULT, 0);
+    win_apply_chrome(r, 1);
+    win_layout_children(r);
+    snap_move_to(w, 0, 0, g_asi->gfx->width(), snap_bottom());
 }
 
-/* Geri al: buyutulmeden onceki geometri; kayit yoksa ortali 520x340. */
+/* Geri al: buyutulmeden onceki geometri ve kose/kenarlik; kayit yoksa 520x340. */
 static void win_restore_max(winrec_t *r) {
     lv_obj_t *w = r->win;
     lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+    win_apply_chrome(r, 0);
+    win_layout_children(r);
     if (r->max_saved_w > 0 && r->max_saved_h > 0) {
         snap_move_to(w, r->max_saved_x, r->max_saved_y,
                      r->max_saved_w, r->max_saved_h);
@@ -517,12 +565,19 @@ static void win_snap_layout(winrec_t *r, int mode) {
     int rw = sw - sw / 2;
     if (mode == SNAP_LEFT) {
         lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+        win_apply_chrome(r, 0);
+        win_layout_children(r);
         snap_move_to(w, 0, 0, lw, bottom);
     } else if (mode == SNAP_RIGHT) {
         lv_obj_remove_flag(w, LV_OBJ_FLAG_USER_1);
+        win_apply_chrome(r, 0);
+        win_layout_children(r);
         snap_move_to(w, sw - rw, 0, rw, bottom);
     } else if (mode == SNAP_MAX) {
-        if (lv_obj_has_flag(w, LV_OBJ_FLAG_USER_1)) return;  /* zaten buyuk */
+        if (lv_obj_has_flag(w, LV_OBJ_FLAG_USER_1)) {
+            snap_move_to(w, 0, 0, sw, bottom);
+            return;  /* zaten buyuk: ust kenara geri oturt */
+        }
         win_apply_max(r);
     }
 }
@@ -612,8 +667,10 @@ void title_drag_cb(lv_event_t *e) {
         if (!r) return;
         /* ust kenar once gelir: maksimize; sonra sol/sag yari */
         if (y <= snap) win_snap_layout(r, SNAP_MAX);
-        else if (x <= snap) win_snap_layout(r, SNAP_LEFT);
-        else if (x + ww >= sw - snap) win_snap_layout(r, SNAP_RIGHT);
+        else if (!lv_obj_has_flag(win, LV_OBJ_FLAG_USER_1)) {
+            if (x <= snap) win_snap_layout(r, SNAP_LEFT);
+            else if (x + ww >= sw - snap) win_snap_layout(r, SNAP_RIGHT);
+        }
     }
 }
 
@@ -641,8 +698,18 @@ void add_ctrl(lv_obj_t *tb, const char *svg, uint32_t bgcol,
 lv_obj_t *create_window(const char *title, int w, int h) {
     int tbh = dpi_px(36);            /* baslik cubugu taban yuksekligi */
     int bwd = dpi_px(46);            /* kontrol dugmesi genisligi */
-    int wx = (g_asi->gfx->width() - w) / 2;
-    int wy = (g_asi->gfx->height() - h) / 2 - dpi_px(10);
+    int sw = g_asi->gfx->width();
+    int sh = g_asi->gfx->height();
+    int open_cnt = 0;
+    for (int i = 0; i < MAX_WINS; i++)
+        if (g_recs[i] && g_recs[i]->win) open_cnt++;
+    int casc = (open_cnt % 7) * dpi_px(22);
+    int wx = (sw - w) / 2 - dpi_px(48) + casc;
+    int wy = (sh - h) / 2 - dpi_px(56) + casc;
+    if (wx + w > sw - dpi_px(12)) wx = sw - w - dpi_px(12);
+    if (wy + h > sh - dpi_px(76)) wy = sh - h - dpi_px(76);
+    if (wx < dpi_px(8)) wx = dpi_px(8);
+    if (wy < dpi_px(8)) wy = dpi_px(8);
 
     /* Uygulamada hatirlanan boyut/konum varsa uygula     */
     {
@@ -715,6 +782,7 @@ lv_obj_t *create_window(const char *title, int w, int h) {
     r->relayout = 0;
     r->hotkey = 0; r->drop = 0;   /* geri donen kayıtta eski callback kalmasin */
     r->max_saved_w = r->max_saved_h = r->max_saved_x = r->max_saved_y = 0;
+    r->max_saved_r = r->max_saved_tb_r = -1;
     r->fgroup = 0;
     r->ws = g_ws;
     r->ws_hidden = 0;
@@ -779,6 +847,7 @@ lv_obj_t *create_window_fs(const char *title, int w, int h) {
         r->relayout = 0;
         r->hotkey = 0; r->drop = 0;
         r->max_saved_w = r->max_saved_h = r->max_saved_x = r->max_saved_y = 0;
+    r->max_saved_r = r->max_saved_tb_r = -1;
         r->fgroup = 0;
         r->ws = g_ws;
         r->ws_hidden = 0;

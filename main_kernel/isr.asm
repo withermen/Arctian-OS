@@ -30,9 +30,19 @@ isr_common_stub:
     push r14
     push r15     ; RSP now points to r15 = offset 0 of registers_t
 
-    ; rdi = pointer to registers_t
-    mov rdi, rsp
+    ; rbx = registers_t * (callee-saved). FPU/SSE durumunu (xmm0..xmm15)
+    ; #PF demand-paging ve IRQ'lar boyunca bozulmadan koru + 16B hizala.
+    mov rbx, rsp
+    sub rsp, 512
+    and rsp, -16
+    fxsave [rsp]
+
+    mov rdi, rbx
+    cld
     call isr_handler
+
+    fxrstor [rsp]
+    mov rsp, rbx
 
     ; Pop registers in reverse
     pop r15

@@ -11,15 +11,26 @@
 #include "udp.h"
 #include "ipv4.h"
 #include "clock.h"
+#include "percpu.h"
 #include "serial.h"
 #include <string.h>
+
+static inline void ensure_cpu0_for_net(void) {
+    if (percpu_self_index() != 0) {
+        sched_tid_t me = sched_current();
+        if (me > 0) {
+            sched_enqueue_cpu(0, me);
+            sched_sleep_ms(1);
+        }
+    }
+}
 
 static inline uint16_t bswap16(uint16_t v) { return (uint16_t)((v >> 8) | (v << 8)); }
 
 /* ---- AF_UNIX soketleri (cift yonlu halka tampon + SCM_RIGHTS) ---- */
-#define USOCK_BUF_CAP  32768u
-#define USOCK_BACKLOG  8
-#define USOCK_MAX_FDS  16
+#define USOCK_BUF_CAP  131072u
+#define USOCK_BACKLOG  16
+#define USOCK_MAX_FDS  32
 
 typedef struct {
     int           used;
@@ -61,6 +72,7 @@ typedef struct {
     uint16_t  peer_port;
     int       so_reuseaddr;
     int       tcp_nodelay;
+    int       so_error;
     /* UDP RX kuyrugu */
     spinlock_t udp_lock;
     uint16_t   u_head;
@@ -189,15 +201,15 @@ static int64_t usock_write_raw(int id, const uint8_t *buf, uint64_t len, int non
             sched_irq_restore(fl);
             return done ? (int64_t)done : -EPIPE;
         }
-        if (n_fds > 0) {
-            for (int i = 0; i < n_fds && pu->rx_fd_count < USOCK_MAX_FDS; i++) {
-                posix_file_ref(send_fds[i]);
-                pu->rx_fds[pu->rx_fd_count++] = send_fds[i];
-            }
-            n_fds = 0;
-        }
         uint32_t sp = USOCK_BUF_CAP - pu->rx_count;
         if (len == 0) {
+            if (n_fds > 0) {
+                for (int i = 0; i < n_fds && pu->rx_fd_count < USOCK_MAX_FDS; i++) {
+                    posix_file_ref(send_fds[i]);
+                    pu->rx_fds[pu->rx_fd_count++] = send_fds[i];
+                }
+                n_fds = 0;
+            }
             int w = waitq_pop(&pu->rd_wq);
             spin_unlock(&pu->lock);
             if (w >= 0) sched_wake(w);
@@ -205,6 +217,13 @@ static int64_t usock_write_raw(int id, const uint8_t *buf, uint64_t len, int non
             break;
         }
         if (sp > 0) {
+            if (n_fds > 0) {
+                for (int i = 0; i < n_fds && pu->rx_fd_count < USOCK_MAX_FDS; i++) {
+                    posix_file_ref(send_fds[i]);
+                    pu->rx_fds[pu->rx_fd_count++] = send_fds[i];
+                }
+                n_fds = 0;
+            }
             uint64_t ch = len - done;
             if (ch > sp) ch = sp;
             for (uint64_t i = 0; i < ch; i++) {
@@ -361,6 +380,7 @@ static uint32_t isock_poll(int id) {
     if (id < 0 || id >= POSIX_MAX_ISOCKS || !s_isocks[id].used) return POLLERR;
     isock_t *s = &s_isocks[id];
     if (s->loop_usock >= 0) return usock_poll(s->loop_usock);
+    ensure_cpu0_for_net();
     ipv4_poll();
     uint32_t m = 0;
     if (s->type == SOCK_DGRAM) {
@@ -407,6 +427,7 @@ int64_t posix_sock_read(posix_file_t *f, uint8_t *buf, uint64_t len, int flags) 
         isock_t *s = &s_isocks[id];
         if (s->loop_usock >= 0)
             return usock_read_raw(s->loop_usock, buf, len, nb, 0, 0, 0);
+        ensure_cpu0_for_net();
         if (s->type == SOCK_DGRAM) {
             for (;;) {
                 ipv4_poll();
@@ -456,6 +477,7 @@ int64_t posix_sock_write(posix_file_t *f, const uint8_t *buf, uint64_t len, int 
         isock_t *s = &s_isocks[id];
         if (s->loop_usock >= 0)
             return usock_write_raw(s->loop_usock, buf, len, nb, 0, 0);
+        ensure_cpu0_for_net();
         if (s->type == SOCK_DGRAM) {
             if (s->peer_port == 0) return -EDESTADDRREQ;
             if (s->local_port == 0) {
@@ -823,6 +845,7 @@ int64_t posix_sys_connect(posix_proc_t *p, int fd, uint64_t addr_va, uint32_t ad
             return 0;
         }
 
+        ensure_cpu0_for_net();
         int tc = tcp_connect(s->peer_ip, s->peer_port);
         if (tc < 0) return -ECONNREFUSED;
         s->tcp_id = tc;
@@ -861,6 +884,7 @@ int64_t posix_sys_sendto(posix_proc_t *p, int fd, uint64_t buf_va, uint64_t len,
             isock_udp_cb(dip, s->local_port, dport, kbuf, (uint16_t)len);
             ret = (int64_t)len;
         } else {
+            ensure_cpu0_for_net();
             ret = udp_send(dip, s->local_port, dport, kbuf, (uint16_t)len) ? (int64_t)len : -EIO;
         }
     } else {
@@ -885,6 +909,7 @@ int64_t posix_sys_recvfrom(posix_proc_t *p, int fd, uint64_t buf_va, uint64_t le
 
     if (f->kind == PFD_SOCK_INET && s_isocks[f->obj_id].type == SOCK_DGRAM) {
         isock_t *s = &s_isocks[f->obj_id];
+        ensure_cpu0_for_net();
         uint8_t sip[4] = {0}; uint16_t sport = 0;
         for (;;) {
             ipv4_poll();
@@ -929,7 +954,7 @@ int64_t posix_sys_recvfrom(posix_proc_t *p, int fd, uint64_t buf_va, uint64_t le
     return n;
 }
 
-/* sendmsg / recvmsg: AF_UNIX SCM_RIGHTS FD gecisi destekli! */
+/* sendmsg / recvmsg: AF_UNIX SCM_RIGHTS + AF_INET UDP msg_name destekli! */
 int64_t posix_sys_sendmsg(posix_proc_t *p, int fd, uint64_t msg_va, int flags) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f) return -EBADF;
@@ -939,7 +964,7 @@ int64_t posix_sys_sendmsg(posix_proc_t *p, int fd, uint64_t msg_va, int flags) {
     posix_file_t *send_fds[USOCK_MAX_FDS];
     int nfds = 0;
     if (f->kind == PFD_SOCK_UNIX && msg.msg_control && msg.msg_controllen >= sizeof(posix_cmsghdr_t)) {
-        uint8_t cbuf[128];
+        uint8_t cbuf[256];
         uint64_t clen = (msg.msg_controllen > sizeof(cbuf)) ? sizeof(cbuf) : msg.msg_controllen;
         if (posix_ucopy_in(cbuf, (uint64_t)(uintptr_t)msg.msg_control, clen) == 0) {
             posix_cmsghdr_t *ch = (posix_cmsghdr_t *)cbuf;
@@ -955,26 +980,89 @@ int64_t posix_sys_sendmsg(posix_proc_t *p, int fd, uint64_t msg_va, int flags) {
         }
     }
 
-    int64_t total = 0;
-    uint64_t iovcnt = msg.msg_iovlen > 16 ? 16 : msg.msg_iovlen;
+    uint64_t iovcnt = msg.msg_iovlen > 64 ? 64 : msg.msg_iovlen;
+    posix_iovec_t iovs[64];
+    uint64_t total_len = 0;
     for (uint64_t i = 0; i < iovcnt; i++) {
-        posix_iovec_t iov;
-        if (posix_ucopy_in(&iov, (uint64_t)(uintptr_t)msg.msg_iov + i * sizeof(iov), sizeof(iov)) < 0)
+        if (posix_ucopy_in(&iovs[i], (uint64_t)(uintptr_t)msg.msg_iov + i * sizeof(iovs[0]), sizeof(iovs[0])) < 0)
             return -EFAULT;
-        uint8_t *kbuf = iov.iov_len ? (uint8_t *)kmalloc((size_t)iov.iov_len) : 0;
-        if (iov.iov_len && !kbuf) return -ENOMEM;
-        if (iov.iov_len) posix_ucopy_in(kbuf, (uint64_t)(uintptr_t)iov.iov_base, iov.iov_len);
+        if (iovs[i].iov_len > (256ull * 1024ull) - total_len)
+            iovs[i].iov_len = (256ull * 1024ull) - total_len;
+        total_len += iovs[i].iov_len;
+    }
+
+    if (f->kind == PFD_SOCK_INET && s_isocks[f->obj_id].type == SOCK_DGRAM) {
+        if (total_len > 1400) return -EMSGSIZE;
+        uint8_t *kbuf = total_len ? (uint8_t *)kmalloc((size_t)total_len) : 0;
+        if (total_len && !kbuf) return -ENOMEM;
+        uint64_t off = 0;
+        for (uint64_t i = 0; i < iovcnt; i++) {
+            if (iovs[i].iov_len == 0) continue;
+            if (posix_ucopy_in(kbuf + off, (uint64_t)(uintptr_t)iovs[i].iov_base, iovs[i].iov_len) < 0) {
+                kfree(kbuf);
+                return -EFAULT;
+            }
+            off += iovs[i].iov_len;
+        }
+        int64_t ret;
+        if (msg.msg_name && msg.msg_namelen >= sizeof(posix_sockaddr_in_t)) {
+            posix_sockaddr_in_t sin;
+            if (posix_ucopy_in(&sin, (uint64_t)(uintptr_t)msg.msg_name, sizeof(sin)) < 0) {
+                if (kbuf) kfree(kbuf);
+                return -EFAULT;
+            }
+            if (sin.sin_family != AF_INET) {
+                if (kbuf) kfree(kbuf);
+                return -EAFNOSUPPORT;
+            }
+            isock_t *s = &s_isocks[f->obj_id];
+            if (s->local_port == 0) {
+                s->local_port = isock_alloc_port();
+                udp_bind(s->local_port, isock_udp_cb);
+            }
+            uint8_t dip[4];
+            memcpy(dip, &sin.sin_addr, 4);
+            uint16_t dport = bswap16(sin.sin_port);
+            if (dip[0] == 127) {
+                isock_udp_cb(dip, s->local_port, dport, kbuf, (uint16_t)total_len);
+                ret = (int64_t)total_len;
+            } else {
+                ensure_cpu0_for_net();
+                ret = udp_send(dip, s->local_port, dport, kbuf, (uint16_t)total_len)
+                    ? (int64_t)total_len : -EIO;
+            }
+        } else {
+            ret = posix_sock_write(f, kbuf, total_len, flags);
+        }
+        if (kbuf) kfree(kbuf);
+        return ret;
+    }
+
+    int64_t total = 0;
+    for (uint64_t i = 0; i < iovcnt; i++) {
+        uint8_t *kbuf = iovs[i].iov_len ? (uint8_t *)kmalloc((size_t)iovs[i].iov_len) : 0;
+        if (iovs[i].iov_len && !kbuf) return total ? total : -ENOMEM;
+        if (iovs[i].iov_len &&
+            posix_ucopy_in(kbuf, (uint64_t)(uintptr_t)iovs[i].iov_base, iovs[i].iov_len) < 0) {
+            kfree(kbuf);
+            return total ? total : -EFAULT;
+        }
         int nb = ((f->flags & O_NONBLOCK) || (flags & MSG_DONTWAIT)) ? 1 : 0;
         int64_t r;
         if (f->kind == PFD_SOCK_UNIX) {
-            r = usock_write_raw(f->obj_id, kbuf, iov.iov_len, nb, send_fds, nfds);
+            r = usock_write_raw(f->obj_id, kbuf, iovs[i].iov_len, nb, send_fds, nfds);
             nfds = 0;
         } else {
-            r = posix_sock_write(f, kbuf, iov.iov_len, flags);
+            r = posix_sock_write(f, kbuf, iovs[i].iov_len, flags);
         }
         if (kbuf) kfree(kbuf);
         if (r < 0) return total ? total : r;
         total += r;
+    }
+    if (f->kind == PFD_SOCK_UNIX && nfds > 0) {
+        int nb = ((f->flags & O_NONBLOCK) || (flags & MSG_DONTWAIT)) ? 1 : 0;
+        int64_t r = usock_write_raw(f->obj_id, 0, 0, nb, send_fds, nfds);
+        if (r < 0 && total == 0) return r;
     }
     return total;
 }
@@ -984,42 +1072,117 @@ int64_t posix_sys_recvmsg(posix_proc_t *p, int fd, uint64_t msg_va, int flags) {
     if (!f) return -EBADF;
     posix_msghdr_t msg;
     if (posix_ucopy_in(&msg, msg_va, sizeof(msg)) < 0) return -EFAULT;
-    if (msg.msg_iovlen == 0) return 0;
 
-    posix_iovec_t iov;
-    if (posix_ucopy_in(&iov, (uint64_t)(uintptr_t)msg.msg_iov, sizeof(iov)) < 0) return -EFAULT;
-    uint8_t *kbuf = iov.iov_len ? (uint8_t *)kmalloc((size_t)iov.iov_len) : 0;
-    if (iov.iov_len && !kbuf) return -ENOMEM;
+    uint64_t iovcnt = msg.msg_iovlen > 64 ? 64 : msg.msg_iovlen;
+    posix_iovec_t iovs[64];
+    uint64_t total_cap = 0;
+    for (uint64_t i = 0; i < iovcnt; i++) {
+        if (posix_ucopy_in(&iovs[i], (uint64_t)(uintptr_t)msg.msg_iov + i * sizeof(iovs[0]), sizeof(iovs[0])) < 0)
+            return -EFAULT;
+        if (iovs[i].iov_len > (256ull * 1024ull) - total_cap)
+            iovs[i].iov_len = (256ull * 1024ull) - total_cap;
+        if (iovs[i].iov_len > 0 && !posix_uprobe((uint64_t)(uintptr_t)iovs[i].iov_base, iovs[i].iov_len, 1))
+            return -EFAULT;
+        total_cap += iovs[i].iov_len;
+    }
+
+    uint8_t *kbuf = total_cap ? (uint8_t *)kmalloc((size_t)total_cap) : 0;
+    if (total_cap && !kbuf) return -ENOMEM;
 
     posix_file_t *got_files[USOCK_MAX_FDS];
     int got_n = 0;
     int nb = ((f->flags & O_NONBLOCK) || (flags & MSG_DONTWAIT)) ? 1 : 0;
     int64_t n;
-    if (f->kind == PFD_SOCK_UNIX)
-        n = usock_read_raw(f->obj_id, kbuf, iov.iov_len, nb, got_files, USOCK_MAX_FDS, &got_n);
-    else
-        n = posix_sock_read(f, kbuf, iov.iov_len, flags);
+    int msg_flags_out = 0;
 
-    if (n > 0) posix_ucopy_out((uint64_t)(uintptr_t)iov.iov_base, kbuf, (uint64_t)n);
+    if (f->kind == PFD_SOCK_UNIX) {
+        n = usock_read_raw(f->obj_id, kbuf, total_cap, nb, got_files, USOCK_MAX_FDS, &got_n);
+    } else if (f->kind == PFD_SOCK_INET && s_isocks[f->obj_id].type == SOCK_DGRAM) {
+        isock_t *s = &s_isocks[f->obj_id];
+        ensure_cpu0_for_net();
+        uint8_t sip[4] = {0};
+        uint16_t sport = 0;
+        uint16_t orig_len = 0;
+        for (;;) {
+            ipv4_poll();
+            uint64_t fl = sched_irq_save();
+            spin_lock(&s->udp_lock);
+            if (s->u_count > 0) {
+                orig_len = s->u_len[s->u_head];
+                uint16_t r = orig_len;
+                if (r > total_cap) {
+                    r = (uint16_t)total_cap;
+                    msg_flags_out |= 0x20; /* MSG_TRUNC */
+                }
+                if (r > 0 && kbuf) memcpy(kbuf, s->u_buf[s->u_head], r);
+                memcpy(sip, s->u_sip[s->u_head], 4);
+                sport = s->u_sport[s->u_head];
+                kfree(s->u_buf[s->u_head]);
+                s->u_buf[s->u_head] = 0;
+                s->u_head = (uint16_t)((s->u_head + 1u) % ISOCK_UDP_Q);
+                s->u_count--;
+                spin_unlock(&s->udp_lock);
+                sched_irq_restore(fl);
+                n = r;
+                break;
+            }
+            spin_unlock(&s->udp_lock);
+            sched_irq_restore(fl);
+            if (nb) { n = -EAGAIN; break; }
+            sched_sleep_ms(1);
+        }
+        if (n >= 0 && msg.msg_name && msg.msg_namelen >= sizeof(posix_sockaddr_in_t)) {
+            posix_sockaddr_in_t sin;
+            memset(&sin, 0, sizeof(sin));
+            sin.sin_family = AF_INET;
+            sin.sin_port = bswap16(sport);
+            memcpy(&sin.sin_addr, sip, 4);
+            posix_ucopy_out((uint64_t)(uintptr_t)msg.msg_name, &sin, sizeof(sin));
+            msg.msg_namelen = sizeof(sin);
+        } else if (n >= 0 && msg.msg_name) {
+            msg.msg_namelen = 0;
+        }
+    } else {
+        n = posix_sock_read(f, kbuf, total_cap, flags);
+        if (n >= 0 && msg.msg_name) msg.msg_namelen = 0;
+    }
+
+    if (n > 0 && kbuf) {
+        uint64_t rem = (uint64_t)n;
+        uint64_t off = 0;
+        for (uint64_t i = 0; i < iovcnt && rem > 0; i++) {
+            uint64_t ch = (iovs[i].iov_len < rem) ? iovs[i].iov_len : rem;
+            if (ch > 0) posix_ucopy_out((uint64_t)(uintptr_t)iovs[i].iov_base, kbuf + off, ch);
+            off += ch;
+            rem -= ch;
+        }
+    }
     if (kbuf) kfree(kbuf);
 
-    if (n >= 0 && got_n > 0 && msg.msg_control && msg.msg_controllen >= sizeof(posix_cmsghdr_t) + 4) {
-        uint8_t cbuf[128];
-        memset(cbuf, 0, sizeof(cbuf));
-        posix_cmsghdr_t *ch = (posix_cmsghdr_t *)cbuf;
-        ch->cmsg_level = SOL_SOCKET;
-        ch->cmsg_type = SCM_RIGHTS;
-        int32_t *out_fds = (int32_t *)(cbuf + sizeof(posix_cmsghdr_t));
-        int placed = 0;
-        for (int i = 0; i < got_n && sizeof(posix_cmsghdr_t) + (size_t)(placed + 1) * 4 <= msg.msg_controllen; i++) {
-            int nfd = posix_fd_install(p, got_files[i], 0);
-            if (nfd >= 0) out_fds[placed++] = nfd;
-            else posix_file_unref(got_files[i]);
+    if (n >= 0) {
+        msg.msg_flags = msg_flags_out;
+        if (got_n > 0 && msg.msg_control && msg.msg_controllen >= sizeof(posix_cmsghdr_t) + 4) {
+            uint8_t cbuf[256];
+            memset(cbuf, 0, sizeof(cbuf));
+            posix_cmsghdr_t *ch = (posix_cmsghdr_t *)cbuf;
+            ch->cmsg_level = SOL_SOCKET;
+            ch->cmsg_type = SCM_RIGHTS;
+            int32_t *out_fds = (int32_t *)(cbuf + sizeof(posix_cmsghdr_t));
+            uint32_t fd_fl = (flags & 0x40000000 /* MSG_CMSG_CLOEXEC */) ? FD_CLOEXEC : 0;
+            int placed = 0;
+            for (int i = 0; i < got_n && sizeof(posix_cmsghdr_t) + (size_t)(placed + 1) * 4 <= msg.msg_controllen; i++) {
+                int nfd = posix_fd_install(p, got_files[i], fd_fl);
+                if (nfd >= 0) out_fds[placed++] = nfd;
+                else posix_file_unref(got_files[i]);
+            }
+            ch->cmsg_len = sizeof(posix_cmsghdr_t) + (uint64_t)placed * 4;
+            uint64_t tot = (ch->cmsg_len + 7ull) & ~7ull;
+            posix_ucopy_out((uint64_t)(uintptr_t)msg.msg_control, cbuf, tot);
+            msg.msg_controllen = tot;
+        } else {
+            for (int i = 0; i < got_n; i++) posix_file_unref(got_files[i]);
+            msg.msg_controllen = 0;
         }
-        ch->cmsg_len = sizeof(posix_cmsghdr_t) + (uint64_t)placed * 4;
-        uint64_t tot = (ch->cmsg_len + 7ull) & ~7ull;
-        posix_ucopy_out((uint64_t)(uintptr_t)msg.msg_control, cbuf, tot);
-        msg.msg_controllen = tot;
         posix_ucopy_out(msg_va, &msg, sizeof(msg));
     } else {
         for (int i = 0; i < got_n; i++) posix_file_unref(got_files[i]);
@@ -1051,13 +1214,34 @@ int64_t posix_sys_setsockopt(posix_proc_t *p, int fd, int level, int optname,
 
 int64_t posix_sys_getsockopt(posix_proc_t *p, int fd, int level, int optname,
                              uint64_t optval_va, uint64_t optlen_va) {
-    (void)level; (void)optname;
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f) return -EBADF;
+    if (f->kind != PFD_SOCK_INET && f->kind != PFD_SOCK_UNIX) return -ENOTSOCK;
     int val = 0;
+    if (level == SOL_SOCKET) {
+        if (optname == SO_TYPE) {
+            val = (f->kind == PFD_SOCK_INET) ? s_isocks[f->obj_id].type : s_usocks[f->obj_id].type;
+        } else if (optname == SO_ERROR) {
+            if (f->kind == PFD_SOCK_INET) {
+                val = s_isocks[f->obj_id].so_error;
+                s_isocks[f->obj_id].so_error = 0;
+            }
+        } else if (optname == SO_DOMAIN) {
+            val = (f->kind == PFD_SOCK_INET) ? AF_INET : AF_UNIX;
+        } else if (optname == SO_PROTOCOL) {
+            if (f->kind == PFD_SOCK_INET)
+                val = (s_isocks[f->obj_id].type == SOCK_DGRAM) ? 17 : 6;
+        } else if (optname == SO_REUSEADDR) {
+            val = (f->kind == PFD_SOCK_INET) ? s_isocks[f->obj_id].so_reuseaddr : 0;
+        } else if (optname == SO_SNDBUF || optname == SO_RCVBUF) {
+            val = 65536;
+        }
+    } else if (level == IPPROTO_TCP && optname == TCP_NODELAY) {
+        val = (f->kind == PFD_SOCK_INET) ? s_isocks[f->obj_id].tcp_nodelay : 0;
+    }
     uint32_t len = 4;
-    if (optval_va) posix_ucopy_out(optval_va, &val, 4);
-    if (optlen_va) posix_ucopy_out(optlen_va, &len, 4);
+    if (optval_va && posix_ucopy_out(optval_va, &val, 4) < 0) return -EFAULT;
+    if (optlen_va && posix_ucopy_out(optlen_va, &len, 4) < 0) return -EFAULT;
     return 0;
 }
 
@@ -1070,7 +1254,13 @@ int64_t posix_sys_getsockname(posix_proc_t *p, int fd, uint64_t addr_va, uint64_
         memset(&sin, 0, sizeof(sin));
         sin.sin_family = AF_INET;
         sin.sin_port = bswap16(peer ? s->peer_port : s->local_port);
-        memcpy(&sin.sin_addr, peer ? s->peer_ip : s->local_ip, 4);
+        if (peer) {
+            memcpy(&sin.sin_addr, s->peer_ip, 4);
+        } else if (s->local_ip[0] || s->local_ip[1] || s->local_ip[2] || s->local_ip[3]) {
+            memcpy(&sin.sin_addr, s->local_ip, 4);
+        } else if (s->state == 3) {
+            memcpy(&sin.sin_addr, ipv4_config.src_ip, 4);
+        }
         uint32_t sl = sizeof(sin);
         if (addr_va) posix_ucopy_out(addr_va, &sin, sizeof(sin));
         if (len_va)  posix_ucopy_out(len_va, &sl, 4);

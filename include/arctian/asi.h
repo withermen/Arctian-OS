@@ -82,6 +82,9 @@ typedef struct {
     /* Kirli bolge sunumu (performans): yalnizca degisen dikdortgen kopyalanir.
      * TCG'de tam ekran blit saniyeler suruyordu; bu, arayuzu akici yapar. */
     void       (*present_rect)(int x, int y, int w, int h);
+    /* VSync atomik sayfa cevirme (BGA Y_OFFSET / VirtIO flush / GOP yedegi).
+     * Yapisal ABI icin EN SONA eklendi. */
+    void       (*flip)(void);
 } asi_gfx_t;
 
 typedef struct {
@@ -285,6 +288,16 @@ typedef struct {
                                 const char *content_type, const char *extra_headers,
                                 const void *body, uint32_t body_len,
                                 int *status_out, uint32_t *len_out);
+
+    /* Kalici cerez diski icin cekirdek cerez deposunu disa aktarir. */
+    uint32_t (*cookie_export)(char *out, uint32_t cap);
+
+    /* RFC 6455 WebSocket (ws:// ve wss://) — ABI uyumu icin EN SONDA. */
+    int  (*ws_open)(const char *url);
+    int  (*ws_send)(int id, const void *data, uint32_t len, int is_binary);
+    int  (*ws_recv)(int id, void *buf, uint32_t cap, int *is_binary_out);
+    int  (*ws_state)(int id);
+    void (*ws_close)(int id);
 } asi_net_t;
 
 typedef struct {
@@ -298,6 +311,23 @@ typedef struct {
     uint32_t cpu_ticks;
     char     name[32];
 } asi_proc_info_t;
+
+#define ASI_OOM_OK          0
+#define ASI_OOM_LOW         1
+#define ASI_OOM_CRITICAL    2
+
+#define ASI_OOM_KIND_NATIVE 0
+#define ASI_OOM_KIND_WLF    1
+#define ASI_OOM_KIND_POSIX  2
+
+typedef struct {
+    int      pid;
+    uint32_t ram_kb;
+    uint8_t  frozen;
+    uint8_t  kind;       /* ASI_OOM_KIND_* */
+    uint8_t  reserved[2];
+    char     name[32];
+} asi_oom_app_t;
 
 typedef struct {
     int  (*spawn)(const char *name, void (*entry)(void *), void *arg);
@@ -319,6 +349,13 @@ typedef struct {
 
     int      (*info_ex)(int i, asi_proc_info_t *out);
     uint32_t (*sys_ticks)(void);
+
+    /* ---- OOM Basinc & Dondurma/Cozme Motoru (ABI icin EN SONA) ---- */
+    int  (*oom_state)(void);
+    void (*oom_freeze_apps)(void);
+    void (*oom_thaw_apps)(void);
+    int  (*oom_list_apps)(asi_oom_app_t *out, int max_out);
+    int  (*oom_kill_app)(int pid);
 } asi_proc_t;
 
 typedef struct {

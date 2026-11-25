@@ -12,7 +12,8 @@
 #define AFS_VERSION    6u      /* header surumu; uymayan disk yeniden formatlanir
                                 * (5: kapasite 64 bit; 6: taban 65536 - surum
                                 *  5 diskler mount sirasinda yeni surume tasinar) */
-#define AFS_NAME_MAX   64u     /* dosya/klasor adi azami bayt (+ sonlandirici) */
+#define AFS_NAME_MAX   64u     /* disk uzerindeki kisa girdi adi (+ sonlandirici) */
+#define AFS_PATH_MAX   256u    /* uzun yol destegi (en fazla 255 bayt + sonlandirici) */
 
 /* Mount sirasinda saptanan etkin taban LBA (legacy 20000 veya yeni 65536). */
 uint32_t    afs_base(void);
@@ -46,6 +47,7 @@ int         afs_ensure_dir(const char *path);                  /* 0 = hazir */
 void       *afs_create_in(const char *path, const char *name, int is_dir);
 void       *afs_find_in(const char *path, const char *name);
 uint32_t    afs_read_path(const char *path, void *buf, uint32_t size);
+int         afs_write_path(const char *path, const void *data, uint32_t size);
 int         afs_count_dir(const char *path);
 int         afs_list_dir(const char *path, int idx, char *out, int cap, int *is_dir);
 
@@ -58,9 +60,21 @@ int         afs_stat_handle(void *h, asi_stat_t *out);
 int         afs_rename(const char *from, const char *to);   /* 0/-1/-2/-3 */
 int         afs_perm_selftest(void);
 
-/* Butunluk: metadata gunlugu (journal) + denetim (fsck). */
+/* Butunluk: metadata gunlugu (journal) + denetim (fsck) + geri kazanim. */
+typedef struct {
+    uint32_t free_extents;
+    uint32_t free_sectors;
+    uint32_t reclaimed_sectors;
+    uint32_t reused_sectors;
+    uint32_t data_next;
+    uint32_t data_start;
+    uint32_t capacity;
+} afs_reclaim_stats_t;
+
 int         afs_fsck(int fix, int *problems, int *fixed);
 int         afs_journal_selftest(void);
+void        afs_free_extent_stats(afs_reclaim_stats_t *out);
+int         afs_reclaim_selftest(void);
 
 void        afs_set_locked(int v);
 int         afs_is_locked(void);

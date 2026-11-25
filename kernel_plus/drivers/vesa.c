@@ -6,6 +6,9 @@
  */
 #include "vesa.h"
 #include "kernel.h"
+#include "paging.h"
+#include "gpu.h"
+#include "gpu_simd.h"
 
 // Bochs VBE register helpers
 static inline void vbe_write(uint16_t index, uint16_t value) {
@@ -31,15 +34,16 @@ static framebuffer_t fb;
 static uint64_t s_fb_map_base;
 static volatile uint64_t *s_fb_map_pd;
 
-// Map framebuffer physical memory using 2MB huge pages
+// Map framebuffer physical memory using PAT Write-Combining 2MB huge pages
 static void map_framebuffer_memory(uint32_t phys_addr) {
-    // Calculate PD index from physical address
-    // PML4 index: bits 47-39   (0xFD000000 >> 39) & 0x1FF = 0
-    // PDP index:  bits 38-30   (0xFD000000 >> 30) & 0x1FF = 3
-    // PD index:   bits 29-21   (0xFD000000 >> 21) & 0x1FF = 489
-    int pd_index = (phys_addr >> 21) & 0x1FF;
+    /* Prefer VMM PAT Write-Combining mapping (works for BIOS, UEFI, and >4GB BARs
+     * without clobbering unrelated entries in the 3..4GB page directory). */
+    if (vmm_map_wc_range((uint64_t)phys_addr, 32ull * 1024ull * 1024ull) == 0) {
+        kernel_debug("Framebuffer PAT WC 2MB sayfalar ile haritalandi");
+        return;
+    }
 
-    // PDP girişini LFB adresine gore ayarla
+    int pd_index = (phys_addr >> 21) & 0x1FF;
     int pdp_index = (phys_addr >> 30) & 0x1FF;
     volatile uint64_t *pdp = (volatile uint64_t *)PAGE_PDP;
     volatile uint64_t *pd;
@@ -47,37 +51,41 @@ static void map_framebuffer_memory(uint32_t phys_addr) {
         pd = (volatile uint64_t *)(uintptr_t)(pdp[pdp_index] & ~0xFFFULL);
     } else {
         pd = (volatile uint64_t *)PAGE_PD_FB;
-        pdp[pdp_index] = (uint64_t)PAGE_PD_FB | 0x03;  // present + writable
+        pdp[pdp_index] = (uint64_t)PAGE_PD_FB | 0x03;
     }
 
     if (!s_fb_map_pd) {
-        // Clear the new page directory (4KB at 0xD000)
-        for (int i = 0; i < 512; i++) {
-            pd[i] = 0;
-        }
+        for (int i = 0; i < 512; i++) pd[i] = 0;
     } else if (s_fb_map_pd == pd && s_fb_map_base) {
         int old_index = (int)((s_fb_map_base >> 21) & 0x1FF);
-        for (int i = 0; i < 8 && old_index + i < 512; i++) {
-            pd[old_index + i] = 0;
-        }
+        for (int i = 0; i < 8 && old_index + i < 512; i++) pd[old_index + i] = 0;
     }
 
-    // Map 16MB using 2MB huge pages (covers 2560x1440x32)
     if (pd_index < 512) {
         int count = 8;
         if (pd_index + count > 512) count = 512 - pd_index;
+        uint64_t cf = vmm_pat_enabled() ? VMM_PTE_WC : 0ull;
         for (int i = 0; i < count; i++) {
-            uint32_t page_addr = phys_addr + i * 0x200000;
-            pd[pd_index + i] = (uint64_t)page_addr | 0x83;  // present + writable + huge
+            uint32_t page_addr = phys_addr + (uint32_t)i * 0x200000u;
+            pd[pd_index + i] = (uint64_t)page_addr | 0x83ull | cf;
         }
     }
     s_fb_map_pd = pd;
     s_fb_map_base = phys_addr;
 
-    // Flush TLB (reload CR3)
     asm volatile ("mov %%cr3, %%rax; mov %%rax, %%cr3" : : : "rax");
-
     kernel_debug("Framebuffer 2MB sayfalar ile haritalandi");
+}
+
+void vesa_attach_external(uint32_t *virt, uint64_t phys,
+                          int width, int height, int pitch, int bpp) {
+    fb.address      = virt;
+    fb.phys_address = (uint32_t)(phys & 0xFFFFFFFFull);
+    fb.width        = width;
+    fb.height       = height;
+    fb.pitch        = pitch;
+    fb.bpp          = bpp;
+    fb.enabled      = (virt != 0 && width > 0 && height > 0);
 }
 
 int vesa_init(int width, int height, int bpp) {
@@ -202,35 +210,34 @@ uint32_t vesa_get_pixel(int x, int y) {
 }
 
 void vesa_clear(uint32_t color) {
+    if (gpu_is_ready()) {
+        gpu_drv_t *g = gpu_active();
+        if (g) {
+            gpu_fill_rect(0, 0, g->width, g->height, color);
+            return;
+        }
+    }
     if (!fb.enabled || !fb.address) return;
-
-    /* 64-bit bloat kullanarak hizli clear (4x hizli) */
-    uint64_t c64 = ((uint64_t)color << 32) | color;
-    uint64_t *ptr = (uint64_t *)fb.address;
-    int n = (fb.width * fb.height) / 2;
-    for (int i = 0; i < n; i++) {
-        ptr[i] = c64;
-    }
-    /* Tek kalan pixel varsa */
-    if ((fb.width * fb.height) & 1) {
-        fb.address[n * 2] = color;
-    }
+    gpu_simd_fill32_wc(fb.address, color, (size_t)fb.width * (size_t)fb.height);
 }
 
 void vesa_fill_rect(int x, int y, int w, int h, uint32_t color) {
-    if (!fb.enabled) return;
+    if (gpu_is_ready()) {
+        gpu_fill_rect(x, y, w, h, color);
+        return;
+    }
+    if (!fb.enabled || !fb.address) return;
 
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
-    if (x + w > fb.width)  w = fb.width - x;
-    if (y + h > fb.height) h = fb.height - y;
+    if (x >= fb.width || y >= fb.height) return;
+    if (w > fb.width - x)  w = fb.width - x;
+    if (h > fb.height - y) h = fb.height - y;
     if (w <= 0 || h <= 0) return;
 
     int pitch_dwords = fb.pitch / 4;
     for (int row = 0; row < h; row++) {
-        int base = (y + row) * pitch_dwords + x;
-        for (int col = 0; col < w; col++) {
-            fb.address[base + col] = color;
-        }
+        gpu_simd_fill32_wc(fb.address + (size_t)(y + row) * (size_t)pitch_dwords + (size_t)x,
+                           color, (size_t)w);
     }
 }

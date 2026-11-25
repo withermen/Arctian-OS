@@ -5,7 +5,7 @@ isteyen biri için tek kaynak referanstır. Dosya sistemi, medya (ses), ağ,
 grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
 **tüm genel API'leri** ve çalışan **kod örneklerini** içerir.
 
-- Sürüm: **Arctian 0.9.2** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
+- Sürüm: **Arctian 1.0** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
 - Arayüz kiti: **LVGL v9.6** + ASI (Arctian System Interface, sürüm `2`)
 - Mimari: x86_64 (AMD64), 64-bit. Arctian'da üç uygulama yolu vardır:
   1. **Gömülü uygulamalar (`desktop/apps/*`)**: `asi_t *asi` ve LVGL üzerinden çalışır; kabukla
@@ -15,9 +15,11 @@ grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
      kuyruğu üzerinden masaüstüne aktarılır.
   3. **Ring-3 POSIX ELF64 / C++20 ikilileri (`sdk/toolchain/`)**: `musl 1.2.5 + libstdc++ 14.2`
      ile derlenen statik PIE ikililer Linux x86-64 `SYSCALL/SYSRET` ABI ve paylaşımlı ARGB8888
-     grafik köprüsü (`arctian/gfx.h`) üzerinden izole süreç olarak çalışır.
-- Ekran çıkışı: Bochs VBE / VESA veya UEFI GOP çerçeve tamponu; varsayılan **1280×720**,
-  Ayarlar → Ekran'dan çalışma anında **1600×900 / 1920×1080 / 2560×1440**'a değiştirilebilir.
+     grafik köprüsü (`arctian/gfx.h`) üzerinden izole süreç olarak çalışır (`arctian-pkg-config`,
+     `arctian.cmake` ve `sdk/webkit/` WPE WebKit köprüsü dahil).
+- Ekran çıkışı: Modüler GPU alt sistemi (`VirtIO-GPU 2D`, `Intel`, `NVIDIA`, `Bochs BGA`,
+  `UEFI GOP` 64-bit `>4 GB` / `BIOS VBE LFB`); varsayılan **1280×720**, Ayarlar → Ekran'dan
+  çalışma anında **1600×900 / 1920×1080 / 2560×1440**'a değiştirilebilir.
 
 > **Önemli ayrım:** **Gömülü uygulamalar** freestanding C ile yazılır ve libc **kullanmaz**
 > (`printf`, `malloc` yerine `asi->console`, `asi->mem`; `memcpy`/`memset`/`memmove`/`memcmp`/`strlen`
@@ -421,6 +423,11 @@ typedef struct {
     asi_crypt_t    *crypt;
     asi_firewall_t *firewall;
     asi_power_t    *power;
+    asi_spool_t    *spool;
+    asi_log_t      *log;
+    asi_dev_t      *dev;
+    asi_wlf_t      *wlf;      /* izole .wlf yurutucu */
+    asi_posix_t    *posix;    /* Ring-3 POSIX/ELF64 + grafik koprusu */
 } asi_t;
 
 extern asi_t *g_asi;   /* global erişim de mümkündür */
@@ -522,9 +529,12 @@ uint32_t  *(*framebuffer)(void);            /* 32-bit ARGB/ova formatlı */
 uint32_t   (*rgb)(uint8_t r, uint8_t g, uint8_t b);   /* renk paketle */
 void       (*present)(void);                /* değişiklikleri ekrana yansıt */
 int        (*set_mode)(int width, int height);        /* yeni mod; 0 = başarılı */
+void       (*present_rect)(int x, int y, int w, int h); /* kirli bölge sunumu */
+void       (*flip)(void);                   /* VSync sayfa çevirme */
 ```
 
-`set_mode` Bochs VBE üzerinden çalışma-anında görüntü modunu değiştirir. Donanım
+`set_mode` aktif GPU arka ucu (Bochs BGA / VirtIO / VBE vb.) üzerinden çalışma-anında
+görüntü modunu değiştirir. Donanım
 desteklemiyorsa mod değişmez ve 0 dışı döner; arayüz gerçekleşen `width`/`height`
 değerini yansıtmalıdır. Yeni mod kurulduğunda LVGL display'i yeniden boyutlandırın
 (`lv_port_set_resolution`) ve masaüstü kabuğunu yeniden kurun.
@@ -555,12 +565,17 @@ if (asi->gfx->set_mode(2560, 1440) == 0) {
 ## 10. input — fare ve klavye
 
 ```c
-int (*mouse_x)(void);
-int (*mouse_y)(void);
-int (*mouse_buttons)(void);     /* bit0 = sol, bit1 = sağ */
-int (*mouse_scroll)(void);
-int (*key_avail)(void);         /* 1 = kuyrukta tuş var */
-int (*key_pop)(void);           /* kuyruktan sonraki tuş kodu/karakter */
+int      (*mouse_x)(void);
+int      (*mouse_y)(void);
+int      (*mouse_buttons)(void);     /* bit0 = sol, bit1 = sağ */
+int      (*key_avail)(void);         /* 1 = kuyrukta tuş var */
+int      (*key_pop)(void);           /* kuyruktan sonraki tuş kodu/karakter */
+int      (*mouse_scroll)(void);
+int      (*hotkey_pop)(void);        /* 0=yok, 1=Alt+Tab, 2=Ctrl+Alt+T, 3..8=Ctrl+C/X/V/A/Z/Y */
+void     (*kbd_layout)(int);         /* 0=TR-Q, 1=TR-F, 2=EN-Q */
+int      (*ctrl_down)(void);
+int      (*shift_down)(void);
+uint32_t (*mouse_press_seq)(void);   /* sol tuş basma kenarı sayacı */
 ```
 
 > Çoğu uygulama LVGL olaylarını (`LV_EVENT_CLICKED`, `LV_EVENT_KEY`, textarea)
@@ -609,7 +624,9 @@ arctian_setjmp(&ctx);   /* not: imza arctian_setjmp(ctx) -> 0 */
 
 Disk birimleri:
 
-- `C:` — **AFS** (kalıcı yerel disk; yazılabilir; journaling + CRC32 + izinler).
+- `C:` — **AFS v6** (kalıcı yerel disk; yazılabilir; 256 sektör metadata günlüğü + CRC32 +
+  izinler + bellek içi sıralı `free-extent` geri kazanımı + 255 bayta kadar uzun yol desteği
+  + 1024 dosyaya kadar dinamik tablo).
   Açılışta otomatik oluşan klasörler: `apps`, `indirilenler`, `belgeler`,
   `masaustu`, `logs`; ayrıca `etc`, `Users/<ad>`, `cop` (çöp kovası).
 - `D:` — **FAT32 (USB bellek)**, **salt-okunur**.
@@ -777,8 +794,10 @@ const char *(*wifi_ssid)(void);                     /* bağlı SSID veya "" */
 ```
 
 > **Not:** Wi-Fi katmanı sahte ağ üretmez. Kayıtlı gerçek 802.11 sürücüsü yoksa
-> `wifi_scan` 0 döner ve `wifi_connect` hata verir. Ethernet tarafında gerçek
-> sürücüler (`e1000`, `rtl8139`, `pcnet`) vardır.
+> `wifi_scan` 0 döner ve `wifi_connect` hata verir (`ath9k` WPA2/CCMP uçtan uca, `AX201`
+> firmware yükleme mevcuttur). Ethernet tarafında gerçek sürücüler (`virtio-net`, `e1000`,
+> `rtl8139`, `rtl8169`, `pcnet`) vardır; ağ yığını IPv4 yanında **IPv6** (SLAAC/NDP/ICMPv6)
+> ve TCP NewReno/OOO/64 soket destekler.
 
 ### 13.4 DNS + TCP (istemci)
 
@@ -868,14 +887,29 @@ if (!asi->net->busy())
     asi->net->submit(work, done, "http://sunucu/veri");
 ```
 
-### 13.8 Çerez
+### 13.8 Çerez, Tam HTTP ve WebSocket
 
 ```c
-/* JS document.cookie tarafından yazılan çerezi çekirdek deposuna ekler */
-void (*cookie_set)(const char *host, const char *name, const char *value);
+void     (*cookie_set)(const char *host, const char *name, const char *value);
+void     (*cookie_set2)(const char *host, const char *name, const char *value, int secure);
+int      (*dl_size)(const char *url, uint32_t *size_out);
+int      (*download_raw)(const char *url, uint32_t lba, uint32_t *out_size, uint32_t *out_crc);
+const char *(*http_request)(const char *method, const char *url,
+                            const char *content_type, const char *extra_headers,
+                            const void *body, uint32_t body_len,
+                            int *status_out, uint32_t *len_out);
+uint32_t (*cookie_export)(char *out, uint32_t cap);
+
+/* RFC 6455 WebSocket (ws:// ve wss://) */
+int      (*ws_open)(const char *url);
+int      (*ws_send)(int id, const void *data, uint32_t len, int is_binary);
+int      (*ws_recv)(int id, void *buf, uint32_t cap, int *is_binary_out);
+int      (*ws_state)(int id);
+void     (*ws_close)(int id);
 ```
 
-Tarayıcı motoru kullanır; normal uygulamalar için gerekmez.
+`http_request` GET/POST/PUT/PATCH/DELETE yöntemlerini, özel başlıkları ve otomatik
+`gzip`/`deflate` açmayı destekler.
 
 ---
 
@@ -897,8 +931,17 @@ int  (*info)(int i, int *pid, char *name, int cap, int *state, int *ppid, int *c
 int  (*app_open)(const char *title);                 /* GUI penceresi → PID */
 void (*app_close)(int pid, int code);
 int  (*reap)(int *code_out);
-int  (*app_open_caps)(const char *title, uint32_t caps);
+int      (*app_open_caps)(const char *title, uint32_t caps);
 uint32_t (*caps_of)(int pid);
+int      (*info_ex)(int i, asi_proc_info_t *out);
+uint32_t (*sys_ticks)(void);
+
+/* OOM basıncı ve dondurma/çözme API'si ("RAM Doldu!" kurtarma arayüzü için) */
+int      (*oom_state)(void);                    /* ASI_OOM_OK / LOW / CRITICAL */
+void     (*oom_freeze_apps)(void);
+void     (*oom_thaw_apps)(void);
+int      (*oom_list_apps)(asi_oom_app_t *out, int max_out);
+int      (*oom_kill_app)(int pid);
 ```
 
 ```c
@@ -947,7 +990,8 @@ uint32_t (*sample_rate)(void);                    /* aktif örnekleme hızı */
 ```
 
 Desteklenen WAV: PCM format 1 ve 0xFFFE, 8/16-bit, mono/stereo; çalma anında
-16-bit stereo'ya dönüştürülür.
+16-bit stereo'ya dönüştürülür. Ses arka uçları: **Intel HDA** (`hda.c`), **VirtIO-Sound**
+(`virtio_snd.c`), **AC97** (`ac97.c`) ve **PC Speaker** yedek yolu.
 
 Tam örnek (Medya Oynatıcı deseninden):
 
@@ -1702,5 +1746,5 @@ geriye dönük sembol/ABI uyumluluğunu koruyan hafif bir yer tutucu kabuktur (`
 
 ---
 
-*Bu belge Arctian 0.9.2 API yüzeyini (`include/arctian/*.h`, `desktop/*`, `sdk/toolchain/`,
-LVGL v9.6) esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*
+*Bu belge Arctian 1.0 API yüzeyini (`include/arctian/*.h`, `desktop/*`, `sdk/toolchain/`,
+`sdk/webkit/`, LVGL v9.6) esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*

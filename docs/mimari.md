@@ -39,15 +39,19 @@ Bölgeler ve sınırları:
 | disk tamponu | `0x07000000` | 16 MB |
 | blok/DMA geçici alan | `0x08000000` | 1 MB |
 | backbuffer | `0x09000000` | 16 MB |
-| VMM havuzu (`state + refcount + frames`) | `0x0A000000` | 96 MB |
-| yığın (heap) | `0x10000000` | 768 MB |
+| VMM durum sayfası (`VMM_STATE_ADDR`) | `0x0A000000` | 4 KB |
+| çekirdek yığını (`HEAP_BASE`) | `0x0A100000` | 63 MB (161..224 MB) |
+| VMM çerçeve havuzu (`VMM_POOL_BASE`) | `0x0E000000` | 96 MB yedek varsayılan (+ `>4 GB` dinamik havuz) |
 
-Kimlik eşlemesi: `0–1 GB` arası 2 MB huge page'lerle kimlik-eşlemeli (`IDENTITY_MAP_*`),
-yani modüller yüklenirken sanal=fiziksel çalışır. Sanal adres alanı yerleşiminde kullanıcı
-uzayı `VMM_USER_BASE = 0x0000008000000000` (PML4 index 1), yüksek yarı eşlemesi ise
-`VMM_HIGHER_BASE = 0xFFFF800000000000` (PML4 index 256) tabanındadır. `VMM_REFCOUNT_ADDR`
-(`0x0A001000`) üzerinde fiziksel çerçeve başına 16-bit referans sayacı tutulur (`fork`
-ve `MAP_SHARED` paylaşımı için).
+Kimlik eşlemesi: `stage2` ilk `0–1 GB` arasını 2 MB huge page'lerle kurar; `vmm_init()` ise
+`1 GB` üstündeki kurulu RAM'i 2 MB huge page'lerle dinamik olarak kimlik-eşler ve PAT
+Write-Combining (`vmm_map_wc_range`) ile GPU VRAM aralıklarını eşler. Sanal adres alanı
+yerleşiminde kullanıcı uzayı `VMM_USER_BASE = 0x0000008000000000` (PML4 index 1), yüksek yarı
+eşlemesi ise `VMM_HIGHER_BASE = 0xFFFF800000000000` (PML4 index 256) tabanındadır.
+`VMM_REFCOUNT_ADDR` (`0x0E000000`, çalışma anında `st->refcount_addr`) ve `VMM_FRAMES_BASE`
+(`0x0E010000`, çalışma anında `st->frames_base`) üzerinde fiziksel çerçeve başına 16-bit
+referans sayacı tutulur (`fork` ve `MAP_SHARED` paylaşımı için); per-CPU çerçeve önbelleği
+(`VMM_PCPU_MAX_CPUS = 16`) çekirdek başına kilit çekişmesini azaltır.
 
 ## 2. İmaj biçimi
 
@@ -64,10 +68,13 @@ LBA 65536.. : AFS v6 (kullanıcı diski C:/; 0.8.2 öncesi eski v5 diskler 20000
 
 ### ISO (`build/arctian.iso`)
 
-El Torito, no-emulation, önyüklenebilir; `boot_iso.img` (stage1_iso + stage2 + main_kernel)
-2048 bayt hizalı biçimli kayıttan sonra modüller ISO9660 dosyaları olarak durur. Paketleyici
-(`tools/arctianpack.py`) `xorriso` ile üretir; hata olursa derlemeyi durdurur ve çıktı
-`.part` üzerinden atomik taşınır.
+**Hibrit BIOS + UEFI** (Çift El Torito, no-emulation + ISOHybrid MBR/GPT):
+- BIOS yolu: `boot_iso.img` (`stage1_iso + stage2 + main_kernel`, 2048 bayt hizalı).
+- UEFI yolu: `efi.img` FAT32 EFI System Partition (`\EFI\BOOT\BOOTX64.EFI` + `\EFI\ARCTIAN\KERNEL.ELF`).
+- Modüller (`install.bin`, `kplus.bin`, `desktop.bin`), `hdimg.bin` ve varsa isteğe bağlı kurulum
+  varlıkları (`WEBKIT.ELF`, `DEJAVU.TTF`, `CACERT.PEM`) ISO9660 dosyaları olarak yer alır.
+- Paketleyici (`tools/arctianpack.py`) `xorriso` ve `mtools` ile üretir; hata olursa derlemeyi
+  durdurur ve çıktı `.part` üzerinden atomik taşınır.
 
 ### AMOD başlığı
 
@@ -80,12 +87,12 @@ tarafından sıfırlanır; `entry_off` adrese eklenip atılır.
 
 | Modül | İçerik |
 |---|---|
-| `boot/` | NASM ile yazılmış BIOS/El Torito üç aşaması (`stage1`, `stage1_iso`, `stage2`) ve `boot/uefi/` (`BOOTX64.EFI`: GOP, ACPI RSDP, ESP'den `KERNEL.ELF` + `ExitBootServices`) |
-| `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve refcount'lu VMM, modül yükleyici, `int 0x80` syscall, ring 3 geçişi (`ring3_user.asm`); `wlf_user.c` + `vmm_space.c` **yalnız `kernel_plus`a bağlanır** |
-| `install/` | Kurulum sihirbazı: bölümleme, AFS v6 biçimlendirme, modül kopyalama, önyükleme kaydı |
-| `kernel_plus/` | Sürücüler (`drivers/`), ağ yığını (`net/`), SMP zamanlayıcı/iplik/senkronizasyon, yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS, açılış animasyonu (`system/bootanim.c`), **Ring-3 POSIX/ELF64 alt sistemi (`posix/`)** |
-| `desktop/` | LVGL kabuğu (dock, pencereler, hızlı ayarlar, iki ekran giriş), gömülü uygulamalar, `.wlf` yükleyici/VM/broker (`wlf*.c`), Ring-3 POSIX pencere köprüsü (`posix_win.c`), tema (ADL-Wolf). (`wolf_engine` yalnızca geriye dönük yer tutucu stub'dır; QuickJS kaldırılmıştır.) |
-| `lib/` | AFS v6, FAT32, ISO9660, blok katmanı (AHCI/ATA/NVMe), ses/medya kodekleri, PNG/SVG, malloc, `printf`, IRQ-güvenli seri port/klog |
+| `boot/` | NASM ile yazılmış BIOS/El Torito üç aşaması (`stage1`, `stage1_iso`, `stage2`) ve `boot/uefi/` (`BOOTX64.EFI`: 64-bit `>4 GB` GOP, ACPI RSDP, ESP'den `KERNEL.ELF` + `ExitBootServices`) |
+| `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve dinamik `>4 GB`/per-CPU magazin refcount'lu VMM (`PAT WC` destekli), modül yükleyici, `int 0x80` syscall, ring 3 geçişi (`ring3_user.asm`); `wlf_user.c` + `vmm_space.c` **yalnız `kernel_plus`a bağlanır** |
+| `install/` | Grafiksel kurulum sihirbazı: disk seçimi (**min 5 GiB**), AFS v6 biçimlendirme, modül + isteğe bağlı `webkit.elf` kopyalama, kurulum doğrulama |
+| `kernel_plus/` | Modüler GPU (`gpu*.c`: VirtIO-GPU 2D, Intel, NVIDIA, BGA, GOP/VBE + SSE2/AVX2 blitter), ses (`hda.c`, `virtio_snd.c`, `ac97.c`, `pcspk`), ağ (`net/`, `virtio_net.c`, `ipv6.c`), dinamik SMP zamanlayıcı (16.384'e kadar) / süreç tablosu (8.192'ye kadar) / OOM freeze-thaw (`sched.c`, `proc.c`), yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS/WebSocket, açılış animasyonu (`system/bootanim.c`), **Ring-3 POSIX/ELF64 alt sistemi (`posix/`)** |
+| `desktop/` | LVGL kabuğu (dock, `MAX_WINS = 256` pencere yöneticisi, hızlı ayarlar, iki ekran giriş), **"RAM Doldu!" OOM kurtarma arayüzü (`oom_ui.c`)**, gömülü uygulamalar, `.wlf` yükleyici/VM/broker (`wlf*.c`), Ring-3 POSIX pencere köprüsü (`posix_win.c`), tema (ADL-Wolf). (`wolf_engine` yalnızca geriye dönük yer tutucu stub'dır; QuickJS kaldırılmıştır.) |
+| `lib/` | AFS v6 (free-extent geri kazanımı + 255B uzun yol + 1024 dosya), FAT32, ISO9660, blok katmanı (AHCI 64-PRDT / NVMe PRP-List / ATA), PNG/SVG, `malloc`, `printf`, IRQ-güvenli seri port/klog |
 | `include/arctian/` | Kamu başlıkları: `asi.h`, `app.h`, `wlf.h`, `posix_gfx.h`, `amod.h`, `dpk.h`, `update.h`, `sig.h`, `slot.h`, `memory_map.h`, ... |
 | `third_party/` | Vendored kütüphaneler: LVGL (arayüz), mbedTLS (TLS). bkz. `third_party/README.md` |
 
@@ -96,7 +103,7 @@ temas noktasıdır; her gömülü uygulama `app_entry(lv_obj_t *win, asi_t *asi)
 köprüyü alır. Alt sistemler:
 
 `console`, `mem`, `storage`, `time`, `gfx`, `input`, `system`, `fs`, `net`, `proc`, `lab`,
-`sandbox`, `audio`, `crypt`, `firewall`, `power`, `wlf`, `posix`.
+`sandbox`, `audio`, `crypt`, `firewall`, `power`, `spool`, `log`, `dev`, `wlf`, `posix`.
 
 Gömülü modül/uygulamalarda libc yoktur (`memcpy`/`memset`/`memmove`/`memcmp`/`strlen` çekirdek
 tarafından sağlanır). Kullanıcı alanı POSIX ELF64 ikilileri ise `sdk/toolchain/` ile musl libc
@@ -178,9 +185,13 @@ altında Linux x86-64 System V ABI uyumlu kullanıcı alanı alt sistemi bulunur
 
 ## 8. Dosya sistemi
 
-- **AFS v6** kullanıcı diskidir (`C:/`), yeni kurulumlarda LBA `65536`'dan başlar; 64 bayta kadar ad,
-  64-bit kapasite, nesil sayaçlı tutamaklar, yazma günlüğü (journal) ve bütünlük denetimi (`fsck`)
-  içerir. Eski v5 diskler (`LBA 20000`) açılışta uyumlu biçimde bağlanır.
+- **AFS v6** kullanıcı diskidir (`C:/`), yeni kurulumlarda LBA `65536`'dan başlar; disk üzerinde
+  64 bayt kısa ad (`AFS_NAME_MAX`), `.afs_longnames` tablosu üzerinden **255 bayta kadar uzun yol
+  desteği (`AFS_PATH_MAX = 256`)**, 1024 dosyaya kadar dinamik `kmalloc` dosya tablosu, bellek içi
+  sıralı **boş-alan (`free-extent`) geri kazanımı** (bitişik blok birleştirme + `data_next` geri
+  çekme), 64-bit kapasite, nesil sayaçlı tutamaklar, 256 sektör yazma günlüğü (journal) ve
+  bütünlük denetimi (`fsck`) içerir. Eski v5/legacy diskler (`LBA 20000`) açılışta uyumlu biçimde
+  bağlanır.
 - Sistem dosyaları (ayarlar, kurulu paketler) kullanıcı arayüzünden ayrı tutulur; `C:/` altında
   `C:/apps`, `C:/belgeler`, `C:/indirilenler`, `C:/masaustu`, `C:/logs` yer alır.
 - Ayrıca **FAT32** (USB/taşınabilir), **ISO9660** (CD) ve **USB MSD** desteklenir.
@@ -188,20 +199,27 @@ altında Linux x86-64 System V ABI uyumlu kullanıcı alanı alt sistemi bulunur
 
 ## 9. Ağ
 
-`kernel_plus/net/` sıfırdan yazılmış bir TCP/IP yığınıdır: ARP, IPv4, TCP, UDP, DHCP, DNS, NTP,
-HTTP/HTTPS (mbedTLS ile TLS), uygulama seviyesi güvenlik duvarı. Performans iyileştirmeleriyle:
+`kernel_plus/net/` sıfırdan yazılmış bir dual-stack TCP/IP yığınıdır: ARP, IPv4, **IPv6**
+(`ipv6.c`: EUI-64 link-local, ICMPv6 Echo, NDP NS/NA/RS/RA + SLAAC), TCP, UDP, DHCP, DNS, NTP,
+HTTP/HTTPS (mbedTLS ile TLS 1.3, `http_request` + `gzip`/`deflate`), WebSocket (`ws_*`) ve
+uygulama seviyesi güvenlik duvarı. Performans iyileştirmeleriyle:
 - e1000: 128 RX / 32 TX halka, toplu RDT (16'lı) ve ITR=256µs kesme birleştirme, `netbg` 16 ms yield.
-- TCP: `kmalloc` ile 256 KB dairesel alıcı tamponu (sıfır `memmove`), SYN `MSS=1460` + RFC 7323 pencere
-  ölçekleme (`shift=3`), 32-bit `peer_window`, birleştirilmiş ACK.
+- TCP: `kmalloc` ile **128 KB** dairesel alıcı tamponu (`TCP_RXBUF_SIZE`, sıfır `memmove`),
+  SYN `MSS=1460` + RFC 7323 pencere ölçekleme (`shift=3`), 32-bit `peer_window`, birleştirilmiş ACK,
+  RFC 6582 NewReno tıkanıklık denetimi, dinamik sıra dışı (OOO) yeniden birleştirme
+  (`TCP_OOO_SLOTS = 8`), entropi tabanlı ISN ve **64 eşzamanlı bağlantı** (`TCP_MAX_CONNECTIONS`).
 - TLS: çalışma zamanı CPUID `AES-NI` tespiti ile TCG/eski CPU'da ChaCha20, donanım AES'li CPU'da AES-GCM önceliği.
 
-Sürücüler: e1000, PCnet, RTL8139, RTL8169, Atheros ath9k (uçtan uca WPA2/CCMP: `kernel_plus/drivers/wpa2.c`),
-Intel AX201 (gen3 ürün yazılımı yükleme; tarama/bağlantı iskelet).
+Sürücüler: **VirtIO-Net** (`virtio_net.c`: Modern 1.0 + Transitional), e1000, PCnet, RTL8139,
+RTL8169, Atheros ath9k (uçtan uca WPA2/CCMP: `kernel_plus/drivers/wpa2.c`), Intel AX201 (gen3 ürün
+yazılımı yükleme; tarama/bağlantı iskelet).
 
 ## 10. Masaüstü kabuğu
 
 - `desktop/main.c` + `dsk_state.c` + `taskbar.c`: kabuk kurulumu ve dock (`dk_s()` ölçek birimi).
-- `desktop/windows.c`: pencere yöneticisi (taşıma, yakınlaştırma, snap, boyut hatırlama, çalışma alanı).
+- `desktop/windows.c`: pencere yöneticisi (`MAX_WINS = 256` + kapalı kayıt geri dönüşümü, taşıma,
+  yakınlaştırma, snap, boyut hatırlama, çalışma alanı).
+- `desktop/oom_ui.c`: **"RAM Doldu!"** OOM dondurma/kurtarma arayüzü (`Ctrl+Shift+M` veya `VMM_OOM_CRITICAL`).
 - `desktop/quickctl.c`: hızlı ayarlar, OSD, bildirim merkezi, parlaklık/gece modu perdeleri.
 - `desktop/wlf*.c`: `.wlf` yükleme, rol yönlendirme, terminal köprüsü, B3 broker kuyruğu.
 - `desktop/posix_win.c`: Ring-3 POSIX süreçlerinin ARGB8888 pencere/girdi köprüsü.
@@ -219,4 +237,4 @@ make pack DEBUG=1 T07_TEST=1   # 0.7 güvenlik/imza öz-testleri
 ```
 
 Ayrı test betikleri: `tests/uefi/run.sh`, `tests/smp/run.sh`, `tests/isolation/run.sh` ve
-`tests/posix/test_suite.cpp` (Ring-3 POSIX/C++20 23 maddelik doğrulama paketi).
+`tests/posix/test_suite.cpp` (Ring-3 POSIX/C++20 doğrulama paketi).

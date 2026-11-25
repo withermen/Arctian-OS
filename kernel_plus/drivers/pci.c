@@ -67,48 +67,61 @@ pci_bar_t pci_read_bar(uint8_t bus, uint8_t slot, uint8_t func, int bar_index) {
     bar.is_64bit = false;
     bar.prefetchable = false;
 
-    uint8_t offset = PCI_CONFIG_BAR0 + bar_index * 4;
-    if (bar_index >= 6) return bar;
+    if (bar_index < 0 || bar_index >= 6) return bar;
+    uint8_t offset = (uint8_t)(PCI_CONFIG_BAR0 + bar_index * 4);
+
+    uint64_t rflags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(rflags) :: "memory");
 
     uint32_t bar_raw = pci_config_readl(bus, slot, func, offset);
-    bar.is_io = (bar_raw & 1) != 0;
+    if (bar_raw == 0 || bar_raw == 0xFFFFFFFFu) {
+        if (rflags & 0x200ull) __asm__ volatile("sti" ::: "memory");
+        return bar;
+    }
+
+    uint16_t cmd = pci_config_readw(bus, slot, func, PCI_CONFIG_COMMAND);
+    pci_config_writew(bus, slot, func, PCI_CONFIG_COMMAND,
+                      (uint16_t)(cmd & ~(PCI_CMD_IO_SPACE | PCI_CMD_MEM_SPACE)));
+
+    bar.is_io = (bar_raw & 1u) != 0;
 
     if (bar.is_io) {
-        bar.address = (uint64_t)(bar_raw & 0xFFFFFFFC);
-        pci_config_writel(bus, slot, func, offset, 0xFFFFFFFF);
+        bar.address = (uint64_t)(bar_raw & 0xFFFFFFFCu);
+        pci_config_writel(bus, slot, func, offset, 0xFFFFFFFFu);
         uint32_t size_raw = pci_config_readl(bus, slot, func, offset);
         pci_config_writel(bus, slot, func, offset, bar_raw);
-        bar.size = (uint64_t)(~(size_raw & 0xFFFFFFFC) + 1);
+        uint32_t mask = size_raw & 0xFFFFFFFCu;
+        bar.size = mask ? (uint64_t)((~mask) + 1u) : 0;
     } else {
-        bar.prefetchable = (bar_raw & 0x08) != 0;
-        bar.is_64bit = ((bar_raw >> 1) & 0x03) == 0x02;
-        uint32_t low = bar_raw & 0xFFFFFFF0;
+        bar.prefetchable = (bar_raw & 0x08u) != 0;
+        bar.is_64bit = ((bar_raw >> 1) & 0x03u) == 0x02u;
+        uint32_t low = bar_raw & 0xFFFFFFF0u;
 
         if (bar.is_64bit && bar_index < 5) {
-            uint32_t high = pci_config_readl(bus, slot, func, offset + 4);
+            uint32_t high = pci_config_readl(bus, slot, func, (uint8_t)(offset + 4));
             bar.address = ((uint64_t)high << 32) | (uint64_t)low;
-            pci_config_writel(bus, slot, func, offset, 0xFFFFFFFF);
-            uint32_t size_low = pci_config_readl(bus, slot, func, offset);
-            uint64_t size = (uint64_t)(~(size_low & 0xFFFFFFF0) + 1);
-            uint32_t size_high = pci_config_readl(bus, slot, func, offset + 4);
-            if (size_high != 0) {
-                uint32_t saved_bar1 = pci_config_readl(bus, slot, func, offset + 4);
-                pci_config_writel(bus, slot, func, offset + 4, 0xFFFFFFFF);
-                size_high = pci_config_readl(bus, slot, func, offset + 4);
-                pci_config_writel(bus, slot, func, offset + 4, saved_bar1);
-                size |= (uint64_t)size_high << 32;
-                size = ~size + 1;
-            }
-            bar.size = size;
+
+            pci_config_writel(bus, slot, func, offset, 0xFFFFFFFFu);
+            pci_config_writel(bus, slot, func, (uint8_t)(offset + 4), 0xFFFFFFFFu);
+            uint32_t sz_lo = pci_config_readl(bus, slot, func, offset) & 0xFFFFFFF0u;
+            uint32_t sz_hi = pci_config_readl(bus, slot, func, (uint8_t)(offset + 4));
             pci_config_writel(bus, slot, func, offset, bar_raw);
+            pci_config_writel(bus, slot, func, (uint8_t)(offset + 4), high);
+
+            uint64_t mask = ((uint64_t)sz_hi << 32) | (uint64_t)sz_lo;
+            bar.size = mask ? ((~mask) + 1ull) : 0;
         } else {
             bar.address = (uint64_t)low;
-            pci_config_writel(bus, slot, func, offset, 0xFFFFFFFF);
+            pci_config_writel(bus, slot, func, offset, 0xFFFFFFFFu);
             uint32_t size_raw = pci_config_readl(bus, slot, func, offset);
             pci_config_writel(bus, slot, func, offset, bar_raw);
-            bar.size = (uint64_t)(~(size_raw & 0xFFFFFFF0) + 1);
+            uint32_t mask = size_raw & 0xFFFFFFF0u;
+            bar.size = mask ? (uint64_t)((~mask) + 1u) : 0;
         }
     }
+
+    pci_config_writew(bus, slot, func, PCI_CONFIG_COMMAND, cmd);
+    if (rflags & 0x200ull) __asm__ volatile("sti" ::: "memory");
     return bar;
 }
 
@@ -231,8 +244,13 @@ void pci_scan_usb_controllers(void) {
                     default: uc->usb_type = 0xFF; break;
                 }
 
-                for (int ba = 0; ba < 6; ba++)
-                    uc->bar[ba] = pci_read_bar((uint8_t)b, (uint8_t)s, (uint8_t)f, ba);
+                memset(uc->bar, 0, sizeof(uc->bar));
+                for (unsigned ba = 0; ba < 6u; ba++) {
+                    uc->bar[ba] = pci_read_bar((uint8_t)b, (uint8_t)s, (uint8_t)f, (int)ba);
+                    if (uc->bar[ba].is_64bit && ba < 5u) {
+                        ba++;
+                    }
+                }
                 pci_map_bars(uc->bar);
 
                 usb_controller_count++;
@@ -368,8 +386,13 @@ void pci_scan_network_controllers(void) {
                     }
                 }
 
-                for (int ba = 0; ba < 6; ba++)
-                    nc->bar[ba] = pci_read_bar((uint8_t)b, (uint8_t)s, (uint8_t)f, ba);
+                memset(nc->bar, 0, sizeof(nc->bar));
+                for (unsigned ba = 0; ba < 6u; ba++) {
+                    nc->bar[ba] = pci_read_bar((uint8_t)b, (uint8_t)s, (uint8_t)f, (int)ba);
+                    if (nc->bar[ba].is_64bit && ba < 5u) {
+                        ba++;
+                    }
+                }
                 pci_map_bars(nc->bar);
 
                 net_controller_count++;

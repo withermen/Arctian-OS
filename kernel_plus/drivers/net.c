@@ -1,6 +1,8 @@
 #include "kernel.h"
 #include "net.h"
 #include "pci.h"
+#include "virtio_net.h"
+#include "serial.h"
 
 net_if_t net_if;
 
@@ -50,7 +52,16 @@ void net_init(void) {
 
     kernel_debug("NET: Ag sistemi baslatiliyor...");
 
-    for (int i = 0; i < net_controller_count; i++) {
+    if (virtio_net_init() == 0) {
+        net_drv.type = NET_TYPE_VIRTIO;
+        net_drv.driver_ctx = &net_if;
+        net_drv.send_packet = virtio_net_drv_send;
+        net_drv.has_packet = virtio_net_drv_has;
+        net_drv.receive_packet = virtio_net_drv_recv;
+        serial_puts("[net] active=virtio-net\n");
+    }
+
+    for (int i = 0; i < net_controller_count && net_drv.type == -1; i++) {
         net_controller_t *nc = &net_controllers[i];
 
         if (nc->initialized) continue;
@@ -199,6 +210,7 @@ extern bool e1000_link_up(void);
 int net_driver_type(void) { return net_drv.type; }
 
 bool net_link_up(void) {
+    if (net_drv.type == NET_TYPE_VIRTIO) return virtio_net_link_up();
     if (net_drv.type == NET_TYPE_E1000) return e1000_link_up();
     if (net_drv.type == NET_TYPE_RTL8139) return true;  /* RTL: link varsayimi */
     if (net_drv.type == NET_TYPE_PCNET) return pcnet_link_up();

@@ -9,6 +9,7 @@
  * min(64 x cevrimici CPU, HARD_CAP, RAM politikasi) ile belirlenir ve
  * sched_capacity() ile okunur. Tek CPU geri uyumu: kapasite 64. */
 #define SCHED_TASK_HARD_CAP 4096
+#define SCHED_MAX_TASKS     16384
 #define SCHED_CAP_PER_CPU   64u
 
 typedef int sched_tid_t;
@@ -19,8 +20,9 @@ typedef enum {
     TASK_RUNNING,
     TASK_BLOCKED,
     TASK_DONE,
-    TASK_CARRY          /* C3 is calma tasima hali: hedef CPU sahiplendi,
+    TASK_CARRY,         /* C3 is calma tasima hali: hedef CPU sahiplendi,
                          * henuz kuyruguna girmedi; seciciler gormez */
+    TASK_FROZEN         /* E1 OOM basinci: askiya alinan kullanici gorevi */
 } sched_state_t;
 
 void        sched_init(void);
@@ -46,6 +48,7 @@ void        sched_commit_block(void);
 void        sched_block_current(void);
 void        sched_wake(sched_tid_t tid);
 void        sched_reap(sched_tid_t tid);
+void        sched_terminate_task(sched_tid_t tid);
 
 /* POSIX / Ring-3 TLS + kernel yigin + thread baglami */
 void        sched_set_fs_base(uint64_t fs_base);
@@ -86,5 +89,15 @@ void        sched_irq_restore(uint64_t flags);
  * tavani yeniden hesaplar (yalniz buyutur, kucultmez). */
 int         sched_capacity(void);
 void        sched_scale_capacity(void);
+
+/* E1: OOM dondurma/cozme ve gorev koruma API'si */
+int         sched_freeze_task(sched_tid_t tid);
+int         sched_thaw_task(sched_tid_t tid);
+void        sched_freeze_user_apps(void);
+void        sched_thaw_user_apps(void);
+int         sched_is_frozen(sched_tid_t tid);
+void        sched_mark_user_app(sched_tid_t tid, int is_user);
+void        sched_mark_freeze_exempt(sched_tid_t tid, int exempt);
+int         sched_e1_selftest(void);
 
 #endif
