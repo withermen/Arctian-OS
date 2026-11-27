@@ -118,7 +118,7 @@ static const char *oom_kind_label(uint8_t kind) {
     switch (kind) {
         case ASI_OOM_KIND_POSIX: return "POSIX";
         case ASI_OOM_KIND_WLF:   return "WLF";
-        case OOM_KIND_DESKTOP:   return "Masaustu";
+        case OOM_KIND_DESKTOP:   return "Masaüstü";
         default:                 return "Sistem";
     }
 }
@@ -213,7 +213,7 @@ static void oom_collect_items(void) {
                 it->ram_kb = (est > it->ram_kb) ? est : it->ram_kb;
             scopy(it->name, linked_rec->title[0] ? linked_rec->title : kapps[i].name, 47);
         } else {
-            scopy(it->name, kapps[i].name[0] ? kapps[i].name : "Gorev", 47);
+            scopy(it->name, kapps[i].name[0] ? kapps[i].name : "Görev", 47);
         }
     }
 
@@ -295,7 +295,7 @@ static void oom_kill_index(int idx) {
         char st[96];
         int sn = 0;
         st[0] = 0;
-        oom_buf_cat(st, sizeof(st), &sn, "Sonlandirildi: ");
+        oom_buf_cat(st, sizeof(st), &sn, "Sonlandırıldı: ");
         oom_buf_cat(st, sizeof(st), &sn, it.name);
         lv_label_set_text(s_status_lbl, st);
         lv_obj_set_style_text_color(s_status_lbl, lv_color_hex(0x4ADE80), 0);
@@ -374,8 +374,8 @@ static void oom_refresh_ram_bar(void) {
     }
 
     if (s_ram_badge && s_ram_badge_lbl) {
-        const char *st_txt = (oom_lvl >= ASI_OOM_CRITICAL) ? "KRITIK"
-                           : (oom_lvl == ASI_OOM_LOW)      ? "YUKSEK"
+        const char *st_txt = (oom_lvl >= ASI_OOM_CRITICAL) ? "KRİTİK"
+                           : (oom_lvl == ASI_OOM_LOW)      ? "YÜKSEK"
                            : (s_killed_any ? "RAHAT" : "DONDURULDU");
         lv_label_set_text(s_ram_badge_lbl, st_txt);
         lv_obj_set_style_bg_color(s_ram_badge, lv_color_hex(badge_col), 0);
@@ -473,14 +473,14 @@ static void oom_rebuild_list(void) {
         char sh[80];
         int sn = 0;
         sh[0] = 0;
-        oom_buf_cat(sh, sizeof(sh), &sn, "Acik Uygulamalar (");
+        oom_buf_cat(sh, sizeof(sh), &sn, "Açık Uygulamalar (");
         oom_buf_u64(sh, sizeof(sh), &sn, (uint64_t)s_item_n);
-        oom_buf_cat(sh, sizeof(sh), &sn, " gorev)");
+        oom_buf_cat(sh, sizeof(sh), &sn, " görev)");
         lv_label_set_text(s_sec_lbl, sh);
     }
 
     if (s_item_n == 0) {
-        lv_obj_t *empty = label(s_list, "Kapatilabilir baska uygulama yok.", ADL_TEXT_DIM);
+        lv_obj_t *empty = label(s_list, "Kapatılabilir başka uygulama yok.", ADL_TEXT_DIM);
         lv_obj_set_style_text_font(empty, s_f_sub ? s_f_sub : adl_font(), 0);
         lv_obj_set_style_pad_top(empty, 48, 0);
         lv_obj_set_width(empty, LV_PCT(100));
@@ -520,7 +520,7 @@ static void oom_rebuild_list(void) {
                 oom_buf_u64(meta, sizeof(meta), &mn, (uint64_t)it->pid);
                 oom_buf_cat(meta, sizeof(meta), &mn, " - ");
             }
-            oom_buf_cat(meta, sizeof(meta), &mn, it->frozen ? "Donduruldu" : "Calisiyor");
+            oom_buf_cat(meta, sizeof(meta), &mn, it->frozen ? "Donduruldu" : "Çalışıyor");
             lv_obj_t *ml = label(row, meta, ADL_TEXT_DIM);
             lv_obj_set_style_text_font(ml, s_f_small ? s_f_small : adl_font(), 0);
             lv_obj_align(ml, LV_ALIGN_BOTTOM_LEFT, 0, -5);
@@ -551,9 +551,9 @@ static void oom_rebuild_list(void) {
             lv_obj_set_style_text_align(rl, LV_TEXT_ALIGN_RIGHT, 0);
             lv_obj_align(rl, LV_ALIGN_RIGHT_MID, -98, 0);
 
-            /* Sag: Kirmizi [Sonlandir] dugmesi */
+            /* Sağ: Kırmızı [Sonlandır] düğmesi */
             lv_obj_t *kb = lv_button_create(row);
-            lv_obj_set_size(kb, 88, 30);
+            lv_obj_set_size(kb, 92, 30);
             lv_obj_set_style_radius(kb, 6, 0);
             lv_obj_set_style_bg_color(kb, lv_color_hex(0xC42B1C), 0);
             lv_obj_set_style_bg_color(kb, lv_color_hex(0xEF4444), LV_STATE_HOVERED);
@@ -561,7 +561,7 @@ static void oom_rebuild_list(void) {
             lv_obj_set_style_border_width(kb, 0, 0);
             lv_obj_align(kb, LV_ALIGN_RIGHT_MID, 0, 0);
             {
-                lv_obj_t *kl = label(kb, "Sonlandir", 0xFFFFFF);
+                lv_obj_t *kl = label(kb, "Sonlandır", 0xFFFFFF);
                 lv_obj_set_style_text_font(kl, s_f_small ? s_f_small : adl_font(), 0);
                 lv_obj_center(kl);
             }
@@ -686,14 +686,14 @@ void oom_ui_enter(int manual) {
     lv_obj_set_pos(ttl, 74, 18);
 
     lv_obj_t *sub = label(s_panel,
-                          "Sistem bellegi kritik seviyede. Uygulamalar gecici olarak donduruldu.",
+                          "Sistem belleği kritik seviyede. Uygulamalar geçici olarak donduruldu.",
                           ADL_TEXT_DIM);
     lv_obj_set_style_text_font(sub, s_f_sub ? s_f_sub : adl_font(), 0);
     lv_label_set_long_mode(sub, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(sub, cw - 102);
     lv_obj_set_pos(sub, 74, 46);
 
-    /* Canli bellek kullanim kutusu */
+    /* Canlı bellek kullanım kutusu */
     int inner_w = cw - 48;
     lv_obj_t *mbox = lv_obj_create(s_panel);
     base_obj(mbox, 0x0F1115, 10, ADL_BORDER);
@@ -701,7 +701,7 @@ void oom_ui_enter(int manual) {
     lv_obj_set_size(mbox, inner_w, 56);
     lv_obj_set_pos(mbox, 24, 92);
 
-    lv_obj_t *mlbl = label(mbox, "Bellek Kullanimi", ADL_TEXT_DIM);
+    lv_obj_t *mlbl = label(mbox, "Bellek Kullanımı", ADL_TEXT_DIM);
     lv_obj_set_style_text_font(mlbl, s_f_small ? s_f_small : adl_font(), 0);
     lv_obj_align(mlbl, LV_ALIGN_TOP_LEFT, 2, 0);
 
@@ -712,7 +712,7 @@ void oom_ui_enter(int manual) {
     lv_obj_set_style_bg_color(s_ram_badge, lv_color_hex(0xEF4444), 0);
     lv_obj_set_style_bg_opa(s_ram_badge, LV_OPA_COVER, 0);
     lv_obj_align(s_ram_badge, LV_ALIGN_TOP_RIGHT, -2, -2);
-    s_ram_badge_lbl = label(s_ram_badge, "KRITIK", 0xFFFFFF);
+    s_ram_badge_lbl = label(s_ram_badge, "KRİTİK", 0xFFFFFF);
     lv_obj_set_style_text_font(s_ram_badge_lbl, s_f_small ? s_f_small : adl_font(), 0);
     lv_obj_center(s_ram_badge_lbl);
 
@@ -736,12 +736,12 @@ void oom_ui_enter(int manual) {
     lv_obj_set_style_bg_opa(s_ram_fill, LV_OPA_COVER, 0);
     lv_obj_set_pos(s_ram_fill, 0, 0);
 
-    /* Liste basligi */
-    s_sec_lbl = label(s_panel, "Acik Uygulamalar", ADL_TEXT_DIM);
+    /* Liste başlığı */
+    s_sec_lbl = label(s_panel, "Açık Uygulamalar", ADL_TEXT_DIM);
     lv_obj_set_style_text_font(s_sec_lbl, s_f_small ? s_f_small : adl_font(), 0);
     lv_obj_set_pos(s_sec_lbl, 26, 158);
 
-    /* Kaydirilabilir uygulama listesi */
+    /* Kaydırılabilir uygulama listesi */
     int list_h = ch - 252;
     if (list_h < 120) list_h = 120;
     s_list = lv_obj_create(s_panel);
@@ -758,8 +758,8 @@ void oom_ui_enter(int manual) {
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_AUTO);
 
-    /* Alt durum + eylem cubugu */
-    s_status_lbl = label(s_panel, "Secip Sonlandir'a tiklayin.", ADL_TEXT_DIM);
+    /* Alt durum + eylem çubuğu */
+    s_status_lbl = label(s_panel, "Seçip Sonlandır'a tıklayın.", ADL_TEXT_DIM);
     lv_obj_set_style_text_font(s_status_lbl, s_f_small ? s_f_small : adl_font(), 0);
     lv_obj_set_width(s_status_lbl, inner_w - 384);
     lv_label_set_long_mode(s_status_lbl, LV_LABEL_LONG_DOT);
@@ -770,7 +770,7 @@ void oom_ui_enter(int manual) {
     lv_obj_set_style_radius(s_btn_resume, 8, 0);
     lv_obj_align(s_btn_resume, LV_ALIGN_BOTTOM_RIGHT, -228, -20);
     {
-        lv_obj_t *rl = label(s_btn_resume, "Masaustune Don", ADL_TEXT);
+        lv_obj_t *rl = label(s_btn_resume, "Masaüstüne Dön", ADL_TEXT);
         lv_obj_set_style_text_font(rl, s_f_sub ? s_f_sub : adl_font(), 0);
         lv_obj_center(rl);
     }
@@ -785,7 +785,7 @@ void oom_ui_enter(int manual) {
     lv_obj_set_style_border_width(s_btn_reboot, 0, 0);
     lv_obj_align(s_btn_reboot, LV_ALIGN_BOTTOM_RIGHT, -24, -20);
     {
-        lv_obj_t *rbl = label(s_btn_reboot, "Sistemi Yeniden Baslat", 0xFFFFFF);
+        lv_obj_t *rbl = label(s_btn_reboot, "Sistemi Yeniden Başlat", 0xFFFFFF);
         lv_obj_set_style_text_font(rbl, s_f_sub ? s_f_sub : adl_font(), 0);
         lv_obj_center(rbl);
     }

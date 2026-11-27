@@ -23,6 +23,11 @@
 #include "kernel.h"
 #include "serial.h"
 
+/* Intel GPU arka isik denetleyicisi yalnizca kernel_plus'ta baglidir;
+ * main_kernel / install modullerinde zayif sembol NULL kalir. */
+extern int gpu_intel_set_backlight(int percent) __attribute__((weak));
+extern int gpu_intel_get_backlight(void) __attribute__((weak));
+
 /* Port yoklamasi icin ust sinir. Her tur io_wait (~1 us) icerir;
  * 100000 tur yaklasik 0.1 s eder, EC yoksa sistem kilitlenmez. */
 #define EC_TIMEOUT 100000
@@ -343,14 +348,21 @@ void ec_dump(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Parlaklik (yerlesim makineye ozel; desteklenmiyor)                 */
+/* Parlaklik (Intel GPU PWM varsa kullanilir; yoksa -1)               */
 /* ------------------------------------------------------------------ */
 
 int ec_brightness_set(int percent) {
-    (void)percent;
+    if (gpu_intel_set_backlight) {
+        int rc = gpu_intel_set_backlight(percent);
+        if (rc >= 0) return rc;
+    }
     return -1;
 }
 
 int ec_brightness_get(void) {
+    if (gpu_intel_get_backlight) {
+        int val = gpu_intel_get_backlight();
+        if (val >= 0) return val;
+    }
     return -1;
 }

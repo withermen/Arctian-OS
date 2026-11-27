@@ -2,6 +2,40 @@
 #include "pci.h"
 #include "mmio.h"
 
+/* Ek Intel Ethernet (I219 / I225 / I226) ve Realtek (RTL8136 / RTL8161) PCI ID'leri */
+#ifndef PCI_DEV_I225_IT
+#define PCI_DEV_I225_LM          0x15F2
+#define PCI_DEV_I225_IT          0x15F3
+#endif
+#ifndef PCI_DEV_I226_LM
+#define PCI_DEV_I226_LM          0x125B
+#define PCI_DEV_I226_V           0x125C
+#endif
+#ifndef PCI_DEV_E1000_I219V
+#define PCI_DEV_E1000_I219V      0x1570
+#define PCI_DEV_E1000_I219LM2    0x15B7
+#define PCI_DEV_E1000_I219V2     0x15B8
+#define PCI_DEV_E1000_I219LM4    0x15D7
+#define PCI_DEV_E1000_I219V4     0x15D8
+#define PCI_DEV_E1000_I219LM6    0x15E3
+#define PCI_DEV_E1000_I219LM10   0x0D4E
+#define PCI_DEV_E1000_I219V10    0x0D4F
+#define PCI_DEV_E1000_I219LM17   0x1A1E
+#define PCI_DEV_E1000_I219V17    0x1A1F
+#endif
+#ifndef PCI_DEV_RTL8136
+#define PCI_DEV_RTL8136          0x8136
+#define PCI_DEV_RTL8161          0x8161
+#endif
+#ifndef PCI_DEV_IWL_AX201_D
+#define PCI_DEV_IWL_9560_C       0x31DC
+#define PCI_DEV_IWL_AX201_D      0x43F0
+#define PCI_DEV_IWL_AX211_A      0x51F1
+#define PCI_DEV_IWL_AX211_B      0x54F0
+#define PCI_DEV_IWL_AX211_C      0x7A70
+#define PCI_DEV_IWL_AX211_D      0x7E40
+#endif
+
 static void pci_map_bars(pci_bar_t *bars) {
     for (int i = 0; i < 6; i++) {
         if (bars[i].is_io || bars[i].address == 0) continue;
@@ -312,7 +346,21 @@ void pci_scan_network_controllers(void) {
                          device == PCI_DEV_E1000_82545EM ||
                          device == PCI_DEV_E1000_82574L ||
                          device == PCI_DEV_E1000_I217LM ||
-                         device == PCI_DEV_E1000_I219LM)) {
+                         device == PCI_DEV_E1000_I219LM ||
+                         device == PCI_DEV_E1000_I219V ||
+                         device == PCI_DEV_E1000_I219LM2 ||
+                         device == PCI_DEV_E1000_I219V2 ||
+                         device == PCI_DEV_E1000_I219LM4 ||
+                         device == PCI_DEV_E1000_I219V4 ||
+                         device == PCI_DEV_E1000_I219LM6 ||
+                         device == PCI_DEV_E1000_I219LM10 ||
+                         device == PCI_DEV_E1000_I219V10 ||
+                         device == PCI_DEV_E1000_I219LM17 ||
+                         device == PCI_DEV_E1000_I219V17 ||
+                         device == PCI_DEV_I225_LM ||
+                         device == PCI_DEV_I225_IT ||
+                         device == PCI_DEV_I226_LM ||
+                         device == PCI_DEV_I226_V)) {
                         nc->net_type = NET_TYPE_E1000;
                     } else if (vendor == PCI_VENDOR_REALTEK &&
                                device == PCI_DEV_RTL8139) {
@@ -320,7 +368,9 @@ void pci_scan_network_controllers(void) {
                     } else if (vendor == PCI_VENDOR_REALTEK &&
                                (device == PCI_DEV_RTL8168 ||
                                 device == PCI_DEV_RTL8169 ||
-                                device == PCI_DEV_RTL8125)) {
+                                device == PCI_DEV_RTL8136 ||
+                                device == PCI_DEV_RTL8125 ||
+                                device == PCI_DEV_RTL8161)) {
                         nc->net_type = NET_TYPE_RTL8169;
                     } else if (vendor == PCI_VENDOR_AMD &&
                                (device == PCI_DEV_PCNET_II ||
@@ -345,12 +395,18 @@ void pci_scan_network_controllers(void) {
                           device == PCI_DEV_IWL_9260 ||
                           device == PCI_DEV_IWL_9560_A ||
                           device == PCI_DEV_IWL_9560_B ||
+                          device == PCI_DEV_IWL_9560_C ||
                           device == PCI_DEV_IWL_AX200 ||
                           device == PCI_DEV_IWL_AX201_A ||
                           device == PCI_DEV_IWL_AX201_B ||
                           device == PCI_DEV_IWL_AX201_C ||
+                          device == PCI_DEV_IWL_AX201_D ||
                           device == PCI_DEV_IWL_AX210 ||
                           device == PCI_DEV_IWL_AX201_SO ||
+                          device == PCI_DEV_IWL_AX211_A ||
+                          device == PCI_DEV_IWL_AX211_B ||
+                          device == PCI_DEV_IWL_AX211_C ||
+                          device == PCI_DEV_IWL_AX211_D ||
                           device == PCI_DEV_IWL_AX411)) ||
                         (vendor == PCI_VENDOR_REALTEK &&
                          (device == PCI_DEV_RTL8188EE ||

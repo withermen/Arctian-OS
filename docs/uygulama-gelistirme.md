@@ -5,7 +5,7 @@ isteyen biri için tek kaynak referanstır. Dosya sistemi, medya (ses), ağ,
 grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
 **tüm genel API'leri** ve çalışan **kod örneklerini** içerir.
 
-- Sürüm: **Arctian 1.0** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
+- Sürüm: **Arctian 1.1** (`ARCTIAN_VERSION` — tek kaynak `version.json`)
 - Arayüz kiti: **LVGL v9.6** + ASI (Arctian System Interface, sürüm `2`)
 - Mimari: x86_64 (AMD64), 64-bit. Arctian'da üç uygulama yolu vardır:
   1. **Gömülü uygulamalar (`desktop/apps/*`)**: `asi_t *asi` ve LVGL üzerinden çalışır; kabukla
@@ -14,10 +14,11 @@ grafik, girdi, süreç, güvenlik, güç yönetimi ve mağaza (DuckStore) dahil
      olarak yalıtılmıştır; GUI çağrıları `wolf_api_t` trampoline ve `SYS_WOLF_CALL/WAIT` broker
      kuyruğu üzerinden masaüstüne aktarılır.
   3. **Ring-3 POSIX ELF64 / C++20 ikilileri (`sdk/toolchain/`)**: `musl 1.2.5 + libstdc++ 14.2`
-     ile derlenen statik PIE ikililer Linux x86-64 `SYSCALL/SYSRET` ABI ve paylaşımlı ARGB8888
-     grafik köprüsü (`arctian/gfx.h`) üzerinden izole süreç olarak çalışır (`arctian-pkg-config`,
-     `arctian.cmake` ve `sdk/webkit/` WPE WebKit köprüsü dahil).
-- Ekran çıkışı: Modüler GPU alt sistemi (`VirtIO-GPU 2D`, `Intel`, `NVIDIA`, `Bochs BGA`,
+     ile derlenen statik PIE ikililer Linux x86-64 `SYSCALL/SYSRET` ABI, OSS `/dev/dsp` PCM
+     akışı ve paylaşımlı ARGB8888 + pano köprüsü (`arctian/gfx.h`) üzerinden izole süreç olarak
+     çalışır (`arctian-pkg-config`, `arctian.cmake` ve `sdk/webkit/` WPE WebKit 1.1 dahil).
+- Ekran çıkışı: Modüler GPU alt sistemi (`VirtIO-GPU 2D`, `Intel` PWM parlaklık destekli,
+  `NVIDIA`, `Bochs BGA` + VirtualBox `VBoxVGA`/`VMSVGA` ilk-kare `Y_OFFSET` düzeltmeli,
   `UEFI GOP` 64-bit `>4 GB` / `BIOS VBE LFB`); varsayılan **1280×720**, Ayarlar → Ekran'dan
   çalışma anında **1600×900 / 1920×1080 / 2560×1440**'a değiştirilebilir.
 
@@ -624,12 +625,14 @@ arctian_setjmp(&ctx);   /* not: imza arctian_setjmp(ctx) -> 0 */
 
 Disk birimleri:
 
-- `C:` — **AFS v6** (kalıcı yerel disk; yazılabilir; 256 sektör metadata günlüğü + CRC32 +
-  izinler + bellek içi sıralı `free-extent` geri kazanımı + 255 bayta kadar uzun yol desteği
-  + 1024 dosyaya kadar dinamik tablo).
+- `C:` — **AFS v7** (kalıcı yerel disk; yazılabilir; **65.536 dosya** kapasiteli dinamik inode
+  blokları + çoklu-extent `EXT7`, 256 sektör metadata günlüğü + CRC32 + `uid/gid/mode` çoklu
+  kullanıcı yalıtımı + 255 bayta kadar uzun yol desteği; v6 geriye uyumlu).
   Açılışta otomatik oluşan klasörler: `apps`, `indirilenler`, `belgeler`,
-  `masaustu`, `logs`; ayrıca `etc`, `Users/<ad>`, `cop` (çöp kovası).
-- `D:` — **FAT32 (USB bellek)**, **salt-okunur**.
+  `masaustu`, `logs`; ayrıca `etc`, `Users/<ad>`, `Cop` (çöp kovası — özgün yola geri yükleme).
+- `D:` — **USB bellek / taşınabilir disk (`volfs.c`)**: **xHCI USB 3.0** (`usb_xhci.c`)
+  üzerinden sıcak takma (*hot-plug*), MBR/GPT bölümlü **FAT32 okuma & yazma** (UTF-8 Türkçe LFN)
+  ve **exFAT okuma** (`lib/exfat.h`).
 
 ### 12.1 Yapı
 
@@ -794,9 +797,10 @@ const char *(*wifi_ssid)(void);                     /* bağlı SSID veya "" */
 ```
 
 > **Not:** Wi-Fi katmanı sahte ağ üretmez. Kayıtlı gerçek 802.11 sürücüsü yoksa
-> `wifi_scan` 0 döner ve `wifi_connect` hata verir (`ath9k` WPA2/CCMP uçtan uca, `AX201`
-> firmware yükleme mevcuttur). Ethernet tarafında gerçek sürücüler (`virtio-net`, `e1000`,
-> `rtl8139`, `rtl8169`, `pcnet`) vardır; ağ yığını IPv4 yanında **IPv6** (SLAAC/NDP/ICMPv6)
+> `wifi_scan` 0 döner ve `wifi_connect` hata verir (`ath9k` çoklu hız + WPA2/CCMP uçtan uca;
+> `iwl_ax201` UMAC tarama/WPA2 kod yolu gerçek bare-metal RF doğrulaması bekler). Ethernet tarafında
+> gerçek sürücüler (`virtio-net`, `e1000` I219/I225/I226 + 64-bit, gerçek DMA `rtl8169`, `rtl8139`,
+> `pcnet`) ve dürüst DHCP hata durumu vardır; ağ yığını IPv4 yanında **IPv6** (SLAAC/NDP/ICMPv6)
 > ve TCP NewReno/OOO/64 soket destekler.
 
 ### 13.4 DNS + TCP (istemci)
@@ -990,8 +994,10 @@ uint32_t (*sample_rate)(void);                    /* aktif örnekleme hızı */
 ```
 
 Desteklenen WAV: PCM format 1 ve 0xFFFE, 8/16-bit, mono/stereo; çalma anında
-16-bit stereo'ya dönüştürülür. Ses arka uçları: **Intel HDA** (`hda.c`), **VirtIO-Sound**
-(`virtio_snd.c`), **AC97** (`ac97.c`) ve **PC Speaker** yedek yolu.
+16-bit stereo'ya dönüştürülür. Ses arka uçları: **Intel HDA** (`hda.c`, çok pinli jack-sense),
+**VirtIO-Sound** (`virtio_snd.c`, S16 PCM ses ölçekleme), **AC97** (`ac97.c`) ve **PC Speaker**
+yedek yolu. Ring-3 POSIX ELF64 uygulamaları ise `/dev/dsp` (`SNDCTL_DSP_*`) üzerinden OSS PCM
+ses akışı yazabilir (`kernel_plus/posix/posix_fd.c`).
 
 Tam örnek (Medya Oynatıcı deseninden):
 
@@ -1287,7 +1293,8 @@ modüllere bölünmüştür. Ortak semboller `desktop/dsk.h`'de toplanır:
 
 | Modül | Sorumluluk |
 |---|---|
-| `main.c` | Giriş noktası, kilit/çökme kurtarma, ana döngü |
+| `main.c` | Giriş noktası, kilit/çökme kurtarma, OOBE tetikleme, ana döngü |
+| `oobe.h` | 4 adımlı ilk kurulum sihirbazı (klavye düzeni, saat dilimi, tema/vurgu, tur) |
 | `dsk_state.c` | Küresel durum (`g_taskbar`, `g_wallpaper`, `g_tb[]`, çözünürlük tercihleri) |
 | `dsk_util.c` | `make_icon` / `make_logo`, canvas serbest bırakma, ölçek yardımcıları |
 | `taskbar.c` | Cam taskbar, sabitlenmiş ikonlar, arama kutusu, saat, bağlam menüleri |
@@ -1295,10 +1302,11 @@ modüllere bölünmüştür. Ortak semboller `desktop/dsk.h`'de toplanır:
 | `startmenu.c` | Başlat menüsü (arama, sabitlenmiş karolar, önerilenler) |
 | `wallpaper.c` | Arka plan ölçekleme (`scale_hq`) ve fare imleci (`build_cursor`) |
 | `settings.c` | `shell_rebuild`, `shell_apply_resolution`, `boot_apply_saved_resolution` |
-| `windows.c`, `launch.c`, `power.c`, `clock.c`, `network_panel.c` | Pencere yönetimi ve görev çubuğu panelleri |
-| `lock.c`, `auth.c` | Kilit ekranı, hesap oluşturma/giriş |
+| `windows.c`, `launch.c`, `power.c`, `clock.c`, `network_panel.c` | 8 yönlü kenar/köşe boyutlandırmalı pencere yönetimi ve görev çubuğu panelleri |
+| `quickctl.c` | Hızlı ayarlar, OSD, parlaklık/gece modu perdesi ve PNG ekran görüntüsü (`C:/ekran_XX.png`) |
+| `lock.c`, `auth.c` | Çoklu kullanıcı kilit ekranı, hesap oluşturma/giriş |
 | `port/lv_port.c` | LVGL ↔ ASI köprüsü (flush, indev, tick) |
-| `theme/adl_wolf.c` | ADL-Wolf tema ve font kurulumu |
+| `theme/adl_wolf.c` | ADL-Wolf tema ve Türkçe destekli UTF-8 font kurulumu |
 
 **Çözünürlük bağımsız ölçek.** Bütün arayüz ölçüleri **2560 x 1440 (2K)**
 referans alınarak tanımlanır ve çalışma anında `ui_s()` ile ölçeklenir.
@@ -1746,5 +1754,5 @@ geriye dönük sembol/ABI uyumluluğunu koruyan hafif bir yer tutucu kabuktur (`
 
 ---
 
-*Bu belge Arctian 1.0 API yüzeyini (`include/arctian/*.h`, `desktop/*`, `sdk/toolchain/`,
-`sdk/webkit/`, LVGL v9.6) esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*
+*Bu belge Arctian 1.1 API yüzeyini (`include/arctian/*.h`, `desktop/*`, `sdk/toolchain/`,
+`sdk/webkit/`, `sdk/office/`, LVGL v9.6) esas alır. Yeni başlık eklenirse ilgili bölüm güncellenmelidir.*

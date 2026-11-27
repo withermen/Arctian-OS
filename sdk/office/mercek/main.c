@@ -615,7 +615,7 @@ static int g_pickn;
 static void soon(wolf_id w, void *u)
 {
     (void)w; (void)u;
-    wolf_notify("Mercek", "Bu ozellik 0.8.6'da yok");
+    wolf_notify("Mercek", "Yakınlaştırma yalnız PDF belgelerde desteklenir");
 }
 
 static void utoa2(int v, char *t)
@@ -887,7 +887,7 @@ static void titlebar(void)
     wolf_id tb = wolf_panel(g_root, 0, 0, g_w, S(36));
     bgc(tb, C_GROUND); rad(tb, 0); bgo(tb, 100); brd_c(tb, 2, C_LINE);
     char t[120];
-    scpy(t, sizeof t, g_name[0] ? g_name : "Dosya secilmedi");
+    scpy(t, sizeof t, g_name[0] ? g_name : "Dosya seçilmedi");
     wolf_strcat(t, sizeof t, " — Mercek");
     lab(tb, 12, (36 - 12) / 2, 560, t, 12, C_TXT2, -1);
     winbtn(g_w - S(92),  SVG_MIN,   cb_min,   0x262B35);
@@ -971,8 +971,8 @@ static void rightpanel(void)
     lab(rp, 16, S(16), 218, "Belge", 14, C_TXT, -1);
 
     const char *kind_s = "—";
-    if (g_kind == 1) kind_s = "PNG goruntu";
-    if (g_kind == 2) kind_s = "PDF (basit alt kume)";
+    if (g_kind == 1) kind_s = "PNG görüntü";
+    if (g_kind == 2) kind_s = "PDF (basit alt küme)";
     if (g_kind == 3) kind_s = "Desteklenmiyor";
 
     char szs[24] = "—";
@@ -988,7 +988,7 @@ static void rightpanel(void)
         wolf_itoa(g_npage, nb, sizeof nb);
         scpy(pgs, sizeof pgs, nb);
         wolf_strcat(pgs, sizeof pgs, " sayfa");
-    } else if (g_kind == 1) scpy(pgs, sizeof pgs, "1 goruntu");
+    } else if (g_kind == 1) scpy(pgs, sizeof pgs, "1 görüntü");
 
     char mbs[40] = "—";
     if (g_kind == 2) {
@@ -1002,7 +1002,7 @@ static void rightpanel(void)
     }
 
     const char *rows[5][2] = {
-        { "Tur", kind_s }, { "Boyut", szs }, { "Icerik", pgs },
+        { "Tür", kind_s }, { "Boyut", szs }, { "İçerik", pgs },
         { "Sayfa boyu", mbs }, { "", "" },
     };
     for (int i = 0; i < 4; i++) {
@@ -1046,8 +1046,8 @@ static void statusbar(void)
             wolf_strcat(t, sizeof t, nb);
             wolf_strcat(t, sizeof t, " KB");
         }
-    } else if (g_kind == 1) scpy(t, sizeof t, "PNG goruntu");
-    else scpy(t, sizeof t, g_err[0] ? g_err : "Dosya secilmedi — Ac ile listeyin");
+    } else if (g_kind == 1) scpy(t, sizeof t, "PNG görüntü");
+    else scpy(t, sizeof t, g_err[0] ? g_err : "Dosya seçilmedi — Aç ile listeleyin");
     lab(sb, 14, ly, 480, t, 12, C_META, -1);
 
     t[0] = 0;
@@ -1066,7 +1066,7 @@ static void picker(void)
     wolf_id box = wolf_panel(ov, (g_w - pw2) / 2, S(60), pw2, ph2);
     bgc(box, C_PANEL); bgo(box, 100); rad(box, S(12));
     brd_c(box, 15, C_LINE);
-    lab(box, 20, S(16), 360, "Ac — PDF ve PNG", 16, C_TXT, -1);
+    lab(box, 20, S(16), 360, "Aç — PDF ve PNG", 16, C_TXT, -1);
     lab(box, 20, S(44), 460, "C:/belgeler, C:/resimler, C:/masaustu", 11, C_META, -1);
 
     wolf_id cb_ = wolf_panel(box, pw2 - S(84), S(16), S(64), S(30));

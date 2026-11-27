@@ -15,6 +15,7 @@
  *     with strict idle/timeout guards and instant fallback to WC + SIMD blit.
  */
 #include "gpu.h"
+#include "gpu_intel.h"
 #include "gpu_simd.h"
 #include "vesa.h"
 #include "bootinfo.h"
@@ -49,11 +50,22 @@
 #define INTEL_MI_FLUSH_DW_CMD    ((0u << 29) | (0x26u << 23) | 2u)
 #define INTEL_MI_NOOP            0x00000000u
 
+/* Open-documented Intel Display Backlight PWM registers */
+#define INTEL_BLC_PWM_CPU_CTL2   0x48250u
+#define INTEL_BLC_PWM_CPU_CTL    0x48254u
+#define INTEL_BLC_PWM_CTL2       0x61250u
+#define INTEL_BLC_PWM_CTL        0x61254u
+#define INTEL_SBLC_PWM_CTL1      0xC8250u
+#define INTEL_SBLC_PWM_CTL2      0xC8254u
+#define INTEL_SBLC_PWM_DUTY      0xC8258u
+#define INTEL_BLC_PWM_ENABLE     (1u << 31)
+
 #define INTEL_MMIO_MAP_CAP       (4ull * 1024ull * 1024ull)
 #define INTEL_VRAM_MAP_CAP       (64ull * 1024ull * 1024ull)
 
 typedef struct {
     volatile uint8_t *mmio;
+    bool              present;
     int               gen;
     int               active_pipe;   /* 0=A, 1=B, 2=C, -1=none */
     uint32_t          base_surf_gtt; /* Linear GTT offset of front plane */
@@ -354,6 +366,7 @@ int gpu_intel_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
     out->ops.page_flip   = (out->page_count >= 2) ? intel_page_flip : 0;
     out->priv            = &s_intel;
     out->active          = true;
+    s_intel.present      = true;
 
     vesa_attach_external(out->fb_virt, out->vram_phys,
                          out->width, out->height, out->pitch, out->bpp);
@@ -365,5 +378,108 @@ int gpu_intel_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
                   s_intel.base_surf_gtt,
                   s_intel.bcs_ready ? "ON" : "fallback",
                   out->wc_active ? "ON" : "OFF");
+    return 0;
+}
+
+typedef enum {
+    BLC_NONE = 0,
+    BLC_PCH_PAIR,   /* SBLC_PWM_CTL1 (0xC8250) + SBLC_PWM_CTL2 (0xC8254: freq[31:16], duty[15:0]) */
+    BLC_PCH_SPLIT,  /* SBLC_PWM_CTL1 (0xC8250) + FREQ (0xC8254) + DUTY (0xC8258) */
+    BLC_CPU_PAIR,   /* BLC_PWM_CPU_CTL2 (0x48250) + BLC_PWM_CPU_CTL (0x48254) + SBLC_PWM_CTL2[31:16] */
+    BLC_LEGACY      /* BLC_PWM_CTL2 (0x61250) + BLC_PWM_CTL (0x61254: freq[31:16], duty[15:0]) */
+} intel_blc_kind_t;
+
+static intel_blc_kind_t intel_blc_detect(uint32_t *freq_out, uint32_t *duty_out) {
+    if (!s_intel.present || !s_intel.mmio || s_intel.active_pipe < 0)
+        return BLC_NONE;
+
+    uint32_t sctl1 = intel_rd32(&s_intel, INTEL_SBLC_PWM_CTL1);
+    if (sctl1 != 0xFFFFFFFFu && (sctl1 & INTEL_BLC_PWM_ENABLE)) {
+        uint32_t sctl2 = intel_rd32(&s_intel, INTEL_SBLC_PWM_CTL2);
+        if (sctl2 != 0xFFFFFFFFu) {
+            if (s_intel.gen >= 11) {
+                uint32_t duty = intel_rd32(&s_intel, INTEL_SBLC_PWM_DUTY);
+                if (sctl2 > 0u && duty != 0xFFFFFFFFu) {
+                    if (freq_out) *freq_out = sctl2;
+                    if (duty_out) *duty_out = (duty <= sctl2) ? duty : sctl2;
+                    return BLC_PCH_SPLIT;
+                }
+            }
+            uint32_t freq16 = (sctl2 >> 16) & 0xFFFFu;
+            uint32_t duty16 = sctl2 & 0xFFFFu;
+            if (freq16 > 0u) {
+                uint32_t cpu_ctl2 = intel_rd32(&s_intel, INTEL_BLC_PWM_CPU_CTL2);
+                if (cpu_ctl2 != 0xFFFFFFFFu && (cpu_ctl2 & INTEL_BLC_PWM_ENABLE) && duty16 == 0u) {
+                    uint32_t cpu_duty = intel_rd32(&s_intel, INTEL_BLC_PWM_CPU_CTL) & 0xFFFFu;
+                    if (freq_out) *freq_out = freq16;
+                    if (duty_out) *duty_out = (cpu_duty <= freq16) ? cpu_duty : freq16;
+                    return BLC_CPU_PAIR;
+                }
+                if (freq_out) *freq_out = freq16;
+                if (duty_out) *duty_out = (duty16 <= freq16) ? duty16 : freq16;
+                return BLC_PCH_PAIR;
+            }
+        }
+    }
+
+    uint32_t lctl2 = intel_rd32(&s_intel, INTEL_BLC_PWM_CTL2);
+    if (lctl2 != 0xFFFFFFFFu && (lctl2 & INTEL_BLC_PWM_ENABLE)) {
+        uint32_t lctl = intel_rd32(&s_intel, INTEL_BLC_PWM_CTL);
+        if (lctl != 0xFFFFFFFFu) {
+            uint32_t freq16 = (lctl >> 16) & 0xFFFFu;
+            uint32_t duty16 = lctl & 0xFFFFu;
+            if (freq16 > 0u) {
+                if (freq_out) *freq_out = freq16;
+                if (duty_out) *duty_out = (duty16 <= freq16) ? duty16 : freq16;
+                return BLC_LEGACY;
+            }
+        }
+    }
+
+    return BLC_NONE;
+}
+
+int gpu_intel_get_backlight(void) {
+    uint32_t freq = 0, duty = 0;
+    if (intel_blc_detect(&freq, &duty) == BLC_NONE || freq == 0u)
+        return -1;
+    int pct = (int)(((uint64_t)duty * 100ull + (freq / 2u)) / freq);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+int gpu_intel_set_backlight(int percent) {
+    uint32_t freq = 0, duty = 0;
+    intel_blc_kind_t kind = intel_blc_detect(&freq, &duty);
+    if (kind == BLC_NONE || freq == 0u)
+        return -1;
+
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    uint32_t new_duty = (uint32_t)(((uint64_t)percent * freq + 50ull) / 100ull);
+    if (new_duty > freq) new_duty = freq;
+
+    switch (kind) {
+        case BLC_PCH_SPLIT:
+            intel_wr32(&s_intel, INTEL_SBLC_PWM_DUTY, new_duty);
+            break;
+        case BLC_PCH_PAIR:
+            intel_wr32(&s_intel, INTEL_SBLC_PWM_CTL2,
+                       (freq << 16) | (new_duty & 0xFFFFu));
+            break;
+        case BLC_CPU_PAIR: {
+            uint32_t cur = intel_rd32(&s_intel, INTEL_BLC_PWM_CPU_CTL);
+            intel_wr32(&s_intel, INTEL_BLC_PWM_CPU_CTL,
+                       (cur & ~0xFFFFu) | (new_duty & 0xFFFFu));
+            break;
+        }
+        case BLC_LEGACY:
+            intel_wr32(&s_intel, INTEL_BLC_PWM_CTL,
+                       (freq << 16) | (new_duty & 0xFFFFu));
+            break;
+        default:
+            return -1;
+    }
     return 0;
 }

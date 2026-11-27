@@ -298,11 +298,29 @@ static void cfg_load(void) {
     }
 }
 
+static void upd_get_user(uint16_t *u, uint16_t *g) {
+    if (s_asi && s_asi->sandbox && s_asi->sandbox->uid && s_asi->sandbox->gid) {
+        *u = (uint16_t)s_asi->sandbox->uid();
+        *g = (uint16_t)s_asi->sandbox->gid();
+    } else {
+        *u = 0; *g = 0;
+    }
+}
+
+static void upd_set_user(uint16_t u, uint16_t g) {
+    if (!s_asi || !s_asi->sandbox) return;
+    if (s_asi->sandbox->set_user) s_asi->sandbox->set_user(u, g);
+    else if (s_asi->sandbox->set_uid) s_asi->sandbox->set_uid((int)u, (int)g);
+}
+
 static void cfg_save(const char *ver) {
     if (!s_asi || !s_asi->fs || !s_asi->fs->create_in || !s_asi->fs->write) return;
+    uint16_t prev_u = 0, prev_g = 0;
+    upd_get_user(&prev_u, &prev_g);
+    upd_set_user(0, 0);
     if (s_asi->fs->mkdir) s_asi->fs->mkdir("C:/etc");
     void *h = s_asi->fs->create_in("C:/etc", "update.cfg", 0);
-    if (!h) return;
+    if (!h) { upd_set_user(prev_u, prev_g); return; }
     char line[192];
     int n = 0;
     const char *a = "version=";
@@ -316,8 +334,11 @@ static void cfg_save(const char *ver) {
         line[n++] = '\n';
     }
     s_asi->fs->write(h, line, (uint32_t)n);
+    upd_set_user(prev_u, prev_g);
     u_cpy(s_applied, sizeof(s_applied), ver);
 }
+
+int update_uefi_ota_selftest(void);
 
 /* ---- API ---- */
 static void u_set_state(int st, const char *msg) {
@@ -338,6 +359,9 @@ void update_init(asi_t *asi) {
     u_cpy(s_st.version, sizeof(s_st.version), "");
     u_cpy(s_st.message, sizeof(s_st.message), "Hazir");
     cfg_load();
+#ifdef ARCTIAN_KERNEL_SELFTESTS
+    update_uefi_ota_selftest();
+#endif
 }
 
 /* Taban adresini degistirir ve kalici yapar (C:/etc/update.cfg icindeki
@@ -484,6 +508,59 @@ static int sys_install(const update_file_t *f, const char *url,
     return 0;
 }
 
+static int is_kernel_elf_entry(const update_file_t *f) {
+    if (!f) return 0;
+    if (u_eq(f->id, "KERNEL.ELF") || u_eq(f->id, "kernel_elf") || u_eq(f->id, "kernel"))
+        return 1;
+    if (u_ends(f->package, "KERNEL.ELF") || u_ends(f->package, "kernel.elf"))
+        return 1;
+    return 0;
+}
+
+static int esp_update_from_url(const char *url, uint32_t expected_size,
+                               uint32_t expected_crc, char *err, int errcap) {
+    if (!s_asi || !s_asi->system || !s_asi->system->esp_update_kernel) return 0;
+    int pr = s_asi->system->esp_update_kernel(0, 0);
+    if (pr == 1) return 0; /* BIOS-only disk: ESP yok, guvenli atla */
+    if (pr < 0) { u_cpy(err, errcap, "UEFI ESP yoklama hatasi"); return -1; }
+    if (!s_asi->mem || !s_asi->mem->alloc || !s_asi->mem->free) {
+        u_cpy(err, errcap, "ESP guncelleme bellek servisi yok");
+        return -1;
+    }
+
+    uint32_t cap = expected_size ? (expected_size + 4096u) : (2u * 1024u * 1024u);
+    if (cap < 512u * 1024u) cap = 512u * 1024u;
+    if (cap > 16u * 1024u * 1024u) { u_cpy(err, errcap, "KERNEL.ELF cok buyuk"); return -1; }
+
+    void *buf = s_asi->mem->alloc(cap);
+    if (!buf) { u_cpy(err, errcap, "ESP guncelleme bellek yetersiz"); return -1; }
+
+    uint32_t len = 0;
+    int rc = s_asi->net->download(url, buf, cap, &len);
+    if (rc != 0 || !len) {
+        s_asi->mem->free(buf);
+        u_cpy(err, errcap, "KERNEL.ELF indirme hatasi");
+        return -1;
+    }
+    if (expected_size && len != expected_size) {
+        s_asi->mem->free(buf);
+        u_cpy(err, errcap, "KERNEL.ELF boyut uyusmuyor");
+        return -1;
+    }
+    if (expected_crc && u_crc32((const uint8_t *)buf, len) != expected_crc) {
+        s_asi->mem->free(buf);
+        u_cpy(err, errcap, "KERNEL.ELF CRC hatasi");
+        return -1;
+    }
+    int urc = s_asi->system->esp_update_kernel(buf, len);
+    s_asi->mem->free(buf);
+    if (urc < 0) {
+        u_cpy(err, errcap, "ESP KERNEL.ELF yazma hatasi");
+        return -1;
+    }
+    return 1; /* ESP guncellendi */
+}
+
 static int sys_finish(char *err, int errcap) {
     if (!s_b_cnt) return 0;
     for (int b = 0; b < 4; b++) {
@@ -505,6 +582,9 @@ static int sys_finish(char *err, int errcap) {
     s.boot_ok = 0;               /* masaustuune ulasirsa 1 olur */
     s.tries = 1;
     if (slot_write(&s) != 0) { u_cpy(err, errcap, "Yuva gecisi basarisiz"); return -1; }
+    if (s_asi && s_asi->system && s_asi->system->esp_update_kernel) {
+        (void)s_asi->system->esp_update_kernel(0, 0);
+    }
     return 0;
 }
 
@@ -564,9 +644,22 @@ int update_apply(void) {
             u_cat(url, sizeof(url), "/");
         u_cat(url, sizeof(url), f->package);
 
-        if (f->kind == 1) {              /* sistem dosyasi: B yuvasina akis */
+        if (f->kind == 1) {              /* sistem dosyasi: B yuvasina akis + UEFI ESP */
             char serr[72];
             serr[0] = 0;
+            if (is_kernel_elf_entry(f)) {
+                if (f->load != 0 && sys_install(f, url, serr, sizeof(serr)) != 0) {
+                    u_set_state(UPDATE_ERROR, serr[0] ? serr : "Sistem kurulum hatasi");
+                    return -7;
+                }
+                int erc = esp_update_from_url(url, f->size, f->crc, serr, sizeof(serr));
+                if (erc < 0) {
+                    u_set_state(UPDATE_ERROR, serr[0] ? serr : "UEFI ESP kurulum hatasi");
+                    return -7;
+                }
+                if (erc > 0 || f->load != 0) installed++;
+                continue;
+            }
             if (sys_install(f, url, serr, sizeof(serr)) != 0) {
                 u_set_state(UPDATE_ERROR, serr[0] ? serr : "Sistem kurulum hatasi");
                 return -7;
@@ -590,6 +683,23 @@ int update_apply(void) {
             return -5;
         }
         installed++;
+    }
+
+    /* @image (UEFI ESP KERNEL.ELF veya tam sistem imaji) destegi */
+    if (s_man.has_image && s_man.image.package[0]) {
+        char iurl[200];
+        u_cpy(iurl, sizeof(iurl), s_base);
+        if (s_man.image.package[0] != '/' && iurl[0] && iurl[u_len(iurl) - 1] != '/')
+            u_cat(iurl, sizeof(iurl), "/");
+        u_cat(iurl, sizeof(iurl), s_man.image.package);
+        char ierr[72];
+        ierr[0] = 0;
+        int irc = esp_update_from_url(iurl, s_man.image.size, 0, ierr, sizeof(ierr));
+        if (irc < 0) {
+            u_set_state(UPDATE_ERROR, ierr[0] ? ierr : "UEFI ESP imaj hatasi");
+            return -8;
+        }
+        if (irc > 0) installed++;
     }
 
     /* Tek bir modul bile kurulmadiysa surum yukseltilmez: aksi halde
@@ -710,4 +820,25 @@ void update_test_reset(void) {
 
 int update_test_parse(const char *text, uint32_t len) {
     return u_parse(text, len);
+}
+
+int update_uefi_ota_selftest(void) {
+    if (!s_asi || !s_asi->system || !s_asi->system->esp_update_kernel) {
+        if (s_asi && s_asi->console && s_asi->console->puts)
+            s_asi->console->puts("[upd-uefi] esp_update_kernel yok -> FAIL\n");
+        return -1;
+    }
+    int pr = s_asi->system->esp_update_kernel(0, 0);
+    uint8_t bad[16] = { 0 };
+    int bad_rc = s_asi->system->esp_update_kernel(bad, sizeof(bad));
+    int ok = (pr == 0 || pr == 1) && (pr == 1 || bad_rc < 0);
+    if (s_asi->console && s_asi->console->puts) {
+        if (pr == 1)
+            s_asi->console->puts("[upd-uefi] probe=no-esp(BIOS) graceful=OK\n");
+        else if (ok)
+            s_asi->console->puts("[upd-uefi] probe=esp-found invalid-elf-reject=OK\n");
+        else
+            s_asi->console->puts("[upd-uefi] selftest=FAIL\n");
+    }
+    return ok ? 0 : -1;
 }

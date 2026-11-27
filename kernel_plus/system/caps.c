@@ -5,11 +5,15 @@
 #include "serial.h"
 #include "syscall.h"
 #include "clock.h"
+#include "afs.h"
 
 static uint32_t s_over[SCHED_TASK_HARD_CAP];
 static uint8_t  s_has[SCHED_TASK_HARD_CAP];
 static uint32_t s_uid_t[SCHED_TASK_HARD_CAP];
 static uint32_t s_gid_t[SCHED_TASK_HARD_CAP];
+static uint8_t  s_uid_over[SCHED_TASK_HARD_CAP];
+static uint16_t s_active_uid = 0;
+static uint16_t s_active_gid = 0;
 static int      s_err = 0;
 
 /* ---- 0.6 uyumlulugu: gorev basina yetki maskesi ---- */
@@ -36,8 +40,10 @@ void caps_set(uint32_t mask) {
 void caps_clear(void) {
     int t = cur_task();
     s_has[t] = 0;
+    s_uid_over[t] = 0;
     s_uid_t[t] = 0;
     s_gid_t[t] = 0;
+    if (t == 0) proc_desktop_frame_end_if_armed();
 }
 
 void caps_enter(int pid) {
@@ -46,6 +52,7 @@ void caps_enter(int pid) {
     int t = cur_task();
     s_uid_t[t] = proc_uid_of(pid);
     s_gid_t[t] = proc_gid_of(pid);
+    s_uid_over[t] = 1;
 }
 
 uint32_t caps_current(void) { return effective(); }
@@ -55,14 +62,37 @@ void caps_set_uid(int uid, int gid) {
     int t = cur_task();
     s_uid_t[t] = (uint32_t)uid;
     s_gid_t[t] = (uint32_t)gid;
+    s_uid_over[t] = 1;
+    afs_set_current_uid((uint16_t)uid, (uint16_t)gid);
 }
 
-uint32_t caps_uid(void) { return s_uid_t[cur_task()]; }
-uint32_t caps_gid(void) { return s_gid_t[cur_task()]; }
+void caps_set_user(uint16_t uid, uint16_t gid) {
+    if (effective() != CAP_ALL) return;
+    s_active_uid = uid;
+    s_active_gid = gid;
+    int t = cur_task();
+    s_uid_over[t] = 0;
+    s_uid_t[t] = (uint32_t)uid;
+    s_gid_t[t] = (uint32_t)gid;
+    afs_set_current_uid(uid, gid);
+}
+
+uint32_t caps_uid(void) {
+    int t = cur_task();
+    return s_uid_over[t] ? s_uid_t[t] : (uint32_t)s_active_uid;
+}
+
+uint32_t caps_gid(void) {
+    int t = cur_task();
+    return s_uid_over[t] ? s_gid_t[t] : (uint32_t)s_active_gid;
+}
 
 void caps_syscall_subject(uint32_t *uid, uint32_t *gid) {
     uint32_t u = 0, g = 0;
-    proc_owner_ids(&u, &g);
+    if (!proc_owner_ids(&u, &g) || (u == 0 && g == 0 && s_active_uid != 0)) {
+        u = caps_uid();
+        g = caps_gid();
+    }
     if (uid) *uid = u;
     if (gid) *gid = g;
 }
@@ -198,7 +228,71 @@ static asi_fs_t s_guard;
 static asi_fs_t s_save;
 
 static void guard_subject(void) {
-    if (s_save.set_subject) s_save.set_subject((int)caps_uid(), (int)caps_gid());
+    uint32_t u = caps_uid();
+    uint32_t g = caps_gid();
+    afs_set_current_uid((uint16_t)u, (uint16_t)g);
+    if (s_save.set_subject) s_save.set_subject((int)u, (int)g);
+}
+
+static uint32_t uid_perm_bits(uint32_t u, uint32_t g,
+                              uint32_t fuid, uint32_t fgid, uint32_t mode) {
+    if (u == fuid) return (mode >> 6) & 7u;
+    if (g == fgid) return (mode >> 3) & 7u;
+    return mode & 7u;
+}
+
+static int is_c_users_subpath(const char *p) {
+    if (!p) return 0;
+    if ((p[0] != 'C' && p[0] != 'c') || p[1] != ':' || p[2] != '/') return 0;
+    const char *u = "Users/";
+    for (int i = 0; u[i]; i++) {
+        if (p[3 + i] != u[i]) return 0;
+    }
+    return p[9] != 0;
+}
+
+static int uid_path_ok(const char *path, int want_dir_read) {
+    uint32_t u = caps_uid();
+    uint32_t g = caps_gid();
+    if (u == 0 || !path || !path[0] || !s_save.stat) return 1;
+    if ((path[0] != 'C' && path[0] != 'c') || path[1] != ':') return 1;
+
+    char sub[176];
+    int len = 0;
+    for (; path[len] && len < (int)sizeof(sub) - 2; len++) sub[len] = path[len];
+    sub[len] = 0;
+
+    /* Walk every ancestor directory prefix ("C:/", "C:/Users/", "C:/Users/alice/", ...)
+     * and verify search/execute permission (bit 0). */
+    for (int i = 2; i < len; i++) {
+        if (sub[i] == '/') {
+            char save = sub[i + 1];
+            sub[i + 1] = 0;
+            asi_stat_t st;
+            if (s_save.stat(sub, &st) == 0 && st.is_dir) {
+                if ((uid_perm_bits(u, g, st.uid, st.gid, st.mode) & 1u) == 0u) {
+                    s_err = SANDBOX_EPERM;
+                    return 0;
+                }
+            }
+            sub[i + 1] = save;
+        }
+    }
+
+    if (want_dir_read) {
+        if (len > 0 && sub[len - 1] != '/') {
+            sub[len++] = '/';
+            sub[len] = 0;
+        }
+        asi_stat_t st;
+        if (s_save.stat(sub, &st) == 0 && st.is_dir) {
+            if ((uid_perm_bits(u, g, st.uid, st.gid, st.mode) & 4u) == 0u) {
+                s_err = SANDBOX_EPERM;
+                return 0;
+            }
+        }
+    }
+    return 1;
 }
 
 static void *g_root(void) {
@@ -217,9 +311,19 @@ static void *g_create(void *d, const char *n, int is_dir) {
     if (gate_open()) {
         if (gate(p, 1)) return 0;
     } else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(p, 0)) return 0;
+    int existed = 0;
+    if (s_save.stat && p[0]) {
+        asi_stat_t st;
+        existed = (s_save.stat(p, &st) == 0);
+    }
     guard_subject();
     void *h = s_save.create(d, n, is_dir);
-    if (h) hp_put(h, p);
+    if (h) {
+        hp_put(h, p);
+        if (!existed && caps_uid() != 0 && is_c_users_subpath(p) && s_save.chmod)
+            s_save.chmod(p, is_dir ? 0700u : 0600u);
+    }
     return h;
 }
 
@@ -229,6 +333,7 @@ static void *g_find(void *d, const char *n) {
     if (gate_open()) {
         if (gate(p, 0)) return 0;
     } else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(p, 0)) return 0;
     guard_subject();
     void *h = s_save.find(d, n);
     if (h) hp_put(h, p);
@@ -240,8 +345,11 @@ static int g_write(void *f, const void *data, uint32_t size) {
     if (gate_open()) {
         if (gate(p, 1)) return -1;
     } else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
     guard_subject();
-    return s_save.write(f, data, size);
+    int rc = s_save.write(f, data, size);
+    if (rc == 0 && size > 0) proc_add_io_bytes((uint64_t)size);
+    return rc;
 }
 
 static uint32_t g_read(void *f, void *buf, uint32_t size) {
@@ -249,8 +357,11 @@ static uint32_t g_read(void *f, void *buf, uint32_t size) {
     if (gate_open()) {
         if (gate(p, 0)) return 0;
     } else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(p, 0)) return 0;
     guard_subject();
-    return s_save.read(f, buf, size);
+    uint32_t n = s_save.read(f, buf, size);
+    if (n > 0) proc_add_io_bytes((uint64_t)n);
+    return n;
 }
 
 static int g_count(void) {
@@ -277,6 +388,7 @@ static uint32_t g_size(int idx) {
 static int g_remove(const char *n) {
     if (gate_open()) { if (gate(n, 1)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(n, 0)) return -1;
     guard_subject();
     return s_save.remove(n);
 }
@@ -284,19 +396,49 @@ static int g_remove(const char *n) {
 static int g_mkdir(const char *p) {
     if (gate_open()) { if (gate(p, 1)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
+    char ds[176];
+    int l = 0;
+    for (; p && p[l] && l < (int)sizeof(ds) - 2; l++) ds[l] = p[l];
+    if (l > 0 && ds[l - 1] != '/') ds[l++] = '/';
+    ds[l] = 0;
+    int existed = 0;
+    if (s_save.stat && ds[0]) {
+        asi_stat_t st;
+        existed = (s_save.stat(ds, &st) == 0);
+    }
     guard_subject();
-    return s_save.mkdir(p);
+    int rc = s_save.mkdir(p);
+    if (rc == 0 && !existed && caps_uid() != 0 && is_c_users_subpath(ds) && s_save.chmod)
+        s_save.chmod(ds, 0700u);
+    return rc;
 }
 
 static void *g_create_in(const char *p, const char *n, int is_dir) {
     char full[176];
     join_path(full, sizeof(full), p, n);
+    if (is_dir) {
+        int l = 0; while (full[l]) l++;
+        if (l > 0 && full[l - 1] != '/' && l < (int)sizeof(full) - 1) {
+            full[l++] = '/'; full[l] = 0;
+        }
+    }
     if (gate_open()) {
         if (gate(full, 1)) return 0;
     } else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(full, 0)) return 0;
+    int existed = 0;
+    if (s_save.stat && full[0]) {
+        asi_stat_t st;
+        existed = (s_save.stat(full, &st) == 0);
+    }
     guard_subject();
     void *h = s_save.create_in(p, n, is_dir);
-    if (h) hp_put(h, full);
+    if (h) {
+        hp_put(h, full);
+        if (!existed && caps_uid() != 0 && is_c_users_subpath(full) && s_save.chmod)
+            s_save.chmod(full, is_dir ? 0700u : 0600u);
+    }
     return h;
 }
 
@@ -306,6 +448,7 @@ static void *g_find_in(const char *p, const char *n) {
     if (gate_open()) {
         if (gate(full, 0)) return 0;
     } else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(full, 0)) return 0;
     guard_subject();
     void *h = s_save.find_in(p, n);
     if (h) hp_put(h, full);
@@ -315,13 +458,17 @@ static void *g_find_in(const char *p, const char *n) {
 static uint32_t g_read_path(const char *p, void *buf, uint32_t size) {
     if (gate_open()) { if (gate(p, 0)) return 0; }
     else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(p, 0)) return 0;
     guard_subject();
-    return s_save.read_path(p, buf, size);
+    uint32_t n = s_save.read_path(p, buf, size);
+    if (n > 0) proc_add_io_bytes((uint64_t)n);
+    return n;
 }
 
 static int g_count_dir(const char *p) {
     if (gate_open()) { if (gate(p, 0)) return 0; }
     else if (caps_check(CAP_FS)) return 0;
+    if (!uid_path_ok(p, 1)) return 0;
     guard_subject();
     return s_save.count_dir(p);
 }
@@ -329,6 +476,7 @@ static int g_count_dir(const char *p) {
 static int g_list_dir(const char *p, int idx, char *out, int cap, int *is_dir) {
     if (gate_open()) { if (gate(p, 0)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 1)) return -1;
     guard_subject();
     return s_save.list_dir(p, idx, out, cap, is_dir);
 }
@@ -336,6 +484,7 @@ static int g_list_dir(const char *p, int idx, char *out, int cap, int *is_dir) {
 static int g_stat(const char *p, asi_stat_t *out) {
     if (gate_open()) { if (gate(p, 0)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
     guard_subject();
     return s_save.stat ? s_save.stat(p, out) : -1;
 }
@@ -344,6 +493,7 @@ static int g_stat_handle(void *f, asi_stat_t *out) {
     const char *p = hp_get(f);
     if (gate_open()) { if (gate(p, 0)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
     guard_subject();
     return s_save.stat_handle ? s_save.stat_handle(f, out) : -1;
 }
@@ -351,6 +501,7 @@ static int g_stat_handle(void *f, asi_stat_t *out) {
 static int g_chmod(const char *p, uint32_t mode) {
     if (gate_open()) { if (gate(p, 1)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
     guard_subject();
     return s_save.chmod ? s_save.chmod(p, mode) : -1;
 }
@@ -358,11 +509,28 @@ static int g_chmod(const char *p, uint32_t mode) {
 static int g_chown(const char *p, int uid, int gid) {
     if (gate_open()) { if (gate(p, 1)) return -1; }
     else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(p, 0)) return -1;
     guard_subject();
     return s_save.chown ? s_save.chown(p, uid, gid) : -1;
 }
 
-static void g_set_subject(int uid, int gid) { (void)uid; (void)gid; }
+static void g_set_subject(int uid, int gid) {
+    if (gate_open() || effective() != CAP_ALL) return;
+    int t = cur_task();
+    s_uid_t[t] = (uint32_t)uid;
+    s_gid_t[t] = (uint32_t)gid;
+    s_uid_over[t] = 1;
+    afs_set_current_uid((uint16_t)uid, (uint16_t)gid);
+    if (s_save.set_subject) s_save.set_subject(uid, gid);
+}
+
+static int g_rename(const char *from, const char *to) {
+    if (gate_open()) { if (gate(from, 1) || gate(to, 1)) return -1; }
+    else if (caps_check(CAP_FS)) return -1;
+    if (!uid_path_ok(from, 0) || !uid_path_ok(to, 0)) return -1;
+    guard_subject();
+    return s_save.rename ? s_save.rename(from, to) : -1;
+}
 
 static int g_fsck(int fix, int *problems, int *fixed) {
     if (gate_open()) { if (gate("C:/", 1)) return -1; }
@@ -395,6 +563,7 @@ void caps_fs_guard_install(asi_fs_t **slot) {
     s_guard.chmod = g_chmod;
     s_guard.chown = g_chown;
     s_guard.set_subject = g_set_subject;
+    s_guard.rename = g_rename;
     s_guard.fsck = g_fsck;
     *slot = &s_guard;
 }
@@ -407,7 +576,10 @@ void caps_init(asi_t *asi) {
         s_has[i] = 0;
         s_uid_t[i] = 0;
         s_gid_t[i] = 0;
+        s_uid_over[i] = 0;
     }
+    s_active_uid = 0;
+    s_active_gid = 0;
     s_err = 0;
     s_policy = 0;
     s_subj_on = 0;
@@ -439,6 +611,7 @@ void caps_init(asi_t *asi) {
     s_sandbox.dispatch_end = caps_dispatch_end;
     s_sandbox.dispatch_active = caps_dispatch_active;
     s_sandbox.set_policy = caps_set_policy_asi;
+    s_sandbox.set_user = caps_set_user;
     if (asi) asi->sandbox = &s_sandbox;
     arctian_set_cap_check(caps_syscall_check);
     arctian_set_subject_fn(caps_syscall_subject);
@@ -475,4 +648,92 @@ int caps_selftest(void) {
                   allow_ok ? "EVET" : "HAYIR",
                   (net_ok && fs_ok && allow_ok) ? "OK" : "HATA");
     return (net_ok && fs_ok && allow_ok) ? 0 : -1;
+}
+
+int caps_multiuser_selftest(void) {
+    if (!g_asi || !g_asi->fs || !g_asi->sandbox || !g_asi->sandbox->set_user) return -1;
+    asi_fs_t *fs = g_asi->fs;
+    asi_sandbox_t *sb = g_asi->sandbox;
+
+    caps_clear();
+    sb->set_user(0, 0);
+    fs->remove("C:/Users/mu_a/secret.txt");
+    fs->remove("C:/Users/mu_a/");
+    fs->remove("C:/Users/mu_b/");
+    fs->remove("C:/mu_shared.txt");
+
+    if (fs->mkdir("C:/Users") != 0) {
+        serial_puts("[multiuser11] salt okunur ortam -> atlandi\n");
+        return 0;
+    }
+    if (fs->chown) fs->chown("C:/Users/", 0, 0);
+    if (fs->chmod) fs->chmod("C:/Users/", 0755u);
+
+    if (fs->mkdir("C:/Users/mu_a") != 0 || fs->mkdir("C:/Users/mu_b") != 0) {
+        sb->set_user(0, 0);
+        serial_puts("[multiuser11] home dir olusturulamadi -> atlandi\n");
+        return 0;
+    }
+    if (fs->chown) {
+        fs->chown("C:/Users/mu_a/", 1000, 1000);
+        fs->chown("C:/Users/mu_b/", 1001, 1001);
+    }
+    if (fs->chmod) {
+        fs->chmod("C:/Users/mu_a/", 0700u);
+        fs->chmod("C:/Users/mu_b/", 0700u);
+    }
+
+    /* Paylasilan sistem/uygulama dosyasi: 0644 (herkes okuyabilir) */
+    void *hs = fs->create(0, "C:/mu_shared.txt", 0);
+    if (hs) {
+        fs->write(hs, "shared11", 8);
+        if (fs->chmod) fs->chmod("C:/mu_shared.txt", 0644u);
+    }
+
+    /* Kullanici A (uid=1000): ozel dosya olusturur ve okur */
+    sb->set_user(1000, 1000);
+    void *ha = fs->create_in("C:/Users/mu_a", "secret.txt", 0);
+    int a_write_ok = (ha != 0 && fs->write(ha, "topsecretA", 10) == 0);
+    if (fs->chmod) fs->chmod("C:/Users/mu_a/secret.txt", 0600u);
+
+    char rbuf[32];
+    for (int i = 0; i < (int)sizeof(rbuf); i++) rbuf[i] = 0;
+    uint32_t rn = fs->read_path("C:/Users/mu_a/secret.txt", rbuf, 10);
+    int a_read_ok = (rn == 10 && rbuf[0] == 't' && rbuf[9] == 'A');
+
+    /* Kullanici B (uid=1001): A'nin dosyasini okuyamaz/yazamz/silemez/listeleyemez, ama paylasilan okuyabilir */
+    sb->set_user(1001, 1001);
+    char bbuf[32];
+    uint32_t bn = fs->read_path("C:/Users/mu_a/secret.txt", bbuf, 10);
+    int b_read_deny = (bn == 0);
+    int b_find_deny = (fs->find_in("C:/Users/mu_a", "secret.txt") == 0);
+    int b_write_deny = (fs->create_in("C:/Users/mu_a", "hack.txt", 0) == 0 && fs->write(ha, "x", 1) != 0);
+    int b_del_deny = (fs->remove("C:/Users/mu_a/secret.txt") != 0);
+    char lout[32];
+    int ldir = 0;
+    int b_list_deny = (fs->list_dir("C:/Users/mu_a", 0, lout, sizeof(lout), &ldir) != 0);
+
+    char sbuf[16];
+    for (int i = 0; i < (int)sizeof(sbuf); i++) sbuf[i] = 0;
+    uint32_t sn = fs->read_path("C:/mu_shared.txt", sbuf, 8);
+    int b_shared_ok = (sn == 8 && sbuf[0] == 's');
+
+    sb->set_user(0, 0);
+    fs->remove("C:/Users/mu_a/secret.txt");
+    fs->remove("C:/Users/mu_a/");
+    fs->remove("C:/Users/mu_b/");
+    fs->remove("C:/mu_shared.txt");
+
+    int ok = a_write_ok && a_read_ok && b_read_deny && b_find_deny &&
+             b_write_deny && b_del_deny && b_list_deny && b_shared_ok;
+    serial_printf("[multiuser11] a_rw=%s b_read_deny=%s b_find_deny=%s b_wr_deny=%s b_del_deny=%s b_list_deny=%s shared=%s -> %s\n",
+                  (a_write_ok && a_read_ok) ? "OK" : "FAIL",
+                  b_read_deny ? "OK" : "FAIL",
+                  b_find_deny ? "OK" : "FAIL",
+                  b_write_deny ? "OK" : "FAIL",
+                  b_del_deny ? "OK" : "FAIL",
+                  b_list_deny ? "OK" : "FAIL",
+                  b_shared_ok ? "OK" : "FAIL",
+                  ok ? "OK" : "HATA");
+    return ok ? 0 : -1;
 }

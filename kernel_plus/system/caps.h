@@ -15,9 +15,12 @@ int      caps_check(uint32_t cap);
 int      caps_last_error(void);
 int      caps_syscall_check(uint32_t cap);
 void     caps_set_uid(int uid, int gid);
+void     caps_set_user(uint16_t uid, uint16_t gid);
 uint32_t caps_uid(void);
-uint32_t caps_gid(void);void caps_syscall_subject(uint32_t *uid, uint32_t *gid);
+uint32_t caps_gid(void);
+void     caps_syscall_subject(uint32_t *uid, uint32_t *gid);
 int      caps_selftest(void);
+int      caps_multiuser_selftest(void);
 
 /* --- 0.7: ozne + dosya kapisi politikasi ------------------- */
 /* Politika: 0 = izin, != 0 = reddet (SANDBOX_EPERM). */

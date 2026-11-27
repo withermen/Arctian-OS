@@ -4,38 +4,40 @@ static lv_obj_t *s_root;
 static lv_obj_t *s_num;
 static lv_obj_t *s_title;
 static lv_obj_t *s_body;
+static lv_obj_t *s_next_lbl;
 static int s_idx;
-/* Tur ve yardim panelleri ekranin cocugudur; kabuk yeniden kurulunca
- * (cozunurluk/tema/olcek) onlarla birlikte yok olurlar. Nesil sayaci o
- * ani yakalar: bayat isaretciler unutulur, silinmis nesneye dokunulmaz. */
+/* Tur ve yardım panelleri ekranın çocuğudur; kabuk yeniden kurulunca
+ * (çözünürlük/tema/ölçek) onlarla birlikte yok olurlar. Nesil sayacı o
+ * anı yakalar: bayat işaretçiler unutulur, silinmiş nesneye dokunulmaz. */
 static int s_gen;
 static int s_hgen;
 
 static const char *T_T[4] = {
-    "Masaustune hos geldiniz",
-    "Baslat menusu",
-    "Her sey Ayarlar'da",
-    "Dosyalariniz"
+    "Masaüstüne hoş geldiniz",
+    "Başlat menüsü",
+    "Her şey Ayarlar'da",
+    "Dosyalarınız"
 };
 
 static const char *T_B[4] = {
-    "Simgelere cift tiklayarak uygulama acin. Alt+Tab pencereler arasinda gecis yapar.",
-    "Soldaki kurt simgesi tum uygulamalari listeler; arama kutusu hepsini bulur.",
-    "Ekran, ag, ses, guncelleme ve sistem araclari tek yerde toplandi.",
-    "Dosya Yoneticisi ile C: ve D: (USB) gezinin; Ctrl+C / Ctrl+V ile kopyalayin."
+    "Simgelere çift tıklayarak uygulama açın. Alt+Tab pencereler arasında geçiş yapar.",
+    "Soldaki kurt simgesi tüm uygulamaları listeler; arama kutusu hepsini bulur.",
+    "Ekran, ağ, ses, güncelleme ve sistem araçları tek yerde toplandı.",
+    "Dosya Yöneticisi ile C: ve D: (USB) gezinin; Ctrl+C / Ctrl+V ile kopyalayın."
 };
 
-/* Kabuk yeniden kurulmussa bu nesneler artik ekranda degil; adresleri ne
- * kadar gosterisse o kadar varsay, hicbirine dokunmadan unutuyoruz. */
+/* Kabuk yeniden kurulmuşsa bu nesneler artık ekranda değil; adresleri ne
+ * kadar gösterişse o kadar varsay, hiçbirine dokunmadan unutuyoruz. */
 static void tour_sync_gen(void) {
     if (s_gen == g_shell_gen) return;
-    s_root = 0; s_num = 0; s_title = 0; s_body = 0;
+    s_root = 0; s_num = 0; s_title = 0; s_body = 0; s_next_lbl = 0;
     s_gen = g_shell_gen;
 }
 
 static void tour_close(void) {
     tour_sync_gen();
     if (s_root) { lv_obj_delete(s_root); s_root = 0; }
+    s_num = 0; s_title = 0; s_body = 0; s_next_lbl = 0;
     kv_set("tour_done", "1");
 }
 
@@ -44,6 +46,7 @@ static void tour_render(void) {
     lv_label_set_text(s_title, T_T[s_idx]);
     lv_label_set_text(s_body, T_B[s_idx]);
     if (s_num) lv_label_set_text_fmt(s_num, "%d / 4", s_idx + 1);
+    if (s_next_lbl) lv_label_set_text(s_next_lbl, (s_idx >= 3) ? "Bitir" : "İleri");
 }
 
 static void tour_next_cb(lv_event_t *e) {
@@ -61,9 +64,6 @@ static void tour_skip_cb(lv_event_t *e) {
 void tour_show(void) {
     tour_sync_gen();
     if (s_root) return;
-
-    int sw = g_asi->gfx->width();
-    int sh = g_asi->gfx->height();
 
     s_root = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(s_root);
@@ -121,9 +121,9 @@ void tour_show(void) {
     lv_obj_align(next, LV_ALIGN_BOTTOM_RIGHT, -ui_s(24), -ui_s(20));
     lv_obj_set_style_radius(next, ui_s(9), 0);
     lv_obj_set_style_bg_color(next, lv_color_hex(ADL_ACCENT), 0);
-    lv_obj_t *nl = lv_label_create(next);
-    lv_label_set_text(nl, "Ileri");
-    lv_obj_center(nl);
+    s_next_lbl = lv_label_create(next);
+    lv_label_set_text(s_next_lbl, "İleri");
+    lv_obj_center(s_next_lbl);
     lv_obj_add_event_cb(next, tour_next_cb, LV_EVENT_CLICKED, 0);
 
     s_idx = 0;
@@ -132,9 +132,9 @@ void tour_show(void) {
 
 
 /* ------------------------------------------------------------------ */
-/* "Ne yapabilirim?" yardim paneli                                     */
-/* Kisayollar + ornek isler tek ekranda. Ac/Kapa: Ctrl+Alt+H ya da     */
-/* Baslat menusundeki "?" dugmesi.                                     */
+/* "Ne yapabilirim?" yardım paneli                                    */
+/* Kısayollar + örnek işler tek ekranda. Aç/Kapa: Ctrl+Alt+H ya da    */
+/* Başlat menüsündeki "?" düğmesi.                                    */
 /* ------------------------------------------------------------------ */
 
 static lv_obj_t *h_root;
@@ -207,7 +207,7 @@ void help_toggle(void) {
     lv_obj_set_style_text_font(t, adl_font(), 0);
     lv_obj_align(t, LV_ALIGN_TOP_MID, 0, ui_s(20));
 
-    /* solda kisayollar, sagda ornek isler */
+    /* solda kısayollar, sağda örnek işler */
     lv_obj_t *lk = lv_label_create(box);
     lv_label_set_text(lk, H_KEYS);
     lv_obj_set_style_text_color(lk, lv_color_hex(ADL_TEXT_DIM), 0);

@@ -75,6 +75,13 @@ size_t strlen(const char *s) {
     return n;
 }
 
+int strcmp(const char *a, const char *b) {
+    const unsigned char *x = (const unsigned char *)a;
+    const unsigned char *y = (const unsigned char *)b;
+    while (*x && *x == *y) { x++; y++; }
+    return (int)*x - (int)*y;
+}
+
 double fabs(double x) { return x < 0 ? -x : x; }
 
 double floor(double x) {

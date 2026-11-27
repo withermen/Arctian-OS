@@ -1,19 +1,14 @@
 /**
- * Abakus — hucreli tablo (tam ekran, 0.8.4)
+ * Abaküs — hücreli tablo (tam ekran)
  *
- * Spec bolum 3.3: 36 baslik, 34 sekme, 70 ribon, 30 formul cubugu
- * (ad kutusu + fx), izgara A..G, sayfa sekmeleri, durum satiri.
- *
- * 0.8.4'te icerik gercek: hucreye tikla, fx cubuguna deger ya da formil
- * yaz, Enter (veya Uygula) hucreye yazar; izgara yeniden hesaplanir.
- * Formul ayristirici: dort islem, parantez, hucre adresi, TOPLA/ORT
- * (aralik ve liste). Dongusel gonderim "#CEVRE!" ile durur. Ac/Kaydet
- * dugmeleri CSV'yi C:/belgeler altinda okur/yazar; dosyayla acilirsa
- * (Safak listesi) o dosya yuklenir.
- *
- * Slot butcesi 512: hucreler panel+etiket cifti (70 hucre = 140).
+ * 36 başlık, 34 sekme, 70 ribon, 30 formül çubuğu (ad kutusu + fx),
+ * ızgara A..G, Sayfa 1 / Sayfa 2 sekmeleri, durum satırı.
+ * Formül ayrıştırıcı: dört işlem, parantez, hücre adresi, TOPLA/ORT.
+ * Ortak office_picker.h ile C:/belgeler ve diğer klasörlerden CSV açar
+ * ve farklı kaydeder.
  */
 #include "wolf.h"
+#include "../office_picker.h"
 
 #define C_GROUND 0x14161B
 #define C_LINE   0x2C313B
@@ -170,8 +165,10 @@ static void fmt_num(double v, char *out, int cap)
     out[o] = 0;
 }
 
-/* ---- kagit uzerindeki veri ---- */
-static char g_raw[NROW][NCOL][CELLW];      /* kullanicinin yazdigi (formul ham) */
+/* ---- kagit uzerindeki veri (2 sayfa) ---- */
+static char g_sheets[2][NROW][NCOL][CELLW]; /* kullanicinin yazdigi (formul ham) */
+static int  g_sheet = 0;
+#define g_raw (g_sheets[g_sheet])
 static char g_disp[NROW][NCOL][CELLW];     /* izgarada gorunen */
 static double g_num[NROW][NCOL];
 static char g_isnum[NROW][NCOL];
@@ -349,7 +346,7 @@ static double cell_val(int r, int c)
     if (err) {
         g_errc[r][c] = (char)err;
         g_isnum[r][c] = 0;
-        scpy(g_disp[r][c], CELLW, err == 2 ? "#CEVRE!" : "#HATA!");
+        scpy(g_disp[r][c], CELLW, err == 2 ? "#ÇEVRE!" : "#HATA!");
     } else if (isnum) {
         g_errc[r][c] = 0;
         g_num[r][c] = v;
@@ -382,11 +379,11 @@ static void seed_default(void)
 {
     static const char *init[NROW][NCOL] = {
         { "Kalem", "Adet", "Birim fiyat", "Tutar", "Not", "", "" },
-        { "Sunucu kirasi", "12", "8.500", "=B2*C2", "", "", "" },
+        { "Sunucu kirası", "12", "8.500", "=B2*C2", "", "", "" },
         { "Lisanslar", "25", "4.200", "=B3*C3", "", "", "" },
-        { "Danismanlik", "40", "1.500", "=B4*C4", "", "", "" },
-        { "Egitim", "8", "3.750", "=B5*C5", "", "", "" },
-        { "Donanim", "5", "22.000", "=B6*C6", "", "", "" },
+        { "Danışmanlık", "40", "1.500", "=B4*C4", "", "", "" },
+        { "Eğitim", "8", "3.750", "=B5*C5", "", "", "" },
+        { "Donanım", "5", "22.000", "=B6*C6", "", "", "" },
         { "Pazarlama", "1", "98.000", "=B7*C7", "-", "", "" },
         { "", "", "", "", "", "", "" },
         { "", "", "", "", "", "", "" },
@@ -401,9 +398,11 @@ static wolf_id g_cell[NROW][NCOL];
 static wolf_id g_lab[NROW][NCOL];
 static wolf_id g_frame;
 static wolf_id g_name, g_fx, g_status, g_title_lab;
+static wolf_id g_sheet_tab[2], g_sheet_ul;
 static int g_sel = NCOL + 3;               /* D2 */
 static int g_dirty;                        /* fx'te yazilmamis icerik var mi */
-static char g_file[140] = "C:/belgeler/tablo.csv";
+static int g_untitled = 1;
+static char g_file[160] = "C:/belgeler/tablo.csv";
 static char g_title[80] = "tablo.csv";
 
 static const char *base_name(const char *p)
@@ -413,10 +412,30 @@ static const char *base_name(const char *p)
     return b;
 }
 
-static void soon(wolf_id w, void *u)
+static void do_open(wolf_id w, void *u);
+static void do_save(wolf_id w, void *u);
+static void do_save_as(wolf_id w, void *u);
+static void do_new(wolf_id w, void *u);
+static void refresh_grid(void);
+static void status_update(void);
+static void select_cell(int r, int c);
+
+static void tab_cb(wolf_id w, void *u)
 {
-    (void)w; (void)u;
-    wolf_notify("Abaküs", "Bu ozellik simdilik yok");
+    (void)w;
+    int idx = (int)(long)u;
+    if (idx == 0) { do_open(0, 0); return; }
+    if (idx == 2) {
+        if (g_dirty) { /* mevcut fx korunsun */ }
+        wolf_text(g_fx, "=TOPLA(D2:D7)");
+        g_dirty = 1;
+        return;
+    }
+    if (idx == 3) {
+        recompute();
+        refresh_grid();
+        status_update();
+    }
 }
 
 /* ---- baslik (36): kompakt, kenar dugmeleri metin ---- */
@@ -447,13 +466,13 @@ static void tabstrip(void)
 {
     wolf_id st = wolf_panel(g_root, 0, S(36), g_w, S(34));
     bgc(st, C_GROUND); rad(st, 0); bgo(st, 100); brd_c(st, 2, C_LINE);
-    const char *tabs[4] = { "Dosya", "Giris", "Ekle", "Gorunum" };
+    const char *tabs[4] = { "Dosya", "Giriş", "Ekle", "Görünüm" };
     int on = 1, x = 12;
     for (int i = 0; i < 4; i++) {
         int tw = slen(tabs[i]) * 7 + 4;
         wolf_id t = lab(st, x, (34 - 13) / 2 - 1, tw + 16, tabs[i], 13,
                         i == on ? C_TXT : C_TAB, 1);
-        wolf_set_click(t, 1); wolf_on_click(t, soon);
+        wolf_set_click(t, 1); wolf_on_click_ex(t, tab_cb, (void *)(long)i);
         if (i == on) {
             wolf_id u = wolf_panel(st, x, S(32), S(tw + 16), 2);
             bgc(u, C_ACC); bgo(u, 100); rad(u, 0);
@@ -558,7 +577,7 @@ static void status_update(void)
     char nb[40];
     fmt_num(sum, nb, sizeof nb);
     int o = 0;
-    const char *pfx = "Sayim: ";
+    const char *pfx = "Sayım: ";
     sb[o] = (char)('A' + c); o++;
     sb[o++] = ':'; sb[o++] = ' ';
     for (const char *s = pfx; *s && o < (int)sizeof(sb) - 90; s++) sb[o++] = *s;
@@ -662,7 +681,7 @@ static int try_open(int notify)
     if (n <= 0) {
         if (notify) {
             char m[180];
-            scpy(m, sizeof m, "Dosya okunamadi: ");
+            scpy(m, sizeof m, "Dosya okunamadı: ");
             int l = slen(m);
             scpy(m + l, (int)sizeof m - l, g_file);
             wolf_notify("Abaküs", m);
@@ -803,7 +822,7 @@ static void fbar(void)
     wolf_set_click(xr, 1); hov(xr, 0x262B35); wolf_on_click(xr, fx_clear_cb);
 
     g_fx = wolf_input(fb, S(102), S(4), g_w - S(102) - S(112), S(22),
-                      "deger ya da =formil (Enter ile yazilir)");
+                      "değer ya da =formül (Enter ile yazılır)");
     wolf_style(g_fx, WOLF_SP_FONT_PX, F(12), 0);
     wolf_on_change(g_fx, fx_change_cb);
     wolf_on_enter(g_fx, fx_apply);
@@ -812,26 +831,45 @@ static void fbar(void)
     g_dirty = 0;
 }
 
-/* ---- ribon (70): Dosya (Ac/Kaydet) grubu ---- */
+/* ---- ribon (70): Dosya (Yeni/Aç/Kaydet/Farklı Kaydet) grubu ---- */
 static void ribbon(void)
 {
     int y = S(70), h = S(70);
     wolf_id rb = wolf_panel(g_root, 0, y, g_w, h);
     bgc(rb, C_GROUND); rad(rb, 0); bgo(rb, 100); brd_c(rb, 2, C_LINE);
 
-    struct { int x, w; const char *t; wolf_event_fn cb; } btns[2] = {
-        { 14, 74, "Ac", do_open }, { 100, 74, "Kaydet", do_save },
+    struct { int x, w; const char *t; wolf_event_fn cb; } btns[4] = {
+        { 14,  68, "Yeni",          do_new },
+        { 88,  68, "Aç",            do_open },
+        { 162, 74, "Kaydet",        do_save },
+        { 242, 108, "Farklı Kaydet", do_save_as },
     };
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 4; i++) {
         wolf_id b = wolf_panel(rb, S(btns[i].x), S(10), S(btns[i].w), S(30));
-        bgc(b, C_FIELD); rad(b, S(6)); bgo(b, 100);
-        brd_c(b, 15, 0x333A47);
-        wolf_set_click(b, 1); hov(b, 0x1A1E26); wolf_on_click(b, btns[i].cb);
-        lab(b, 0, (S(30) - F(12) - 6) / 2, btns[i].w, btns[i].t, 12, C_TXT, 1);
+        bgc(b, i == 2 ? C_ACC : C_FIELD); rad(b, S(6)); bgo(b, 100);
+        if (i != 2) brd_c(b, 15, 0x333A47);
+        wolf_set_click(b, 1); hov(b, i == 2 ? 0x2E6FD6 : 0x1A1E26); wolf_on_click(b, btns[i].cb);
+        lab(b, 0, (S(30) - F(12) - 6) / 2, btns[i].w, btns[i].t, 12,
+            i == 2 ? 0xFFFFFF : C_TXT, 1);
     }
     lab(rb, 14, h - S(16), 560,
-        "Dosya · Duzen · Yazı tipi · Sayı · Hizala · Hucre  (CSV: C:/belgeler)",
+        "Dosya · Düzen · Yazı tipi · Sayı · Hizala · Hücre  (CSV: C:/belgeler)",
         11, 0x7D8491, -1);
+}
+
+static void sheet_cb(wolf_id w, void *u)
+{
+    (void)w;
+    int s = (int)(long)u;
+    if (s < 0 || s > 1 || s == g_sheet) return;
+    if (g_dirty) commit_cur();
+    g_sheet = s;
+    for (int i = 0; i < 2; i++)
+        tcol(g_sheet_tab[i], i == g_sheet ? C_ACC : C_TAB);
+    wolf_move(g_sheet_ul, S(40 + g_sheet * 104) - S(4), S(30));
+    recompute();
+    refresh_grid();
+    select_cell(g_sel / NCOL, g_sel % NCOL);
 }
 
 /* ---- sayfa sekmeleri (32) + durum (28) ---- */
@@ -844,15 +882,14 @@ static void footbar(void)
     const char *sheets[2] = { "Sayfa 1", "Sayfa 2" };
     int x = 40;
     for (int i = 0; i < 2; i++) {
-        wolf_id t = lab(fb, x, (S(32) - F(13) - 6) / 2, 90, sheets[i], 13,
-                        i == 0 ? C_ACC : C_TAB, 1);
-        wolf_set_click(t, 1); wolf_on_click(t, soon);
-        if (i == 0) {
-            wolf_id u = wolf_panel(fb, x - S(4), S(30), S(90) + S(8), 2);
-            bgc(u, C_ACC); bgo(u, 100); rad(u, 0);
-        }
-        x += S(104);
+        wolf_id t = lab(fb, S(x), (S(32) - F(13) - 6) / 2, 90, sheets[i], 13,
+                        i == g_sheet ? C_ACC : C_TAB, 1);
+        wolf_set_click(t, 1); wolf_on_click_ex(t, sheet_cb, (void *)(long)i);
+        g_sheet_tab[i] = t;
+        x += 104;
     }
+    g_sheet_ul = wolf_panel(fb, S(40 + g_sheet * 104) - S(4), S(30), S(90) + S(8), 2);
+    bgc(g_sheet_ul, C_ACC); bgo(g_sheet_ul, 100); rad(g_sheet_ul, 0);
 
     wolf_id sb = wolf_panel(g_root, 0, g_h - S(28), g_w, S(28));
     bgc(sb, C_GROUND); rad(sb, 0); bgo(sb, 100); brd_c(sb, 1, C_LINE);
@@ -863,30 +900,81 @@ static void footbar(void)
 }
 
 /* ---- dosya eylemleri ---- */
-static void do_open(wolf_id w, void *u)
+static void on_pick_open(const char *path, void *u)
 {
-    (void)w; (void)u;
+    (void)u;
+    if (!path || !path[0]) return;
+    scpy(g_file, sizeof g_file, path);
     if (try_open(1)) {
+        g_untitled = 0;
         title_update();
+        recompute();
         int r = g_sel / NCOL, c = g_sel % NCOL;
         select_cell(r > g_last_r ? g_last_r : r, c > g_last_c ? g_last_c : c);
         refresh_grid();
+        wolf_notify("Abaküs", g_title);
     }
 }
 
-static void do_save(wolf_id w, void *u)
+static void save_cur_file(void)
 {
-    (void)w; (void)u;
     if (g_dirty) commit_cur();
     static char buf[8192];
     int len = 0;
     csv_build(buf, sizeof buf, &len);
     if (wolf_fs_write(g_file, buf, len) == 0) {
+        g_untitled = 0;
         title_update();
         wolf_notify("Abaküs", g_file);
     } else {
         wolf_notify("Abaküs", "Kaydedilemedi");
     }
+}
+
+static void on_pick_save(const char *path, void *u)
+{
+    (void)u;
+    if (!path || !path[0]) return;
+    scpy(g_file, sizeof g_file, path);
+    save_cur_file();
+}
+
+static void do_new(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    for (int r = 0; r < NROW; r++)
+        for (int c = 0; c < NCOL; c++) g_raw[r][c][0] = 0;
+    scpy(g_file, sizeof g_file, "C:/belgeler/tablo.csv");
+    g_untitled = 1;
+    scpy(g_title, sizeof g_title, "Yeni tablo");
+    if (g_title_lab) wolf_text(g_title_lab, "Yeni tablo — Abaküs");
+    recompute();
+    refresh_grid();
+    select_cell(0, 0);
+}
+
+static void do_open(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    office_picker_open(OP_MODE_OPEN, "Tablo Aç", "C:/belgeler", base_name(g_file),
+                       ".csv", ".csv", on_pick_open, 0);
+}
+
+static void do_save(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    if (g_untitled) {
+        do_save_as(0, 0);
+        return;
+    }
+    save_cur_file();
+}
+
+static void do_save_as(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    office_picker_open(OP_MODE_SAVE, "Tabloyu Farklı Kaydet", "C:/belgeler", base_name(g_file),
+                       ".csv", ".csv", on_pick_save, 0);
 }
 
 static void build(void);
@@ -896,17 +984,18 @@ static void on_resz(wolf_id w, void *u)
     (void)w; (void)u;
     int w0 = g_w, h0 = g_h;
     if (wolf_screen(&g_w, &g_h) != 0) return;
-    if (g_w == w0 && g_h == h0) return;   /* boyut ayni: yeniden kurmayiz */
+    if (g_w == w0 && g_h == h0) return;
     int a = g_w * 1000 / 1280, b = g_h * 1000 / 720;
     g_s = a < b ? a : b;
     if (g_s < 300) g_s = 300;
-    if (g_dirty) commit_cur();            /* yazilmamis fx kaybolmasin */
+    if (g_dirty) commit_cur();
     wolf_clear(g_root);
     build();
 }
 
 static void build(void)
 {
+    office_picker_reset();
     wolf_style(g_root, WOLF_SP_BG_COLOR, C_GROUND, 0);
     wolf_style(g_root, WOLF_SP_BG_OPA, 100, 0);
 
@@ -932,11 +1021,14 @@ int wolf_main(const wolf_api_t *api)
     if (arg && arg[0]) {
         scpy(g_file, sizeof g_file, arg);
         with_file = try_open(0);
-        if (with_file) scpy(g_title, sizeof g_title, base_name(g_file));
+        if (with_file) {
+            g_untitled = 0;
+            scpy(g_title, sizeof g_title, base_name(g_file));
+        }
     }
     if (!with_file) {
         seed_default();
-        scpy(g_title, sizeof g_title, "Butce 2026 (ornek)");
+        scpy(g_title, sizeof g_title, "Bütçe 2026 (örnek)");
     }
     recompute();
 

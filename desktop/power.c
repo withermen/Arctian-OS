@@ -41,10 +41,10 @@ void power_tick(void) {
     if (present && !chg && pct >= 0) {
         if (pct <= 5 && !warned5) {
             warned5 = 1;
-            arctian_notify("Pil kritik", "Pil %5 veya altinda: hemen sarj edin");
+            arctian_notify("Pil kritik", "Pil %5 veya altında: hemen şarj edin");
         } else if (pct <= 15 && !warned15) {
             warned15 = 1;
-            arctian_notify("Pil azaliyor", "Pil %15: sarj cihazini baglayin");
+            arctian_notify("Pil azalıyor", "Pil %15: şarj cihazını bağlayın");
         }
     }
 }
@@ -107,8 +107,8 @@ void battery_btn_cb(lv_event_t *e) {
     lv_obj_align(big, LV_ALIGN_TOP_LEFT, ui_s(24), ui_s(66));
 
     char st[56];
-    if (!pres) scpy(st, (int)sizeof(st), "Pil bulunamadi (AC adaptorde)");
-    else if (chg) scpy(st, (int)sizeof(st), "Sarijda");
+    if (!pres) scpy(st, (int)sizeof(st), "Pil bulunamadı (AC adaptörde)");
+    else if (chg) scpy(st, (int)sizeof(st), "Şarj oluyor");
     else if (mins >= 0) {
         scpy(st, (int)sizeof(st), "Pilde - tahmini ");
         int k = 0; while (st[k]) k++;
@@ -160,7 +160,7 @@ void power_sleep_cb(lv_event_t *e) {
     lv_obj_set_style_bg_opa(ov, 255, 0);
     lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
     lv_obj_center(ov);
-    lv_obj_t *l = label(ov, "Uyku modu\n\nDevam icin bir tusa basin veya fareyi hareket ettirin.", ADL_TEXT_DIM);
+    lv_obj_t *l = label(ov, "Uyku modu\n\nDevam için bir tuşa basın veya fareyi hareket ettirin.", ADL_TEXT_DIM);
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(l, 620);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
@@ -194,10 +194,10 @@ void open_power_dialog(void) {
     lv_obj_t *ic = make_icon(panel, SVG_POWER, 34);
     lv_obj_align(ic, LV_ALIGN_TOP_MID, 0, 0);
 
-    lv_obj_t *title = label(panel, "Bilgisayari Kapat", ADL_TEXT);
+    lv_obj_t *title = label(panel, "Bilgisayarı Kapat", ADL_TEXT);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 44);
 
-    lv_obj_t *msg = label(panel, "Kapatmak, uyutmak veya yeniden baslatmak istediginizden emin misiniz?", ADL_TEXT_DIM);
+    lv_obj_t *msg = label(panel, "Kapatmak, uyutmak veya yeniden başlatmak istediğinizden emin misiniz?", ADL_TEXT_DIM);
     lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(msg, 436);
     lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
@@ -231,7 +231,7 @@ void open_power_dialog(void) {
     lv_obj_set_size(rb, 132, 40);
     lv_obj_set_style_radius(rb, 8, 0);
     lv_obj_set_style_bg_color(rb, lv_color_hex(ADL_ACCENT), 0);
-    { lv_obj_t *rl = label(rb, "Yeniden Baslat", ADL_TEXT); lv_obj_center(rl); }
+    { lv_obj_t *rl = label(rb, "Yeniden Başlat", ADL_TEXT); lv_obj_center(rl); }
     lv_obj_add_event_cb(rb, power_reboot_cb, LV_EVENT_CLICKED, 0);
 
     lv_obj_t *cx = lv_button_create(row);
@@ -240,7 +240,7 @@ void open_power_dialog(void) {
     lv_obj_set_style_bg_color(cx, lv_color_hex(ADL_SURFACE_2), 0);
     lv_obj_set_style_border_width(cx, 1, 0);
     lv_obj_set_style_border_color(cx, lv_color_hex(ADL_BORDER), 0);
-    { lv_obj_t *xl = label(cx, "Iptal", ADL_TEXT); lv_obj_center(xl); }
+    { lv_obj_t *xl = label(cx, "İptal", ADL_TEXT); lv_obj_center(xl); }
     lv_obj_add_event_cb(cx, power_cancel_cb, LV_EVENT_CLICKED, ov);
 }
 

@@ -66,9 +66,9 @@ enum { ST_CREATE = 0, ST_CREATE_PW, ST_SELECT, ST_PASSWORD };
 static asi_t      *A;
 static lv_font_t  *F_CLOCK, *F_DATE, *F_HEAD, *F_Q, *F_BTN, *F_NAME,
                   *F_NAME_B, *F_FIELD, *F_AV, *F_TR, *F_PLACE;
-static lv_obj_t   *s_root, *s_clock, *s_date, *s_shade_img;
+static lv_obj_t   *s_root, *s_clock, *s_date, *s_shade_img, *s_kbd_lbl;
 static lv_group_t *s_group;
-static int         s_step, s_done, s_rebuild;
+static int         s_step, s_done, s_rebuild, s_kbd_idx, s_in_disk_unlock;
 static lv_obj_t   *s_ta_name, *s_ta_pw1, *s_ta_pw2, *s_ta_login;
 static char        s_pending[32];
 static char        s_target[32];
@@ -76,6 +76,9 @@ static const char *s_error;
 static const char *s_status_txt;     /* ag durumu: notr metin, hata degil */
 static int         s_sel_idx;        /* ekran 2: secili avatar */
 static int         s_want_pw;        /* ekran 1: "Evet" secildi mi */
+
+const char *kv_get(const char *k, const char *def);
+void kv_set(const char *k, const char *v);
 
 /* olcek */
 static int s_sc, s_ox, s_oy;
@@ -98,19 +101,25 @@ static int s_frozen_n;
 
 static void lock_freeze_timers(void) {
     s_frozen_n = 0;
-    lv_timer_t *indev_t[4];
-    int ni = 0;
+    lv_timer_t *keep_t[8];
+    int nk = 0;
     lv_indev_t *d = lv_indev_get_next(0);
-    while (d && ni < 4) {
+    while (d && nk < 8) {
         lv_timer_t *rt = lv_indev_get_read_timer(d);
-        if (rt) indev_t[ni++] = rt;
+        if (rt) keep_t[nk++] = rt;
         d = lv_indev_get_next(d);
+    }
+    lv_display_t *disp = lv_display_get_next(0);
+    while (disp && nk < 8) {
+        lv_timer_t *refr = lv_display_get_refr_timer(disp);
+        if (refr) keep_t[nk++] = refr;
+        disp = lv_display_get_next(disp);
     }
     for (lv_timer_t *t = lv_timer_get_next(0); t; t = lv_timer_get_next(t)) {
         if (s_frozen_n >= LOCK_FROZEN_MAX) break;
         if (lv_timer_get_paused(t)) continue;
         int keep = 0;
-        for (int i = 0; i < ni; i++) if (indev_t[i] == t) { keep = 1; break; }
+        for (int i = 0; i < nk; i++) if (keep_t[i] == t) { keep = 1; break; }
         if (keep) continue;
         lv_timer_pause(t);
         s_frozen[s_frozen_n++] = t;
@@ -143,11 +152,11 @@ static void buf_free_cb(lv_event_t *e) {
 }
 
 /* ---- 1.4 Tarih / 1.5 Saat ---- */
-static const char *MONTHS[] = { "Ocak", "Subat", "Mart", "Nisan", "Mayis",
-                                "Haziran", "Temmuz", "Agustos", "Eylul",
-                                "Ekim", "Kasim", "Aralik" };
-static const char *DAYS[] = { "Pazar", "Pazartesi", "Sali", "Carsamba",
-                              "Persembe", "Cuma", "Cumartesi" };
+static const char *MONTHS[] = { "Ocak", "Şubat", "Mart", "Nisan", "Mayıs",
+                                "Haziran", "Temmuz", "Ağustos", "Eylül",
+                                "Ekim", "Kasım", "Aralık" };
+static const char *DAYS[] = { "Pazar", "Pazartesi", "Salı", "Çarşamba",
+                              "Perşembe", "Cuma", "Cumartesi" };
 
 /* Saat onbellegi dosya kapsaminda: screen_begin yeni etiketler olusturur,
  * onbellek sifirlanmazsa "ayni dakika" diye bos etiket birakilir. */
@@ -318,23 +327,27 @@ static void build_shade(void) {
 static void make_focusable(lv_obj_t *o);
 static void bar_btn_cb(lv_event_t *e) {
     int id = (int)(intptr_t)lv_event_get_user_data(e);
-    if (id == 1) {                 /* ag: durum metni */
-        const char *s = "Ag: baglanti yok";
+    if (id == 1) {                 /* ağ: durum metni */
+        const char *s = "Ağ: bağlantı yok";
         if (A && A->net) {
             int up = (A->net->link_type && A->net->link_type() != 0);
             /* Bazi suruculerde link bayragi kalkmaz ama DHCP IP atar;
              * configured() gercek durumu soyler. */
             if (!up && A->net->configured) up = A->net->configured();
-            if (up) s = "Ag: bagli";
+            if (up) s = "Ağ: bağlı";
         }
         s_status_txt = s;
         s_rebuild = 1;
-    } else if (id == 2) {          /* TR: klavye duzeni dongusu */
-        static const char *l[] = { "trq", "trf", "en" };
-        static int k;
-        k = (k + 1) % 3;
+    } else if (id == 2) {          /* TR-Q / TR-F / EN: klavye duzeni dongusu */
+        static const char *const kbd_codes[3] = { "trq", "trf", "enq" };
+        static const char *const kbd_disp[3]  = { "TR-Q", "TR-F", "EN" };
+        s_kbd_idx = (s_kbd_idx + 1) % 3;
         if (A && A->input && A->input->kbd_layout)
-            A->input->kbd_layout(k == 0 ? 0 : (k == 1 ? 1 : 2));
+            A->input->kbd_layout(s_kbd_idx);
+        if (s_kbd_lbl)
+            lv_label_set_text(s_kbd_lbl, kbd_disp[s_kbd_idx]);
+        if (!s_in_disk_unlock)
+            kv_set("kbd", kbd_codes[s_kbd_idx]);
     } else if (id == 3) {
         if (A && A->system && A->system->reboot) A->system->reboot();
     } else if (id == 4) {
@@ -343,6 +356,7 @@ static void bar_btn_cb(lv_event_t *e) {
 }
 
 static void build_bottom_bar(void) {
+    static const char *const kbd_disp[3] = { "TR-Q", "TR-F", "EN" };
     struct { int x, id; const char *svg; } b[3] = {
         { 32,   1, SVG_NET     },
         { 1156, 3, SVG_RESTART },
@@ -358,15 +372,15 @@ static void build_bottom_bar(void) {
         lv_obj_t *ic = icon_canvas(o, b[i].svg, SS(20));
         if (ic) lv_obj_center(ic);
     }
-    /* TR dugmesi */
-    lv_obj_t *tr = box(s_root, SS(40), SS(40), SS(20),
+    /* Klavye duzeni dugmesi (TR-Q / TR-F / EN) */
+    lv_obj_t *tr = box(s_root, SS(56), SS(40), SS(20),
                        C_SHADE, A_050, C_WHITE, A_028, 1);
     lv_obj_set_pos(tr, SX(84), SY(660));
     lv_obj_add_flag(tr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(tr, bar_btn_cb, LV_EVENT_CLICKED, (void *)(intptr_t)2);
     make_focusable(tr);
-    lv_obj_t *tl = add_label(tr, "TR", F_TR, C_WHITE, LV_OPA_COVER);
-    lv_obj_center(tl);
+    s_kbd_lbl = add_label(tr, kbd_disp[s_kbd_idx % 3], F_TR, C_WHITE, LV_OPA_COVER);
+    lv_obj_center(s_kbd_lbl);
 }
 
 /* ---- ortak katmanlar ---- */
@@ -375,9 +389,10 @@ static void on_field_ready(lv_event_t *e);
 static void disk_submit(void);
 
 static void screen_begin(void) {
+    if (s_group) lv_group_remove_all_objs(s_group);
     lv_obj_clean(s_root);
     s_ta_name = s_ta_pw1 = s_ta_pw2 = s_ta_login = 0;
-    s_clock = s_date = s_shade_img = 0;
+    s_clock = s_date = s_shade_img = s_kbd_lbl = 0;
     s_ic_n = 0;                       /* ikon tamponlari cocuklarla birlikte silindi */
     s_clk_last_ms = 0;                /* yeni etiketler ilk turda dolsun */
     s_clk_prev[0] = 0;
@@ -396,8 +411,6 @@ static void screen_begin(void) {
     lv_obj_set_style_text_letter_space(s_clock, -SS(6), 0);
     lv_obj_set_pos(s_clock, 0, SY(92));
     update_clock();
-
-    lv_group_remove_all_objs(s_group);
 }
 
 static void error_label(void) {
@@ -985,6 +998,7 @@ void disk_unlock_run(asi_t *asi) {
         if (cur) lv_obj_move_foreground(cur);
     }
 
+    s_in_disk_unlock = 1;
     s_disk_done = 0;
     lock_freeze_timers();
     build_disk();
@@ -1000,14 +1014,19 @@ void disk_unlock_run(asi_t *asi) {
         asm volatile("hlt");
     }
 
-    if (kp) lv_indev_set_group(kp, 0);
-    if (ptr) lv_indev_set_group(ptr, 0);
-    lv_group_delete(s_group);
-    s_group = 0;
+    if (kp && lv_indev_get_group(kp) == s_group) lv_indev_set_group(kp, 0);
+    if (ptr && lv_indev_get_group(ptr) == s_group) lv_indev_set_group(ptr, 0);
+    if (s_group) {
+        lv_group_remove_all_objs(s_group);
+        lv_group_delete(s_group);
+        s_group = 0;
+    }
     if (s_root) { lv_obj_delete(s_root); s_root = 0; }
     s_ic_n = 0;
     s_ta_disk = 0;
     s_disk_errlbl = 0;
+    s_clock = s_date = s_shade_img = s_kbd_lbl = 0;
+    s_in_disk_unlock = 0;
     lock_thaw_timers();
 }
 
@@ -1020,6 +1039,12 @@ void lock_screen_run(asi_t *asi) {
 
     lock_fonts_init();
     if (!F_CLOCK) return;            /* font yoksa eski davranisa dusmeyelim */
+
+    {
+        const char *kbd = kv_get("kbd", "trq");
+        s_kbd_idx = (kbd && kbd[0] == 'e') ? 2 : ((kbd && kbd[2] == 'f') ? 1 : 0);
+        if (A->input && A->input->kbd_layout) A->input->kbd_layout(s_kbd_idx);
+    }
 
     int W = asi->gfx->width(), H = asi->gfx->height();
     /* 1280x720 referansini ekrana esit oranli sigdir, ortala. */
@@ -1040,10 +1065,16 @@ void lock_screen_run(asi_t *asi) {
     lv_indev_t *kp = lv_port_get_keypad();
     lv_indev_t *ptr = lv_port_get_indev();
     if (kp) lv_indev_set_group(kp, s_group);
-    if (ptr) lv_indev_set_group(ptr, s_group);
+    if (ptr) {
+        lv_indev_set_group(ptr, s_group);
+        lv_obj_t *cur = lv_indev_get_cursor(ptr);
+        if (cur) lv_obj_move_foreground(cur);
+    }
 
+    s_in_disk_unlock = 0;
     s_done = 0;
     s_error = 0;
+    s_status_txt = 0;
     s_want_pw = 0;
     s_sel_idx = 0;
     s_step = arctian_auth_has_user() ? ST_SELECT : ST_CREATE;
@@ -1067,11 +1098,16 @@ void lock_screen_run(asi_t *asi) {
         }
     }
 
-    if (kp) lv_indev_set_group(kp, 0);
-    if (ptr) lv_indev_set_group(ptr, 0);
-    lv_group_delete(s_group);
-    s_group = 0;
+    if (kp && lv_indev_get_group(kp) == s_group) lv_indev_set_group(kp, 0);
+    if (ptr && lv_indev_get_group(ptr) == s_group) lv_indev_set_group(ptr, 0);
+    if (s_group) {
+        lv_group_remove_all_objs(s_group);
+        lv_group_delete(s_group);
+        s_group = 0;
+    }
     if (s_root) { lv_obj_delete(s_root); s_root = 0; }
+    s_ta_name = s_ta_pw1 = s_ta_pw2 = s_ta_login = 0;
+    s_clock = s_date = s_shade_img = s_ring = s_kbd_lbl = 0;
     s_ic_n = 0;
     lock_thaw_timers();
 }

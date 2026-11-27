@@ -1,5 +1,6 @@
 #include "kernel.h"
 #include "usb.h"
+#include "usb_msd.h"
 #include "blockdev.h"
 #include "serial.h"
 
@@ -21,6 +22,7 @@ typedef struct {
     usb_device_t *dev;
     int           ep_in;
     int           ep_out;
+    int           bdev_idx;
     uint32_t      tag;
     uint32_t      block_size;
     uint64_t      sectors;
@@ -43,8 +45,19 @@ static void msd_name_copy(char *dst, int dstsz, const uint8_t *src, int srclen) 
     dst[p] = 0;
 }
 
+static void msd_clear_stall(usb_device_t *dev, int ep_addr) {
+    usb_setup_packet_t setup;
+    setup.bmRequestType = USB_DIR_OUT | (USB_REQTYPE_STANDARD << 5) | USB_RECIP_ENDPOINT;
+    setup.bRequest = USB_REQ_CLEAR_FEATURE;
+    setup.wValue = 0; /* ENDPOINT_HALT */
+    setup.wIndex = (uint16_t)(ep_addr & 0xFF);
+    setup.wLength = 0;
+    usb_control_transfer(dev, &setup, 0, USB_DIR_OUT);
+}
+
 static int msd_bot(msd_dev_t *m, const uint8_t *cdb, int cdb_len,
                    void *data, uint32_t data_len, int dir_in) {
+    if (!m || !m->dev || m->dev->state != USB_DEVSTATE_CONFIGURED) return -1;
     if (data_len > MSD_BOUNCE_SIZE) return -1;
 
     uint8_t cbw[31];
@@ -74,15 +87,24 @@ static int msd_bot(msd_dev_t *m, const uint8_t *cdb, int cdb_len,
         if (!dir_in && data)
             memcpy(s_bounce, data, data_len);
         int ep = dir_in ? m->ep_in : m->ep_out;
-        if (usb_bulk_transfer(m->dev, ep, s_bounce, (int)data_len,
-                              dir_in ? USB_DIR_IN : USB_DIR_OUT) != 0)
+        int rc = usb_bulk_transfer(m->dev, ep, s_bounce, (int)data_len,
+                                   dir_in ? USB_DIR_IN : USB_DIR_OUT);
+        if (rc == -2) {
+            msd_clear_stall(m->dev, ep);
+        } else if (rc != 0) {
             return -2;
-        if (dir_in && data)
+        }
+        if (rc == 0 && dir_in && data)
             memcpy(data, s_bounce, data_len);
     }
 
     uint8_t csw[13];
-    if (usb_bulk_transfer(m->dev, m->ep_in, csw, 13, USB_DIR_IN) != 0)
+    int csw_rc = usb_bulk_transfer(m->dev, m->ep_in, csw, 13, USB_DIR_IN);
+    if (csw_rc == -2) {
+        msd_clear_stall(m->dev, m->ep_in);
+        csw_rc = usb_bulk_transfer(m->dev, m->ep_in, csw, 13, USB_DIR_IN);
+    }
+    if (csw_rc != 0)
         return -3;
 
     uint32_t sig = (uint32_t)csw[0] | ((uint32_t)csw[1] << 8) |
@@ -104,7 +126,7 @@ static void cdb_lba(uint8_t *cdb, uint64_t lba) {
 
 static int msd_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
     msd_dev_t *m = (msd_dev_t *)ctx;
-    if (!m || !buf) return -1;
+    if (!m || !buf || !m->dev || m->dev->state != USB_DEVSTATE_CONFIGURED) return -1;
     uint8_t *p = (uint8_t *)buf;
 
     while (count > 0) {
@@ -126,7 +148,7 @@ static int msd_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
 
 static int msd_write(void *ctx, uint64_t lba, uint32_t count, const void *buf) {
     msd_dev_t *m = (msd_dev_t *)ctx;
-    if (!m || !buf) return -1;
+    if (!m || !buf || !m->dev || m->dev->state != USB_DEVSTATE_CONFIGURED) return -1;
     const uint8_t *p = (const uint8_t *)buf;
 
     while (count > 0) {
@@ -170,18 +192,49 @@ static int msd_register(msd_dev_t *m) {
     ops.sectors = m->sectors;
     ops.kind = BDEV_KIND_USB;
     ops.removable = 1;
+    m->bdev_idx = blockdev_count();
     return blockdev_register(&ops);
 }
 
 void usb_msd_scan(void) {
-    s_msd_count = 0;
+    /* Re-register existing configured MSDs if blockdev_init() reset the table */
+    for (int j = 0; j < s_msd_count; j++) {
+        msd_dev_t *m = &s_msd[j];
+        if (!m->dev || m->dev->state != USB_DEVSTATE_CONFIGURED)
+            continue;
+        blockdev_info_t in;
+        if (m->bdev_idx < 0 ||
+            blockdev_info(m->bdev_idx, &in) != 0 ||
+            in.kind != BDEV_KIND_USB ||
+            in.sectors != m->sectors) {
+            if (msd_register(m) == 0) {
+                serial_printf("[msd] yeniden kayit: '%s' '%s' bdev=%d\n",
+                              m->vendor, m->product, m->bdev_idx);
+            }
+        }
+    }
 
     if (usb_device_count <= 0) return;
 
-    for (int i = 0; i < usb_device_count && s_msd_count < MSD_MAX_DEVS; i++) {
+    for (int i = 0; i < usb_device_count; i++) {
         usb_device_t *d = &usb_devices[i];
+        if (d->state != USB_DEVSTATE_CONFIGURED || d->msd_registered)
+            continue;
         if (d->class_code != 0x08 || d->subclass != 0x06 || d->protocol != 0x50)
             continue;
+
+        int slot = -1;
+        if (s_msd_count < MSD_MAX_DEVS) {
+            slot = s_msd_count;
+        } else {
+            for (int j = 0; j < MSD_MAX_DEVS; j++) {
+                if (!s_msd[j].dev || s_msd[j].dev->state == USB_DEVSTATE_DETACHED) {
+                    slot = j;
+                    break;
+                }
+            }
+        }
+        if (slot < 0) break;
 
         int ep_in = -1, ep_out = -1;
         for (int e = 0; e < d->endpoint_count; e++) {
@@ -196,11 +249,12 @@ void usb_msd_scan(void) {
             continue;
         }
 
-        msd_dev_t *m = &s_msd[s_msd_count];
+        msd_dev_t *m = &s_msd[slot];
         memset(m, 0, sizeof(*m));
         m->dev = d;
         m->ep_in = ep_in;
         m->ep_out = ep_out;
+        m->bdev_idx = -1;
         m->block_size = MSD_BLOCK_SIZE;
 
         uint8_t cdb[10];
@@ -214,6 +268,18 @@ void usb_msd_scan(void) {
         }
         msd_name_copy(m->vendor, sizeof(m->vendor), inq + 8, 8);
         msd_name_copy(m->product, sizeof(m->product), inq + 16, 16);
+
+        /* Spin-up / TEST_UNIT_READY (tolerates initial UNIT ATTENTION on real sticks) */
+        for (int tries = 0; tries < 3; tries++) {
+            memset(cdb, 0, sizeof(cdb));
+            cdb[0] = SCSI_TEST_UNIT_READY;
+            if (msd_bot(m, cdb, 6, 0, 0, 1) == 0) break;
+            uint8_t sense[18];
+            memset(cdb, 0, sizeof(cdb));
+            cdb[0] = SCSI_REQUEST_SENSE;
+            cdb[4] = 18;
+            msd_bot(m, cdb, 6, sense, 18, 1);
+        }
 
         uint8_t cap[8];
         memset(cdb, 0, sizeof(cdb));
@@ -235,8 +301,23 @@ void usb_msd_scan(void) {
             continue;
         }
 
-        serial_printf("[msd] kayit: '%s' '%s' sec=%d bs=%d\n",
-                      m->vendor, m->product, (int)m->sectors, (int)m->block_size);
-        s_msd_count++;
+        d->msd_registered = true;
+        serial_printf("[msd] kayit: '%s' '%s' sec=%d bs=%d bdev=%d\n",
+                      m->vendor, m->product, (int)m->sectors, (int)m->block_size, m->bdev_idx);
+        if (slot == s_msd_count)
+            s_msd_count++;
     }
+}
+
+bool usb_msd_is_attached(int bdev_idx) {
+    for (int i = 0; i < s_msd_count; i++) {
+        if (s_msd[i].bdev_idx == bdev_idx) {
+            return s_msd[i].dev && s_msd[i].dev->state == USB_DEVSTATE_CONFIGURED;
+        }
+    }
+    return false;
+}
+
+int usb_msd_count(void) {
+    return s_msd_count;
 }

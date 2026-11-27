@@ -343,6 +343,20 @@ void acpi_init(void) {
             if (flen >= 0x6Du) g_acpi.century = fadt[0x6C];
             if (flen >= 0x74u) g_acpi.flags = rd32(fadt + 0x70);
 
+            /* FACS: ACPI 2.0+ X_FIRMWARE_CTRL (offset 0x84, 64-bit) tercih edilir. */
+            uint64_t facs_addr = (flen >= 0x28u) ? (uint64_t)rd32(fadt + 0x24) : 0ull;
+            if (flen >= 0x8Cu) {
+                uint64_t xf = rd64(fadt + 0x84);
+                if (xf) facs_addr = xf;
+            }
+            if (facs_addr) {
+                const uint8_t *facs = acpi_ensure(facs_addr, 64);
+                if (facs && mem_eq(facs, "FACS", 4)) {
+                    g_acpi.facs_addr = facs_addr;
+                    g_acpi.s3_waking_vector = rd32(facs + 0x0C);
+                }
+            }
+
             /* DSDT: ACPI 2.0+ X_DSDT (offset 0x8C, 64-bit) tercih edilir. */
             uint64_t dsdt_addr = (flen >= 0x2Cu) ? (uint64_t)rd32(fadt + 0x28) : 0ull;
             if (flen >= 0x94u) {
@@ -409,9 +423,26 @@ void acpi_shutdown(void) {
     for (;;) { asm volatile("cli"); asm volatile("hlt"); }
 }
 
+static int acpi_has_valid_waking_vector(void) {
+    if (!g_acpi.facs_addr) return 0;
+    const uint8_t *facs = acpi_ensure(g_acpi.facs_addr, 64);
+    if (!facs || !mem_eq(facs, "FACS", 4)) return 0;
+    uint32_t wv32 = rd32(facs + 0x0C);
+    if (wv32 == 0u || wv32 >= 0x100000u) return 0; /* Real-mode 16-bit < 1MB gerekli */
+    g_acpi.s3_waking_vector = wv32;
+    return 1;
+}
+
 int acpi_enter_sleep(void) {
-    if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
-    if (g_acpi.slp_typ_s3a == g_acpi.slp_typ_s5a) return 0;
+    if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3 ||
+        g_acpi.slp_typ_s3a == g_acpi.slp_typ_s5a) {
+        serial_puts("[acpi] S3 waking vector yok; guvenli uyku atlandi\n");
+        return -1;
+    }
+    if (!acpi_has_valid_waking_vector()) {
+        serial_puts("[acpi] S3 waking vector yok; guvenli uyku atlandi\n");
+        return -1;
+    }
     acpi_enable_sci();
     uint16_t va = (uint16_t)(((uint16_t)g_acpi.slp_typ_s3a & 0x07u) << 10) | 0x2000u;
     outw(g_acpi.pm1a_cnt, va);
@@ -425,7 +456,8 @@ int acpi_enter_sleep(void) {
 
 int acpi_sleep_supported(void) {
     if (!g_acpi.present || !g_acpi.pm1a_cnt || !g_acpi.has_s3) return 0;
-    return g_acpi.slp_typ_s3a != g_acpi.slp_typ_s5a;
+    if (g_acpi.slp_typ_s3a == g_acpi.slp_typ_s5a) return 0;
+    return acpi_has_valid_waking_vector();
 }
 
 /* ------------------------------------------------------------------ */
@@ -454,8 +486,11 @@ static void smbus_probe(void) {
                 uint8_t cls = pci_config_readb((uint8_t)bus, (uint8_t)slot, (uint8_t)f, 0x0B);
                 uint8_t sub = pci_config_readb((uint8_t)bus, (uint8_t)slot, (uint8_t)f, 0x0A);
                 if (cls == 0x0C && sub == 0x05) {
-                    uint16_t ba = (uint16_t)(pci_config_readw((uint8_t)bus, (uint8_t)slot, (uint8_t)f, 0x90) & 0xFFF0u);
-                    if (ba) { s_smb_base = ba; return; }
+                    uint32_t bar4 = pci_config_readl((uint8_t)bus, (uint8_t)slot, (uint8_t)f, 0x20);
+                    if (bar4 != 0xFFFFFFFFu && (bar4 & 0x01u)) {
+                        uint16_t ba = (uint16_t)(bar4 & 0xFFE0u);
+                        if (ba) { s_smb_base = ba; return; }
+                    }
                 }
             }
         }

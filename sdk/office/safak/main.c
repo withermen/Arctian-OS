@@ -100,7 +100,7 @@ static wolf_id letter_box(wolf_id p, int x, int y, int box, const char *ch,
 
 /* ---- baslik cubugu (36 px) + kenar dugmeleri ---- */
 static void cb_min(wolf_id w, void *u)   { (void)w; (void)u; wolf_win_min(); }
-static void cb_max(wolf_id w, void *u)   { (void)w; (void)u; wolf_notify("Ofis", "Zaten tam ekrandasin"); }
+static void cb_max(wolf_id w, void *u)   { (void)w; (void)u; wolf_notify("Ofis", "Zaten tam ekrandasın"); }
 static void cb_close(wolf_id w, void *u) { (void)w; (void)u; wolf_win_close(); }
 
 static void winbtn(int x, const char *svg, wolf_event_fn cb, uint32_t hover)
@@ -151,7 +151,7 @@ static int kind_of(const char *p)
     if (ci_eq(dot, ".doc") || ci_eq(dot, ".txt") || ci_eq(dot, ".md") ||
         ci_eq(dot, ".rtf")) return K_DOC;
     if (ci_eq(dot, ".xls") || ci_eq(dot, ".csv")) return K_TAB;
-    if (ci_eq(dot, ".ppt")) return K_PPT;
+    if (ci_eq(dot, ".ppt") || ci_eq(dot, ".sln")) return K_PPT;
     if (ci_eq(dot, ".pdf")) return K_PDF;
     return K_DOC;
 }
@@ -380,7 +380,7 @@ static void list_redraw(void)
     wolf_resize(g_list, g_list_w - 2, bh - S(34) - 2);
     if (rows == 0) {
         lab(g_list, S(14), S(12), g_list_w - S(28),
-            g_query[0] ? "Sonuc yok" : "Henuz belge acilmadi - kartlardan baslayin",
+            g_query[0] ? "Sonuç yok" : "Henüz belge açılmadı — kartlardan başlayın",
             13, C_PAS, -1);
         return;
     }
@@ -440,7 +440,7 @@ static void see_cb(wolf_id w, void *u)
 {
     (void)w; (void)u;
     g_showall = !g_showall;
-    wolf_text(g_see, g_showall ? "Daralt" : "Tumunu gor");
+    wolf_text(g_see, g_showall ? "Daralt" : "Tümünü gör");
     refilter();
     list_redraw();
 }
@@ -473,8 +473,8 @@ static void list_area(wolf_id main, int aw, int ty)
     brd_c(hd, 2, C_PLINE);
     int t1 = aw - 2 - S(420);
     lab(hd, S(14), (S(34) - F(12) - 6) / 2, 220, "Ad", 12, C_META, -1);
-    lab(hd, t1, (S(34) - F(12) - 6) / 2, 110, "Tur", 12, C_META, -1);
-    lab(hd, t1 + S(120), (S(34) - F(12) - 6) / 2, 140, "Son kullanim", 12, C_META, -1);
+    lab(hd, t1, (S(34) - F(12) - 6) / 2, 110, "Tür", 12, C_META, -1);
+    lab(hd, t1 + S(120), (S(34) - F(12) - 6) / 2, 140, "Son kullanım", 12, C_META, -1);
     lab(hd, t1 + S(270), (S(34) - F(12) - 6) / 2, 140, "Konum", 12, C_META, -1);
 
     g_list = wolf_panel(g_box, 1, S(34) + 1, aw - 2, 4 * S(44) + S(12));
@@ -517,7 +517,7 @@ static void build(void)
 
     /* karsilama + arama (420x36 sagda) */
     lab(main, 0, S(24), aw - S(440), "Merhaba", 24, C_TXT, -1);
-    lab(main, 0, S(24) + S(36), aw - S(440), "Bugun ne uzerinde calisiyoruz?", 12, C_META, -1);
+    lab(main, 0, S(24) + S(36), aw - S(440), "Bugün ne üzerinde çalışıyoruz?", 12, C_META, -1);
     g_search = wolf_input(main, aw - S(420), S(24), S(420), S(36),
                           "Belge, tablo, sunum veya PDF ara");
     wolf_on_change(g_search, search_cb);
@@ -527,10 +527,10 @@ static void build(void)
     int gap = S(12);
     int cw = (aw - 3 * gap) / 4;
     struct { const char *ch, *t1, *t2; uint32_t c; wolf_event_fn cb; } cards[4] = {
-        { "W", "Boş belge", "Word tarzi metin",      C_BLUE,   open_murekkep },
-        { "X", "Boş tablo", "Hucreli hesap sayfasi", C_GREEN,  open_abakus },
-        { "P", "Boş sunum", "Slaytlarla anlatin",    C_ORANGE, open_sahne },
-        { "PDF", "PDF ac",  "Dosya sec ya da surukle", C_RED,  open_mercek },
+        { "W", "Boş belge", "Word tarzı metin",         C_BLUE,   open_murekkep },
+        { "X", "Boş tablo", "Hücreli hesap sayfası",    C_GREEN,  open_abakus },
+        { "P", "Boş sunum", "Slaytlarla anlatın",       C_ORANGE, open_sahne },
+        { "PDF", "PDF aç",  "Dosya seç ve görüntüle",   C_RED,    open_mercek },
     };
     for (int i = 0; i < 4; i++) {
         wolf_id c = wolf_panel(main, i * (cw + gap), cy, cw, S(118));
@@ -546,7 +546,7 @@ static void build(void)
     /* son kullanilanlar */
     int ry = cy + S(118) + S(22);
     lab(main, 0, ry, 220, "Son kullanılanlar", 15, C_TXT, -1);
-    g_see = lab(main, 0, ry + S(2), 110, g_showall ? "Daralt" : "Tumunu gor", 12, C_META, 2);
+    g_see = lab(main, 0, ry + S(2), 110, g_showall ? "Daralt" : "Tümünü gör", 12, C_META, 2);
     wolf_move(g_see, aw - S(110), ry + S(2));
     wolf_set_click(g_see, 1); wolf_on_click(g_see, see_cb);
 

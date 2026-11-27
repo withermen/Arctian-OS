@@ -19,10 +19,13 @@ typedef struct {
     volatile proc_state_t state;
     int exit_code;
     int is_app;
+    int is_idle;
     int waiting;
     uint32_t caps;
     uint32_t uid;
     uint32_t gid;
+    uint64_t io_bytes;
+    uint64_t net_bytes;
     char name[32];
     void (*entry)(void *);
     void *arg;
@@ -79,10 +82,13 @@ static void proc_init_slot(pcb_t *p) {
     p->state = PROC_UNUSED;
     p->exit_code = 0;
     p->is_app = 0;
+    p->is_idle = 0;
     p->waiting = 0;
     p->caps = CAP_ALL;
     p->uid = 0;
     p->gid = 0;
+    p->io_bytes = 0;
+    p->net_bytes = 0;
     p->name[0] = 0;
     p->entry = 0;
     p->arg = 0;
@@ -170,10 +176,13 @@ static int proc_create(const char *name, void (*entry)(void *), void *arg, int p
     p->ppid = ppid > 0 ? ppid : s_init_pid;
     p->exit_code = 0;
     p->is_app = 0;
+    p->is_idle = (name && name[0] == 'i' && name[1] == 'd' && name[2] == 'l' && name[3] == 'e') ? 1 : 0;
     p->waiting = 0;
     p->caps = CAP_ALL;
-    p->uid = 0;
-    p->gid = 0;
+    p->uid = caps_uid();
+    p->gid = caps_gid();
+    p->io_bytes = 0;
+    p->net_bytes = 0;
     p->entry = entry;
     p->arg = arg;
     p->space = 0;
@@ -364,10 +373,128 @@ int proc_info(int i, int *pid, char *name, int cap, int *state, int *ppid, int *
     return 0;
 }
 
+static inline uint64_t proc_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static volatile uint64_t s_dsk_active_tsc;
+static volatile uint64_t s_dsk_total_tsc;
+static volatile uint64_t s_dsk_frame_start_tsc;
+static volatile uint64_t s_dsk_last_end_tsc;
+static volatile uint8_t  s_dsk_in_frame;
+static volatile uint8_t  s_dsk_reap_armed;
+static volatile uint32_t s_dsk_last_sched_ticks;
+static volatile uint32_t s_dsk_active_ticks;
+
+void proc_desktop_frame_begin(void) {
+    if (s_dsk_in_frame || sched_current() != 0) return;
+    uint64_t now = proc_rdtsc();
+    if (s_dsk_last_end_tsc != 0 && now > s_dsk_last_end_tsc) {
+        s_dsk_total_tsc += (now - s_dsk_last_end_tsc);
+    }
+    s_dsk_frame_start_tsc = now;
+    s_dsk_in_frame = 1;
+}
+
+void proc_desktop_mark_reap(void) {
+    if (sched_current() == 0 && s_dsk_in_frame) {
+        s_dsk_reap_armed = 1;
+    }
+}
+
+void proc_desktop_frame_end_if_armed(void) {
+    if (!s_dsk_reap_armed || !s_dsk_in_frame || sched_current() != 0) return;
+    s_dsk_reap_armed = 0;
+    uint64_t now = proc_rdtsc();
+    uint64_t dt = (now > s_dsk_frame_start_tsc) ? (now - s_dsk_frame_start_tsc) : 0;
+    s_dsk_active_tsc += dt;
+    s_dsk_total_tsc += dt;
+    s_dsk_last_end_tsc = now;
+    s_dsk_in_frame = 0;
+}
+
+void proc_desktop_blit_tsc(uint64_t tsc_delta) {
+    if (sched_current() != 0) return;
+    s_dsk_active_tsc += tsc_delta;
+    s_dsk_total_tsc += tsc_delta;
+    s_dsk_last_end_tsc = proc_rdtsc();
+}
+
+static uint32_t proc_desktop_active_ticks(void) {
+    uint32_t cur_raw = sched_task_ticks(0);
+    uint32_t d_raw = cur_raw - s_dsk_last_sched_ticks;
+    if (d_raw > 0) {
+        uint64_t tot = s_dsk_total_tsc;
+        uint64_t act = s_dsk_active_tsc;
+        uint32_t add = d_raw;
+        if (tot > 0) {
+            uint64_t scaled = (act * (uint64_t)d_raw + (tot >> 1)) / tot;
+            add = (scaled > d_raw) ? d_raw : (uint32_t)scaled;
+            if (d_raw >= 10u) {
+                s_dsk_active_tsc = 0;
+                s_dsk_total_tsc = 0;
+            }
+        }
+        s_dsk_active_ticks += add;
+        s_dsk_last_sched_ticks = cur_raw;
+    }
+    return s_dsk_active_ticks;
+}
+
+void proc_add_io_bytes(uint64_t bytes) {
+    if (!bytes) return;
+    pcb_t *p = proc_current();
+    if (p) __atomic_fetch_add(&p->io_bytes, bytes, __ATOMIC_RELAXED);
+}
+
+void proc_add_net_bytes(uint64_t bytes) {
+    if (!bytes) return;
+    pcb_t *p = proc_current();
+    if (p) __atomic_fetch_add(&p->net_bytes, bytes, __ATOMIC_RELAXED);
+}
+
+static int name_is_idle(const char *nm) {
+    return nm && nm[0] == 'i' && nm[1] == 'd' && nm[2] == 'l' && nm[3] == 'e';
+}
+
 int proc_info_ex(int i, asi_proc_info_t *out) {
-    if (!out) return -1;
+    if (!out || i < 0) return -1;
     pcb_t *p = proc_slot(i);
-    if (!p || p->state == PROC_UNUSED) return -1;
+    if (!p || p->state == PROC_UNUSED) {
+        if (posix_oom_list_cb) {
+            asi_oom_app_t apps[16];
+            int pn = posix_oom_list_cb(apps, 16);
+            if (pn > 0) {
+                int unused_before = 0;
+                for (int k = 0; k < i; k++) {
+                    pcb_t *pk = proc_slot(k);
+                    if (!pk || pk->state == PROC_UNUSED) unused_before++;
+                }
+                if (unused_before < pn) {
+                    const asi_oom_app_t *pa = &apps[unused_before];
+                    out->pid = pa->pid;
+                    out->ppid = s_init_pid;
+                    out->state = pa->frozen ? (int)PROC_BLOCKED : (int)PROC_RUNNING;
+                    out->exit_code = 0;
+                    out->caps = CAP_ALL;
+                    out->uid = caps_uid();
+                    out->gid = caps_gid();
+                    out->cpu_ticks = 0u;
+                    out->ram_kb = pa->ram_kb;
+                    out->io_bytes = 0;
+                    out->net_bytes = 0;
+                    out->flags = ASI_PROC_FLAG_POSIX;
+                    out->is_idle = 0;
+                    name_copy(out->name, sizeof(out->name), pa->name);
+                    return 0;
+                }
+            }
+        }
+        return -1;
+    }
+    int is_idle = p->is_idle || name_is_idle(p->name);
     out->pid = p->pid;
     out->ppid = p->ppid;
     out->state = (int)p->state;
@@ -375,7 +502,31 @@ int proc_info_ex(int i, asi_proc_info_t *out) {
     out->caps = p->caps;
     out->uid = p->uid;
     out->gid = p->gid;
-    out->cpu_ticks = sched_task_ticks(p->task);
+    out->is_idle = is_idle ? 1u : 0u;
+    out->flags = 0u;
+    if (is_idle) out->flags |= ASI_PROC_FLAG_IDLE;
+    if (p->is_app) out->flags |= ASI_PROC_FLAG_APP;
+
+    if (is_idle) {
+        out->cpu_ticks = 0u;
+    } else if (p->pid == s_init_pid) {
+        out->cpu_ticks = proc_desktop_active_ticks();
+    } else {
+        out->cpu_ticks = (p->task >= 0) ? sched_task_ticks(p->task) : 0u;
+    }
+
+    uint32_t kb = 0u;
+    if (p->pid == s_init_pid) {
+        kb = (uint32_t)(kmalloc_used() / 1024u) + 32u;
+    } else {
+        if (p->space) kb += vmm_space_ram_kb(p->space);
+        if (p->task >= 0) kb += 32u;
+        if (p->is_app && kb == 0u) kb = 256u;
+        if (kb == 0u && p->state != PROC_ZOMBIE) kb = 32u;
+    }
+    out->ram_kb = kb;
+    out->io_bytes = __atomic_load_n(&p->io_bytes, __ATOMIC_RELAXED);
+    out->net_bytes = __atomic_load_n(&p->net_bytes, __ATOMIC_RELAXED);
     name_copy(out->name, sizeof(out->name), p->name);
     return 0;
 }
@@ -389,15 +540,19 @@ int proc_app_open_caps(const char *title, uint32_t caps) {
     spin_lock(&s_proc_lock);
     pcb_t *p = proc_alloc_slot_locked(&fl);
     if (!p) { spin_unlock(&s_proc_lock); sched_irq_restore(fl); return -1; }
+    uint32_t cur_u = caps_uid(), cur_g = caps_gid();
     p->pid = s_next_pid++;
     p->ppid = s_init_pid;
     p->state = PROC_RUNNING;
     p->exit_code = 0;
     p->is_app = 1;
+    p->is_idle = 0;
     p->waiting = 0;
     p->caps = caps;
-    p->uid = (caps == CAP_ALL) ? 0u : 1000u;
-    p->gid = (caps == CAP_ALL) ? 0u : 1000u;
+    p->uid = (caps == CAP_ALL) ? cur_u : (cur_u ? cur_u : 1000u);
+    p->gid = (caps == CAP_ALL) ? cur_g : (cur_g ? cur_g : 1000u);
+    p->io_bytes = 0;
+    p->net_bytes = 0;
     p->entry = 0;
     p->arg = 0;
     p->space = 0;
@@ -485,6 +640,7 @@ void proc_app_close(int pid, int code) {
 }
 
 int proc_reap(int *code_out) {
+    proc_desktop_mark_reap();
     uint64_t fl = sched_irq_save();
     spin_lock(&s_proc_lock);
     int cap = s_proc_cap;
@@ -592,6 +748,56 @@ int proc_fault_selftest(void) {
     int ok = (r == pid && code == -11);
     serial_printf("[proc] bellek koruma selftest: pid=%d kod=%d -> %s\n",
                   r, code, ok ? "OK (surec olduruldu, sistem ayakta)" : "HATA");
+    return ok ? 0 : -1;
+}
+
+static void proc11_idle_worker(void *arg) {
+    (void)arg;
+    sched_sleep_ms(80);
+    proc_exit(0);
+}
+
+int proc_v11_selftest(void) {
+    asi_proc_info_t i0, i1;
+    if (proc_info_ex(0, &i0) != 0) {
+        serial_puts("[proc11] info_ex(0) FAIL\n");
+        return -1;
+    }
+
+    int ipid = proc_spawn("idle-test", proc11_idle_worker, 0);
+    int idle_slot = -1;
+    if (ipid > 1) {
+        int cap = __atomic_load_n(&s_proc_cap, __ATOMIC_ACQUIRE);
+        for (int k = 0; k < cap; k++) {
+            pcb_t *pk = proc_slot(k);
+            if (pk && pk->pid == ipid) { idle_slot = k; break; }
+        }
+    }
+
+    asi_proc_info_t i_idle;
+    int idle_flag_ok = 0;
+    if (idle_slot >= 0 && proc_info_ex(idle_slot, &i_idle) == 0) {
+        idle_flag_ok = (i_idle.is_idle == 1u && (i_idle.flags & ASI_PROC_FLAG_IDLE) != 0 &&
+                        i_idle.cpu_ticks == 0u && i_idle.ram_kb > 0u);
+    }
+
+    uint32_t t0 = proc_sys_ticks();
+    sched_sleep_ms(50);
+    uint32_t t1 = proc_sys_ticks();
+    if (proc_info_ex(0, &i1) != 0) return -1;
+    if (ipid > 1) proc_wait(ipid, 0);
+
+    uint32_t dt = t1 - t0;
+    uint32_t d_cpu = i1.cpu_ticks - i0.cpu_ticks;
+    uint32_t idle_cpu_pct = dt ? (d_cpu * 100u / dt) : 0u;
+
+    int ok = (i0.ram_kb > 0u && dt > 0u && idle_cpu_pct < 90u && idle_flag_ok);
+    serial_printf("[proc11] pid=%d ram_kb=%u io=%llu net=%llu dt=%u d_cpu=%u idle_cpu_pct=%u%% idle_flag=%s -> %s\n",
+                  i0.pid, (unsigned)i0.ram_kb,
+                  (unsigned long long)i0.io_bytes, (unsigned long long)i0.net_bytes,
+                  (unsigned)dt, (unsigned)d_cpu, (unsigned)idle_cpu_pct,
+                  idle_flag_ok ? "OK" : "FAIL",
+                  ok ? "OK" : "HATA");
     return ok ? 0 : -1;
 }
 

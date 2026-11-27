@@ -70,7 +70,8 @@ static int bga_set_mode(gpu_drv_t *drv, int width, int height, int bpp) {
     bga_write(VBE_DISPI_INDEX_VIRT_WIDTH, (uint16_t)width);
 
     int pages = 1;
-    if (drv->vram_size >= frame_bytes * 2ull && (uint32_t)height * 2u <= 4320u) {
+    bool allow_pageflip = (drv->vendor_id == PCI_VENDOR_BOCHS && drv->device_id == 0x1111u);
+    if (allow_pageflip && drv->vram_size >= frame_bytes * 2ull && (uint32_t)height * 2u <= 4320u) {
         bga_write(VBE_DISPI_INDEX_VIRT_HEIGHT, (uint16_t)(height * 2));
         pages = 2;
     } else {
@@ -84,6 +85,22 @@ static int bga_set_mode(gpu_drv_t *drv, int width, int height, int bpp) {
     uint16_t yr = bga_read(VBE_DISPI_INDEX_YRES);
     if (xr != (uint16_t)width || yr != (uint16_t)height) {
         return -3;
+    }
+
+    if (pages == 2) {
+        uint16_t vh = bga_read(VBE_DISPI_INDEX_VIRT_HEIGHT);
+        bga_write(VBE_DISPI_INDEX_Y_OFFSET, (uint16_t)height);
+        uint16_t yo = bga_read(VBE_DISPI_INDEX_Y_OFFSET);
+        bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+        uint16_t yo0 = bga_read(VBE_DISPI_INDEX_Y_OFFSET);
+        if (vh < (uint16_t)(height * 2) || yo != (uint16_t)height || yo0 != 0) {
+            pages = 1;
+            bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+            bga_write(VBE_DISPI_INDEX_VIRT_HEIGHT, (uint16_t)height);
+            bga_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+            bga_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+            bga_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+        }
     }
 
     uint64_t map_bytes = drv->vram_size ? drv->vram_size : (16ull * 1024ull * 1024ull);
@@ -133,6 +150,9 @@ int gpu_bga_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
         if (!info->bar[0].is_io && info->bar[0].address != 0) {
             vram_phys = info->bar[0].address;
             vram_size = info->bar[0].size;
+        } else if (!info->bar[1].is_io && info->bar[1].address != 0) {
+            vram_phys = info->bar[1].address;
+            vram_size = info->bar[1].size;
         }
     }
     if (vram_phys == 0) {
@@ -145,8 +165,8 @@ int gpu_bga_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
     if (vram_phys == 0) vram_phys = 0xFD000000ull;
     if (vram_size == 0) vram_size = 16ull * 1024ull * 1024ull;
 
-    out->vendor_id = info ? info->pci.vendor : PCI_VENDOR_BOCHS;
-    out->device_id = info ? info->pci.device : 0x1111u;
+    out->vendor_id = info ? info->pci.vendor : 0;
+    out->device_id = info ? info->pci.device : 0;
     out->bus       = info ? info->pci.bus : 0;
     out->slot      = info ? info->pci.slot : 0;
     out->func      = info ? info->pci.func : 0;
@@ -158,9 +178,11 @@ int gpu_bga_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
     out->caps      = GPU_CAP_MODESET | GPU_CAP_VSYNC;
     if (gpu_simd_caps() & GPU_SIMD_SSE2) out->caps |= GPU_CAP_SIMD;
 
-    const char *nm = "Bochs/QEMU BGA";
+    const char *nm = (info && info->pci.vendor == 0x80EEu) ? "VirtualBox BGA"
+                   : (info && info->pci.vendor == 0x15ADu) ? "VMSVGA BGA"
+                   : "Bochs/QEMU BGA";
     for (int i = 0; nm[i] && i < (int)sizeof(out->name) - 1; i++) out->name[i] = nm[i];
-    const char *gn = "DISPI VBE 0xB0C5";
+    const char *gn = (info && info->gen_name[0]) ? info->gen_name : "DISPI VBE 0xB0C5";
     for (int i = 0; gn[i] && i < (int)sizeof(out->gen_name) - 1; i++) out->gen_name[i] = gn[i];
 
     out->ops.flush_rect  = bga_flush_rect;
@@ -177,10 +199,14 @@ int gpu_bga_probe(const gpu_pci_info_t *info, gpu_drv_t *out,
     }
 
     out->active = true;
-    serial_printf("[gpu-bga] DISPI=0x%04X %dx%dx%d VRAM=0x%08X (%uMB) pages=%d WC=%s\n",
-                  (unsigned)id, out->width, out->height, out->bpp,
+    serial_printf("[gpu-bga] DISPI=0x%04X pci=%04X:%04X %dx%dx%d VRAM=0x%08X (%uMB) pages=%d pageflip=%s WC=%s\n",
+                  (unsigned)id,
+                  (unsigned)out->vendor_id, (unsigned)out->device_id,
+                  out->width, out->height, out->bpp,
                   (unsigned)out->vram_phys,
                   (unsigned)(out->vram_size / (1024ull * 1024ull)),
-                  out->page_count, out->wc_active ? "ON" : "OFF");
+                  out->page_count,
+                  (out->caps & GPU_CAP_PAGEFLIP) ? "ON" : "OFF",
+                  out->wc_active ? "ON" : "OFF");
     return 0;
 }

@@ -181,7 +181,11 @@ void diskcrypt_init(void) {
         return;
     }
     uint64_t secs = storage_sector_count();
-    if (h->region_base != AFS_BASE_LEGACY_LBA || h->region_end <= h->region_base ||
+    uint32_t detected_base = afs_get_base_lba();
+    int base_ok = (h->region_base == AFS_BASE_LBA ||
+                   h->region_base == AFS_BASE_LEGACY_LBA ||
+                   (detected_base != 0 && h->region_base == detected_base));
+    if (!base_ok || h->region_end <= h->region_base ||
         h->region_end > secs || h->iterations == 0) {
         s_status = "Sifreleme bozuk";
         return;
@@ -223,6 +227,8 @@ void diskcrypt_init(void) {
 int diskcrypt_present(void)  { return s_present; }
 int diskcrypt_unlocked(void) { return s_unlocked; }
 const char *diskcrypt_status(void) { return s_status; }
+uint32_t diskcrypt_region_base(void) { return s_region_base; }
+uint32_t diskcrypt_region_end(void)  { return s_region_end; }
 
 int diskcrypt_unlock(const char *pass) {
     if (!s_present) return -1;
@@ -275,17 +281,22 @@ int diskcrypt_setup(const char *pass) {
     if (s_present || storage_crypt_active()) return -1;
     if (!pass || dlen(pass) < 4) return -2;
     uint64_t secs = storage_sector_count();
-    if (secs < (uint64_t)AFS_BASE_LEGACY_LBA + 4096u) return -3;
-    uint32_t cap = (uint32_t)(secs - DISKCRYPT_RESERVE);
-    if (cap <= AFS_BASE_LEGACY_LBA) cap = (uint32_t)secs;
+    uint32_t base = afs_get_base_lba();
+    if (base == 0) base = AFS_BASE_LBA;
+    if (secs < (uint64_t)base + 4096u) return -3;
+    uint64_t cap64 = secs - DISKCRYPT_RESERVE;
+    if (cap64 <= base) cap64 = secs;
+    if (cap64 > 0xFFFFFFFFull) cap64 = 0xFFFFFFFFull;
+    uint32_t cap = (uint32_t)cap64;
 
     uint8_t salt[16];
     size_t olen = 0;
     mbedtls_hardware_poll(0, salt, sizeof(salt), &olen);
     if (olen != sizeof(salt)) return -4;
 
-    s_region_base = AFS_BASE_LEGACY_LBA;   /* bolge eski tabandan baslar:
-                                            * yeni duzende de AFS'yi icine alir */
+    /* Gercek AFS tabanindan basla (v6/v7'de 65536); OTA Slot B (32768..65535)
+     * bolgesi boylece hicbir zaman sifrelenip ezilmez. */
+    s_region_base = base;
     s_region_end = cap;
     s_iter = DISKCRYPT_ITER;
     for (int i = 0; i < 16; i++) s_salt[i] = salt[i];

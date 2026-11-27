@@ -167,7 +167,7 @@ void tb_show_desk_menu(int x, int y, const arctian_app_t *a) {
     if (y < ui_s(6)) y = ui_s(6);
     lv_obj_set_pos(p, x, y);
 
-    tb_menu_button(p, 0, has ? "Masaustunden kaldir" : "Masaustune ekle", tb_menu_desk_cb);
+    tb_menu_button(p, 0, has ? "Masaüstünden kaldır" : "Masaüstüne ekle", tb_menu_desk_cb);
 }
 
 
@@ -209,7 +209,7 @@ void tb_show_app_menu(int x, int y, const arctian_app_t *a) {
     int k = 0;
     if (pinned) tb_menu_button(p, k++, "Görev çubuğundan kaldır", tb_menu_unpin_cb);
     else        tb_menu_button(p, k++, "Görev çubuğuna sabitle", tb_menu_pin_cb);
-    tb_menu_button(p, k++, desk ? "Masaustunden kaldir" : "Masaustune ekle", tb_menu_desk_cb);
+    tb_menu_button(p, k++, desk ? "Masaüstünden kaldır" : "Masaüstüne ekle", tb_menu_desk_cb);
     if (running) tb_menu_button(p, k++, "Uygulamayı kapat", tb_menu_kill_cb);
 }
 
@@ -298,7 +298,7 @@ void tb_show_menu(int x, const char *title) {
 
     int k = 0;
     if (i_pin)   tb_menu_button(p, k++, "Sabitle", tb_menu_pin_cb);
-    if (i_unpin) tb_menu_button(p, k++, "Sabitlemeyi kaldir", tb_menu_unpin_cb);
+    if (i_unpin) tb_menu_button(p, k++, "Sabitlemeyi kaldır", tb_menu_unpin_cb);
     if (i_kill)  tb_menu_button(p, k++, "Uygulamayı kapat", tb_menu_kill_cb);
 }
 

@@ -1,11 +1,152 @@
 #include "arctian_wpe_backend.h"
 
+#include <wpe/wpe.h>
 #include <cairo/cairo-ft.h>
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
+
+namespace {
+
+constexpr size_t kClipCap = 4096;
+
+void append_utf8(uint32_t cp, std::string& out) {
+    if (cp < 0x80u) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800u) {
+        out.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp < 0x10000u) {
+        out.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    } else if (cp <= 0x10FFFFu) {
+        out.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+    }
+}
+
+size_t utf8_prev(const std::string& s, size_t pos) {
+    if (pos == 0 || s.empty()) {
+        return 0;
+    }
+    size_t i = std::min(pos, s.size()) - 1;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) {
+        --i;
+    }
+    return i;
+}
+
+size_t utf8_next(const std::string& s, size_t pos) {
+    if (pos >= s.size()) {
+        return s.size();
+    }
+    size_t i = pos + 1;
+    while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0u) == 0x80u) {
+        ++i;
+    }
+    return i;
+}
+
+bool is_plain_text_mime(const char* type) {
+    if (!type) {
+        return false;
+    }
+    return std::strcmp(type, "text/plain;charset=utf-8") == 0 ||
+           std::strcmp(type, "text/plain") == 0 ||
+           std::strncmp(type, "text/plain;", 11) == 0;
+}
+
+void* arctian_pb_initialize(struct wpe_pasteboard*) {
+    return reinterpret_cast<void*>(1);
+}
+
+void arctian_pb_get_types(void*, struct wpe_pasteboard_string_vector* out_vector) {
+    if (!out_vector) {
+        return;
+    }
+    out_vector->strings = nullptr;
+    out_vector->length = 0;
+
+    const int clip_len = arctian_clip_get(nullptr, 0);
+    if (clip_len <= 0) {
+        return;
+    }
+
+    auto* strs = static_cast<struct wpe_pasteboard_string*>(
+        std::calloc(2, sizeof(struct wpe_pasteboard_string)));
+    if (!strs) {
+        return;
+    }
+    static constexpr const char kUtf8Mime[] = "text/plain;charset=utf-8";
+    static constexpr const char kPlainMime[] = "text/plain";
+    wpe_pasteboard_string_initialize(&strs[0], kUtf8Mime, sizeof(kUtf8Mime) - 1);
+    wpe_pasteboard_string_initialize(&strs[1], kPlainMime, sizeof(kPlainMime) - 1);
+    out_vector->strings = strs;
+    out_vector->length = 2;
+}
+
+void arctian_pb_get_string(void*, const char* type, struct wpe_pasteboard_string* out_string) {
+    if (!out_string || !is_plain_text_mime(type)) {
+        return;
+    }
+    char buf[kClipCap];
+    const int n = arctian_clip_get(buf, sizeof(buf));
+    if (n > 0) {
+        wpe_pasteboard_string_initialize(out_string, buf, static_cast<uint64_t>(n));
+    }
+}
+
+void arctian_pb_write(void*, struct wpe_pasteboard_string_map* map) {
+    if (!map || !map->pairs || map->length == 0) {
+        (void)arctian_clip_set("", 0);
+        return;
+    }
+
+    const struct wpe_pasteboard_string_pair* chosen = nullptr;
+    for (uint64_t i = 0; i < map->length; ++i) {
+        const auto& pair = map->pairs[i];
+        if (!pair.type.data) {
+            continue;
+        }
+        const std::string t(pair.type.data, static_cast<size_t>(pair.type.length));
+        if (t == "text/plain;charset=utf-8") {
+            chosen = &pair;
+            break;
+        }
+        if (!chosen && (t == "text/plain" || t.rfind("text/plain;", 0) == 0)) {
+            chosen = &pair;
+        }
+    }
+
+    if (chosen) {
+        const char* data = chosen->string.data ? chosen->string.data : "";
+        const size_t len = static_cast<size_t>(chosen->string.length);
+        (void)arctian_clip_set(data, std::min(len, kClipCap - 1));
+    }
+}
+
+struct wpe_pasteboard_interface s_arctian_pasteboard_iface = {
+    arctian_pb_initialize,
+    arctian_pb_get_types,
+    arctian_pb_get_string,
+    arctian_pb_write,
+    nullptr,
+    nullptr,
+    nullptr,
+    nullptr,
+};
+
+} // namespace
+
+extern "C" const struct wpe_pasteboard_interface* arctian_wpe_pasteboard_interface(void) {
+    return &s_arctian_pasteboard_iface;
+}
 
 namespace arctian::webkit {
 
@@ -206,7 +347,7 @@ ArctianWpeBackend::Layout ArctianWpeBackend::compute_layout() const {
     l.reload = {80, 9, 30, 30};
 
     const int32_t url_x = 118;
-    const int32_t right_reserved = 86; // Go button (44) + status dot + margins
+    const int32_t right_reserved = 86;
     const int32_t url_w = std::max(60, w - url_x - right_reserved);
     l.url_bar = {url_x, 9, url_w, 30};
     l.go = {url_x + url_w + 8, 9, 44, 30};
@@ -284,7 +425,6 @@ void ArctianWpeBackend::render_chrome() {
     }
     cairo_set_font_size(cr, 14.0);
 
-    // Sleek dark chrome background + 1px bottom border
     cairo_pattern_t* bg = cairo_pattern_create_linear(0.0, 0.0, 0.0, static_cast<double>(kChromeHeight));
     cairo_pattern_add_color_stop_rgba(bg, 0.0, 0.12, 0.15, 0.21, 1.0);
     cairo_pattern_add_color_stop_rgba(bg, 1.0, 0.09, 0.11, 0.16, 1.0);
@@ -302,7 +442,6 @@ void ArctianWpeBackend::render_chrome() {
     draw_button(cr, l.reload, (status_ == Status::Loading) ? "X" : "R", true, hover_item_ == ChromeHit::Reload);
     draw_button(cr, l.go, "Go", true, hover_item_ == ChromeHit::Go);
 
-    // Editable URL bar
     draw_rounded_rect(cr, l.url_bar.x, l.url_bar.y, l.url_bar.w, l.url_bar.h, 6.0);
     cairo_set_source_rgba(cr, 0.06, 0.08, 0.11, 1.0);
     cairo_fill_preserve(cr);
@@ -316,7 +455,6 @@ void ArctianWpeBackend::render_chrome() {
     }
     cairo_stroke(cr);
 
-    // Clip text inside URL bar
     cairo_save(cr);
     cairo_rectangle(cr, l.url_bar.x + 8.0, l.url_bar.y + 2.0, l.url_bar.w - 16.0, l.url_bar.h - 4.0);
     cairo_clip(cr);
@@ -348,7 +486,6 @@ void ArctianWpeBackend::render_chrome() {
     }
     cairo_restore(cr);
 
-    // Status indicator circle (Idle=green, Loading=amber, Error=red)
     constexpr double kTwoPi = 6.283185307179586;
     cairo_arc(cr, static_cast<double>(l.status_cx), static_cast<double>(l.status_cy), 5.5, 0.0, kTwoPi);
     switch (status_) {
@@ -364,7 +501,6 @@ void ArctianWpeBackend::render_chrome() {
     }
     cairo_fill(cr);
 
-    // 2px accent loading progress bar along the bottom edge of the chrome bar
     if (progress_ > 0.0 && progress_ < 1.0) {
         const double bar_w = std::max(8.0, static_cast<double>(width_) * progress_);
         cairo_pattern_t* pg = cairo_pattern_create_linear(0.0, 0.0, bar_w, 0.0);
@@ -495,32 +631,76 @@ void ArctianWpeBackend::handle_url_key(uint32_t key, uint32_t mods) {
         render_chrome();
         return;
     }
-    if (key == 8 || key == 127) { // Backspace
+    if (key == 8 || key == 127) { // Backspace (UTF-8 aware)
         if (cursor_pos_ > 0 && cursor_pos_ <= url_.size()) {
-            url_.erase(cursor_pos_ - 1, 1);
-            --cursor_pos_;
+            const size_t prev = utf8_prev(url_, cursor_pos_);
+            url_.erase(prev, cursor_pos_ - prev);
+            cursor_pos_ = prev;
             render_chrome();
         }
         return;
     }
-    if ((mods & 2u) != 0 && (key == 'u' || key == 'U')) { // Ctrl+U clear
-        url_.clear();
-        cursor_pos_ = 0;
+    if (key == 0xFFFF) { // Delete
+        if (cursor_pos_ < url_.size()) {
+            const size_t next = utf8_next(url_, cursor_pos_);
+            url_.erase(cursor_pos_, next - cursor_pos_);
+            render_chrome();
+        }
+        return;
+    }
+    if ((mods & ARCTIAN_MOD_CTRL) != 0) {
+        const uint32_t low = (key >= 'A' && key <= 'Z') ? (key + 32u) : key;
+        if (low == 'u' || low == 21) { // Ctrl+U clear
+            url_.clear();
+            cursor_pos_ = 0;
+            render_chrome();
+            return;
+        }
+        if (low == 'a' || low == 1) { // Ctrl+A
+            cursor_pos_ = url_.size();
+            render_chrome();
+            return;
+        }
+        if (low == 'c' || low == 3) { // Ctrl+C
+            (void)arctian_clip_set(url_.data(), std::min(url_.size(), kClipCap - 1));
+            return;
+        }
+        if (low == 'x' || low == 24) { // Ctrl+X
+            (void)arctian_clip_set(url_.data(), std::min(url_.size(), kClipCap - 1));
+            url_.clear();
+            cursor_pos_ = 0;
+            render_chrome();
+            return;
+        }
+        if (low == 'v' || low == 22) { // Ctrl+V
+            char buf[kClipCap];
+            const int n = arctian_clip_get(buf, sizeof(buf));
+            if (n > 0) {
+                std::string clean;
+                clean.reserve(static_cast<size_t>(n));
+                for (int i = 0; i < n; ++i) {
+                    const char c = buf[i];
+                    if (c != '\r' && c != '\n') {
+                        clean.push_back(c);
+                    }
+                }
+                const size_t ins = std::min(cursor_pos_, url_.size());
+                url_.insert(ins, clean);
+                cursor_pos_ = ins + clean.size();
+                render_chrome();
+            }
+            return;
+        }
+        return;
+    }
+    if (key == 19 || key == 0xFF51) { // Left
+        cursor_pos_ = utf8_prev(url_, cursor_pos_);
         render_chrome();
         return;
     }
-    if (key == 19 || key == 0xFF51) { // Left (LVGL / X11)
-        if (cursor_pos_ > 0) {
-            --cursor_pos_;
-            render_chrome();
-        }
-        return;
-    }
-    if (key == 20 || key == 0xFF53) { // Right (LVGL / X11)
-        if (cursor_pos_ < url_.size()) {
-            ++cursor_pos_;
-            render_chrome();
-        }
+    if (key == 20 || key == 0xFF53) { // Right
+        cursor_pos_ = utf8_next(url_, cursor_pos_);
+        render_chrome();
         return;
     }
     if (key == 2 || key == 0xFF50) { // Home
@@ -533,9 +713,13 @@ void ArctianWpeBackend::handle_url_key(uint32_t key, uint32_t mods) {
         render_chrome();
         return;
     }
-    if (key >= 0x20 && key <= 0x7E) {
-        url_.insert(url_.begin() + static_cast<std::ptrdiff_t>(cursor_pos_), static_cast<char>(key));
-        ++cursor_pos_;
+    if ((key >= 0x20 && key <= 0x7E) ||
+        (key >= 0x80 && key <= 0x10FFFF && !(key >= 0xFF00 && key <= 0xFFFF))) {
+        std::string utf8;
+        append_utf8(key, utf8);
+        const size_t ins = std::min(cursor_pos_, url_.size());
+        url_.insert(ins, utf8);
+        cursor_pos_ = ins + utf8.size();
         render_chrome();
     }
 }
@@ -642,23 +826,22 @@ bool ArctianWpeBackend::handle_event(const arctian_gfx_event_t& ev) {
             break;
 
         case ARCTIAN_EV_KEY_DOWN:
-            // Ctrl+L focuses the URL bar from anywhere
-            if ((ev.mods & 2u) != 0 && (ev.key == 'l' || ev.key == 'L' || ev.key == 12)) {
+            if ((ev.mods & ARCTIAN_MOD_CTRL) != 0 && (ev.key == 'l' || ev.key == 'L' || ev.key == 12)) {
                 url_focused_ = true;
                 cursor_pos_ = url_.size();
                 render_chrome();
                 break;
             }
             if (url_focused_) {
-                handle_url_key(ev.key, ev.mods);
+                handle_url_key(ev.cp, ev.mods);
             } else if (callbacks_.on_key_event) {
-                callbacks_.on_key_event(ev.type, ev.key, ev.mods, callbacks_.user_data);
+                callbacks_.on_key_event(ev.type, ev.cp, ev.mods, callbacks_.user_data);
             }
             break;
 
         case ARCTIAN_EV_KEY_UP:
             if (!url_focused_ && callbacks_.on_key_event) {
-                callbacks_.on_key_event(ev.type, ev.key, ev.mods, callbacks_.user_data);
+                callbacks_.on_key_event(ev.type, ev.cp, ev.mods, callbacks_.user_data);
             }
             break;
 

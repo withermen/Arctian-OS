@@ -325,6 +325,7 @@ int wlf_scan_one(const char *full_path) {
     if (h->ver[0]) bin_copy(d->version, sizeof(d->version), h->ver);
     if (h->author[0]) bin_copy(d->publisher, sizeof(d->publisher), h->author);
     wlf_apply_package(d, buf, len, h);
+    WLF_DBG("scan-ok", id, 0);
     if (own) g_asi->mem->free(buf);
     return 0;
 }
@@ -552,14 +553,46 @@ int wlf_install_url(const char *url, char *err, int cap) {
 }
 
 /* ---- 0.8: ad ile kurulum ("wf install safak") ----
- * Katalog, GitHub release'inde duran satir bazli bir beslemedir (DSF rohani):
+ * Katalog, GitHub release'inde duran satir bazli bir beslemedir:
  *   # aciklama
  *   ad=url
+ * (Veya DSF #duckstore-feed 1 bicimi: @app / id= / package=).
  * Yeni uygulama eklemek icin OS'te degisiklik gerekmez: kataloga satir ve
- * release'e asset eklemek yeter. Farkli sunucu/ayna isteyen C:/etc/wfstore.txt
- * dosyasinin ilk satirina URL'yi yazar. */
+ * release'e asset eklemek yeter. Farkli sunucu/ayna isteyen C:/etc/store.cfg
+ * (veya eski C:/etc/wfstore.txt) dosyasina URL'yi yazar. */
 #define WLF_CATALOG_URL \
     "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/catalog.txt"
+
+static int wlf_cfg_line(const char *path, char *out, int cap) {
+    static char ov[320];
+    uint32_t ol = 0;
+    if (afs_read_at(path, ov, (int)sizeof(ov) - 1, &ol) != 0 || ol == 0) return -1;
+    ov[ol] = 0;
+    uint32_t i = 0;
+    while (i < ol) {
+        uint32_t s = i;
+        while (i < ol && ov[i] != '\n' && ov[i] != '\r') i++;
+        uint32_t e = i;
+        while (i < ol && (ov[i] == '\n' || ov[i] == '\r')) i++;
+        while (s < e && (ov[s] == ' ' || ov[s] == '\t')) s++;
+        while (e > s && (ov[e - 1] == ' ' || ov[e - 1] == '\t')) e--;
+        if (e <= s || ov[s] == '#') continue;
+        ov[e] = 0;
+        const char *val = ov + s;
+        /* "catalog=..." veya "url=..." anahtari desteklenir */
+        if (val[0] == 'c' && val[1] == 'a' && val[2] == 't' && val[3] == 'a' &&
+            val[4] == 'l' && val[5] == 'o' && val[6] == 'g' && val[7] == '=')
+            val += 8;
+        else if (val[0] == 'u' && val[1] == 'r' && val[2] == 'l' && val[3] == '=')
+            val += 4;
+        while (*val == ' ' || *val == '\t') val++;
+        if (val[0]) {
+            bin_copy(out, cap, val);
+            return 0;
+        }
+    }
+    return -1;
+}
 
 int wlf_install_name(const char *name, char *err, int cap) {
     if (!g_asi || !g_asi->net || !g_asi->net->download) {
@@ -569,18 +602,8 @@ int wlf_install_name(const char *name, char *err, int cap) {
 
     char cat_url[288];
     bin_copy(cat_url, sizeof(cat_url), WLF_CATALOG_URL);
-    {
-        static char ov[288];
-        uint32_t ol = 0;
-        if (afs_read_at("C:/etc/wfstore.txt", ov, (int)sizeof(ov) - 1, &ol) == 0
-            && ol > 0) {
-            ov[ol] = 0;
-            int e = 0;
-            while (e < (int)ol && ov[e] != '\n' && ov[e] != '\r') e++;
-            ov[e] = 0;
-            if (ov[0] && ov[0] != '#') bin_copy(cat_url, sizeof(cat_url), ov);
-        }
-    }
+    if (wlf_cfg_line("C:/etc/store.cfg", cat_url, (int)sizeof(cat_url)) != 0)
+        wlf_cfg_line("C:/etc/wfstore.txt", cat_url, (int)sizeof(cat_url));
 
     static char *cat;                    /* kucuk dosya; tampon bir kez alinir */
     const uint32_t CCAP = 32u * 1024u;
@@ -597,20 +620,40 @@ int wlf_install_name(const char *name, char *err, int cap) {
     char url[288];
     url[0] = 0;
     uint32_t i = 0;
+    int in_dsf = 0, match_dsf = 0;
     while (i < len && !url[0]) {
         uint32_t s = i;
         while (i < len && cat[i] != '\n' && cat[i] != '\r') i++;
         uint32_t e = i;
         while (i < len && (cat[i] == '\n' || cat[i] == '\r')) i++;
         if (e <= s || cat[s] == '#') continue;
+        if (e - s == 4 && cat[s] == '@' && cat[s + 1] == 'a' &&
+            cat[s + 2] == 'p' && cat[s + 3] == 'p') {
+            in_dsf = 1; match_dsf = 0; continue;
+        }
         uint32_t q = s;
         while (q < e && cat[q] != '=') q++;
         if (q >= e) continue;
-        if ((int)(q - s) != nl) continue;
+        uint32_t kl = q - s, vl = e - (q + 1);
+        if (in_dsf) {
+            if (kl == 2 && cat[s] == 'i' && cat[s + 1] == 'd') {
+                int same = ((int)vl == nl);
+                for (int k = 0; same && k < nl; k++) if (cat[q + 1 + k] != name[k]) same = 0;
+                match_dsf = same;
+            } else if (match_dsf && kl == 7 && cat[s] == 'p' && cat[s + 1] == 'a' &&
+                       cat[s + 2] == 'c' && cat[s + 3] == 'k' && cat[s + 4] == 'a' &&
+                       cat[s + 5] == 'g' && cat[s + 6] == 'e') {
+                if (vl < sizeof(url)) {
+                    for (uint32_t k = 0; k < vl; k++) url[k] = cat[q + 1 + k];
+                    url[vl] = 0;
+                }
+            }
+            continue;
+        }
+        if ((int)kl != nl) continue;
         int same = 1;
         for (int k = 0; k < nl; k++) if (cat[s + k] != name[k]) { same = 0; break; }
         if (!same) continue;
-        uint32_t vl = e - (q + 1);
         if (vl >= sizeof(url)) continue;
         for (uint32_t k = 0; k < vl; k++) url[k] = cat[q + 1 + k];
         url[vl] = 0;

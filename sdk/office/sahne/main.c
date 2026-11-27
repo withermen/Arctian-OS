@@ -1,15 +1,13 @@
 /**
- * Sahne — sunum uygulamasi (tam ekran, 0.8.4)
+ * Sahne — sunum uygulaması (tam ekran)
  *
- * Spec bolum 3.4 kabuk: 70 px ribon, solda 200 px kucuk resim rayi, ortada
- * koyu tuval uzerinde slayt, sagda 240 px Tasarim paneli, altta durum
- * satiri. 0.8.4'te icerik gercek: slayt duzenlenebilir modelde durur,
- * metne tiklama yerinde duzenler (Enter kaydeder), ribon Ac/Kaydet belge
- * dosyasiyla (*.sln: "# baslik", "> altbaslik", "- madde") calisir, yeni
- * slayt / sil / madde ekle gercekten isler. pptx ayristirma ikinci faz;
- * ornek belge aksini isaret edene kadar bellekte durur.
+ * 70 px ribon, solda 200 px küçük resim rayı, ortada koyu tuval üzerinde
+ * slayt, sağda 240 px Tasarım paneli, altta durum satırı. Ortak
+ * office_picker.h ile C:/belgeler ve diğer klasörlerden .sln açar ve
+ * farklı kaydeder.
  */
 #include "wolf.h"
+#include "../office_picker.h"
 
 #define C_GROUND 0x14161B
 #define C_LINE   0x2C313B
@@ -100,8 +98,16 @@ typedef struct {
 static slide_t g_sl[NSLIDE_MAX];
 static int g_n;
 static int g_cur;
-static char g_file[128] = "C:/belgeler/sunum.sln";
+static char g_file[160] = "C:/belgeler/sunum.sln";
 static char g_doc[64]   = "sunum.sln";
+static int  g_untitled  = 1;
+static int  g_theme_idx = 0;
+static int  g_acc_idx   = 0;
+
+static const uint32_t SLIDE_BG[4]   = { 0xFFFFFF, 0x1E293B, 0xF5F5F4, 0x0F172A };
+static const uint32_t SLIDE_INK[4]  = { 0x1A1D24, 0xF1F5F9, 0x1C1917, 0xF8FAFC };
+static const uint32_t SLIDE_SUB[4]  = { 0x6B717D, 0x94A3B8, 0x57534E, 0x94A3B8 };
+static const uint32_t SLIDE_ACC[4]  = { 0x3B82F6, 0x22C55E, 0xF59E0B, 0xEF4444 };
 
 static wolf_id g_thumb[NSLIDE_MAX], g_tlab[NSLIDE_MAX];
 static wolf_id g_slide, g_snum;
@@ -125,24 +131,24 @@ static void sl_blank(slide_t *s)
 
 static void sample_deck(void)
 {
-    g_n = 8; g_cur = 1;
+    g_n = 4; g_cur = 0;
     for (int i = 0; i < NSLIDE_MAX; i++) sl_blank(&g_sl[i]);
-    scpy(g_sl[0].title, 96, "Arctian 0.8");
-    scpy(g_sl[0].sub, 96, "Lansman sunumu · Kasim 2026");
-    scpy(g_sl[1].title, 96, "Yeni dönem lansmanı");
-    scpy(g_sl[1].sub, 96, "Kerem · Ürün ekibi");
-    scpy(g_sl[1].item[0], 140, "Yeni masaustu deneyimi");
-    scpy(g_sl[1].item[1], 140, "Ofis uygulamalari ailesi");
-    scpy(g_sl[1].item[2], 140, "Herm cozunurlukte net gorunum");
+    scpy(g_sl[0].title, 96, "Arctian OS 1.1");
+    scpy(g_sl[0].sub, 96, "Lansman sunumu · Kasım 2026");
+    scpy(g_sl[1].title, 96, "Yeni dönem deneyimi");
+    scpy(g_sl[1].sub, 96, "Arctian · Ürün ekibi");
+    scpy(g_sl[1].item[0], 140, "Yeni masaüstü deneyimi");
+    scpy(g_sl[1].item[1], 140, "Ofis uygulamaları ailesi");
+    scpy(g_sl[1].item[2], 140, "Her çözünürlükte net görünüm");
     g_sl[1].nitem = 3;
-    scpy(g_sl[2].title, 96, "Neler degisti?");
-    scpy(g_sl[2].sub, 96, "Ksuruk — tam liste surum notlarinda");
-    scpy(g_sl[2].item[0], 140, "-");
-    scpy(g_sl[2].item[1], 140, "-");
-    scpy(g_sl[2].item[2], 140, "-");
+    scpy(g_sl[2].title, 96, "Neler değişti?");
+    scpy(g_sl[2].sub, 96, "Kısa özet — tam liste sürüm notlarında");
+    scpy(g_sl[2].item[0], 140, "Şafak başlangıç ekranı");
+    scpy(g_sl[2].item[1], 140, "Mürekkep, Abaküs ve Sahne");
+    scpy(g_sl[2].item[2], 140, "Ortak Aç / Farklı Kaydet penceresi");
     g_sl[2].nitem = 3;
-    scpy(g_sl[7].title, 96, "Tesekkurler");
-    scpy(g_sl[7].sub, 96, "sorular? · kerem@arctian");
+    scpy(g_sl[3].title, 96, "Teşekkürler");
+    scpy(g_sl[3].sub, 96, "Arctian Ofis · Sahne");
 }
 
 /* ---- baslik cubugu ---- */
@@ -179,8 +185,47 @@ static int  load_doc(int notify, int apply);
 static void save_file(void);
 
 /* ---- sekme (34) + ribon (70) ---- */
-static void rib_open(wolf_id w, void *u)   { (void)w; (void)u; load_doc(1, 1); }
-static void rib_save(wolf_id w, void *u)   { (void)w; (void)u; save_file(); }
+static void on_pick_open(const char *path, void *u)
+{
+    (void)u;
+    if (!path || !path[0]) return;
+    scpy(g_file, sizeof g_file, path);
+    if (load_doc(1, 1)) g_untitled = 0;
+}
+
+static void on_pick_save(const char *path, void *u)
+{
+    (void)u;
+    if (!path || !path[0]) return;
+    scpy(g_file, sizeof g_file, path);
+    const char *b = g_file;
+    for (const char *k = g_file; *k; k++) if (*k == '/') b = k + 1;
+    scpy(g_doc, sizeof g_doc, b);
+    g_untitled = 0;
+    save_file();
+    rebuild();
+}
+
+static void rib_open(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    office_picker_open(OP_MODE_OPEN, "Sunum Aç", "C:/belgeler", g_doc,
+                       ".sln", ".sln", on_pick_open, 0);
+}
+
+static void rib_save_as(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    office_picker_open(OP_MODE_SAVE, "Sunumu Farklı Kaydet", "C:/belgeler", g_doc,
+                       ".sln", ".sln", on_pick_save, 0);
+}
+
+static void rib_save(wolf_id w, void *u)
+{
+    (void)w; (void)u;
+    if (g_untitled) { rib_save_as(0, 0); return; }
+    save_file();
+}
 
 static void rib_new(wolf_id w, void *u)
 {
@@ -190,7 +235,7 @@ static void rib_new(wolf_id w, void *u)
     for (int i = g_n; i > g_cur + 1; i--) sl_copy(&g_sl[i], &g_sl[i - 1]);
     g_n++;
     g_cur++;
-    sl_blank(&g_sl[g_cur]);   /* arkadasinin ardina bos slayt girer */
+    sl_blank(&g_sl[g_cur]);
     rebuild();
 }
 
@@ -214,20 +259,29 @@ static void rib_item(wolf_id w, void *u)
     s->item[s->nitem][0] = 0;
     s->nitem++;
     paint_slide();
-    edit_field(s->nitem - 1);   /* hemen yazmaya basla */
+    edit_field(s->nitem - 1);
+}
+
+static void tab_cb(wolf_id w, void *u)
+{
+    (void)w;
+    int idx = (int)(long)u;
+    if (idx == 0) rib_open(0, 0);
+    else if (idx == 2) rib_item(0, 0);
 }
 
 static void tabribbon(void)
 {
     wolf_id st = wolf_panel(g_root, 0, S(36), g_w, S(34));
     bgc(st, C_GROUND); rad(st, 0); bgo(st, 100); brd_c(st, 2, C_LINE);
-    const char *tabs[6] = { "Dosya", "Giris", "Ekle", "Tasarim", "Gecisler", "Gorunum" };
+    const char *tabs[6] = { "Dosya", "Giriş", "Ekle", "Tasarım", "Geçişler", "Görünüm" };
     int on = 1, x = 12;
     for (int i = 0; i < 6; i++) {
         int tw = wolf_strlen(tabs[i]) * 7 + 4;
         wolf_id t = lab(st, x, (34 - 13) / 2 - 1, tw + 16, tabs[i], 13,
                         i == on ? C_TXT : C_TAB, 1);
         wolf_set_click(t, 1);
+        wolf_on_click_ex(t, tab_cb, (void *)(long)i);
         if (i == on) {
             wolf_id u = wolf_panel(st, x, S(32), S(tw + 16), 2);
             bgc(u, C_ACC); bgo(u, 100); rad(u, 0);
@@ -238,21 +292,23 @@ static void tabribbon(void)
     int y = S(70), h = S(70);
     wolf_id rb = wolf_panel(g_root, 0, y, g_w, h);
     bgc(rb, C_GROUND); rad(rb, 0); bgo(rb, 100); brd_c(rb, 2, C_LINE);
-    struct { int x, w; const char *t; wolf_event_fn cb; } btns[5] = {
-        { 14, 60, "Ac",          rib_open },
-        { 82, 74, "Kaydet",      rib_save },
-        { 170, 84, "Yeni slayt", rib_new },
-        { 262, 74, "Slayti sil", rib_del },
-        { 344, 84, "Madde ekle", rib_item },
+    struct { int x, w; const char *t; wolf_event_fn cb; } btns[6] = {
+        { 14,  58, "Aç",            rib_open },
+        { 78,  68, "Kaydet",        rib_save },
+        { 152, 106, "Farklı Kaydet", rib_save_as },
+        { 268, 84, "Yeni slayt",    rib_new },
+        { 358, 80, "Slaytı sil",    rib_del },
+        { 444, 86, "Madde ekle",    rib_item },
     };
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         wolf_id b = wolf_panel(rb, S(btns[i].x), S(10), S(btns[i].w), S(30));
-        bgc(b, C_FIELD); rad(b, S(6)); bgo(b, 100);
-        brd_c(b, 15, 0x333A47);
-        wolf_set_click(b, 1); hov(b, 0x1A1E26); wolf_on_click(b, btns[i].cb);
-        lab(b, 0, (S(30) - F(12) - 6) / 2, btns[i].w, btns[i].t, 12, C_TXT, 1);
+        bgc(b, i == 1 ? C_ACC : C_FIELD); rad(b, S(6)); bgo(b, 100);
+        if (i != 1) brd_c(b, 15, 0x333A47);
+        wolf_set_click(b, 1); hov(b, i == 1 ? 0x2E6FD6 : 0x1A1E26); wolf_on_click(b, btns[i].cb);
+        lab(b, 0, (S(30) - F(12) - 6) / 2, btns[i].w, btns[i].t, 12,
+            i == 1 ? 0xFFFFFF : C_TXT, 1);
     }
-    lab(rb, 14, h - S(16), 420, "Metne tikla: yerinde duzenle · Enter: kaydet",
+    lab(rb, 14, h - S(16), 440, "Metne tıkla: yerinde düzenle · Enter: kaydet",
         11, 0x7D8491, -1);
 }
 
@@ -337,13 +393,37 @@ static void paint_slide(void)
 {
     wolf_clear(g_slide);
     g_edit = 0;
+    bgc(g_slide, SLIDE_BG[g_theme_idx]);
     slide_t *s = &g_sl[g_cur];
-    lab_ed(g_slide, -2, 648, s->title, 34, s->title[0] ? C_INK : 0xC9CED8);
-    lab_ed(g_slide, -1, 648, s->sub, 15, s->sub[0] ? C_SUB : 0xD8DCE2);
+    uint32_t ink = SLIDE_INK[g_theme_idx];
+    uint32_t sub = SLIDE_SUB[g_theme_idx];
+    uint32_t acc = SLIDE_ACC[g_acc_idx];
+    lab_ed(g_slide, -2, 648, s->title, 34, s->title[0] ? ink : 0xC9CED8);
+    lab_ed(g_slide, -1, 648, s->sub, 15, s->sub[0] ? sub : 0xD8DCE2);
     for (int k = 0; k < s->nitem && k < 3; k++) {
         wolf_id d = wolf_panel(g_slide, S(56), fy_of(k) + S(5), S(6), S(6));
-        bgc(d, C_ACC); bgo(d, 100); rad(d, S(3));
-        lab_ed(g_slide, k, 620, s->item[k], 16, s->item[k][0] ? C_INK : 0xD8DCE2);
+        bgc(d, acc); bgo(d, 100); rad(d, S(3));
+        lab_ed(g_slide, k, 620, s->item[k], 16, s->item[k][0] ? ink : 0xD8DCE2);
+    }
+}
+
+static void theme_cb(wolf_id w, void *u)
+{
+    (void)w;
+    int i = (int)(long)u;
+    if (i >= 0 && i < 4 && i != g_theme_idx) {
+        g_theme_idx = i;
+        rebuild();
+    }
+}
+
+static void acc_cb(wolf_id w, void *u)
+{
+    (void)w;
+    int i = (int)(long)u;
+    if (i >= 0 && i < 4 && i != g_acc_idx) {
+        g_acc_idx = i;
+        rebuild();
     }
 }
 
@@ -428,32 +508,31 @@ static void center_right(void)
     lab(rp, 16, y, 208, "Tema", 11, C_META, -1);
     y += S(20);
     for (int i = 0; i < 4; i++) {
-        static const uint32_t tc[4] = { 0xFFFFFF, 0x1E293B, 0xF5F5F4, 0x0F172A };
         wolf_id t = wolf_panel(rp, 16 + (i % 2) * S(52), y + (i / 2) * (S(30) + S(8)),
                                S(44), S(30));
-        bgc(t, tc[i]); bgo(t, 100); rad(t, S(4));
-        wolf_style(t, WOLF_SP_BORDER_WIDTH, i == 0 ? 2 : 1, 0);
-        wolf_style(t, WOLF_SP_BORDER_COLOR, i == 0 ? C_ACC : C_PLINE, 0);
+        bgc(t, SLIDE_BG[i]); bgo(t, 100); rad(t, S(4));
+        wolf_style(t, WOLF_SP_BORDER_WIDTH, i == g_theme_idx ? 2 : 1, 0);
+        wolf_style(t, WOLF_SP_BORDER_COLOR, i == g_theme_idx ? C_ACC : C_PLINE, 0);
         wolf_set_click(t, 1);
+        wolf_on_click_ex(t, theme_cb, (void *)(long)i);
     }
     y += 2 * (S(30) + S(8)) + S(8);
     lab(rp, 16, y, 208, "Vurgu rengi", 11, C_META, -1);
     y += S(20);
-    static const uint32_t ac[4] = { 0x3B82F6, 0x22C55E, 0xF59E0B, 0xEF4444 };
     for (int i = 0; i < 4; i++) {
         wolf_id c = wolf_panel(rp, 16 + i * (S(20) + S(12)), y, S(20), S(20));
-        bgc(c, ac[i]); bgo(c, 100); rad(c, S(10));
-        wolf_style(c, WOLF_SP_BORDER_WIDTH, i == 0 ? 2 : 0, 0);
+        bgc(c, SLIDE_ACC[i]); bgo(c, 100); rad(c, S(10));
+        wolf_style(c, WOLF_SP_BORDER_WIDTH, i == g_acc_idx ? 2 : 0, 0);
         wolf_style(c, WOLF_SP_BORDER_COLOR, C_TXT, 0);
         wolf_set_click(c, 1);
+        wolf_on_click_ex(c, acc_cb, (void *)(long)i);
     }
     y += S(20) + S(18);
-    lab(rp, 16, y, 208, "Gecis", 11, C_META, -1);
+    lab(rp, 16, y, 208, "Geçiş", 11, C_META, -1);
     y += S(20);
     wolf_id gb = wolf_panel(rp, 16, y, S(208), S(32));
     bgc(gb, C_FIELD); bgo(gb, 100); rad(gb, S(6));
     brd_c(gb, 15, 0x333A47);
-    wolf_set_click(gb, 1); hov(gb, 0x1A1E26);
     lab(gb, S(12), (S(32) - F(13) - 6) / 2, 150, "Solma", 13, C_TXT, -1);
     {
         wolf_id ch = wolf_label(gb, 0, 0, "v");
@@ -483,7 +562,7 @@ static void statusbar(void)
     bgc(sb, C_GROUND); rad(sb, 0); bgo(sb, 100); brd_c(sb, 1, C_LINE);
     int ly = (S(28) - F(12) - 6) / 2;
     g_snum = lab(sb, 14, ly, 380, "Slayt", 12, C_META, -1);
-    lab(sb, g_w - S(224), ly, 210, "Duzen gorunumu", 12, C_META, 2);
+    lab(sb, g_w - S(224), ly, 210, "Düzen görünümü", 12, C_META, 2);
     status_update();
 }
 
@@ -498,7 +577,7 @@ static int load_doc(int notify, int apply){
     if (n <= 0) {
         if (notify) {
             char m[180];
-            scpy(m, sizeof m, "Dosya okunamadi: ");
+            scpy(m, sizeof m, "Dosya okunamadı: ");
             sadd(m, sizeof m, g_file);
             wolf_notify("Sahne", m);
         }
@@ -546,8 +625,8 @@ static int load_doc(int notify, int apply){
     scpy(g_doc, sizeof g_doc, b);
     if (apply) rebuild();
     if (notify) {
-        char m[48];
-        scpy(m, sizeof m, "Acildi: ");
+        char m[64];
+        scpy(m, sizeof m, "Açıldı: ");
         sadd(m, sizeof m, g_doc);
         wolf_notify("Sahne", m);
     }
@@ -602,6 +681,7 @@ static void rebuild(void)
 {
     commit_edit();
     g_edit = 0;
+    office_picker_reset();
     char t[96];
     scpy(t, sizeof t, g_doc);
     sadd(t, sizeof t, " — Sahne");
@@ -647,9 +727,11 @@ int wolf_main(const wolf_api_t *api)
     if (arg && arg[0]) {
         scpy(g_file, sizeof g_file, arg);
         sample_deck();                    /* acilamazsa ornek bellekte kalsin */
-        if (!load_doc(0, 0)) {
+        if (load_doc(0, 0)) {
+            g_untitled = 0;
+        } else {
             char m[200];
-            scpy(m, sizeof m, "Belge acilamadi, ornek yuklendi: ");
+            scpy(m, sizeof m, "Belge açılamadı, örnek yüklendi: ");
             sadd(m, sizeof m, arg);
             wolf_notify("Sahne", m);
         }

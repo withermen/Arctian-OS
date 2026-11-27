@@ -193,6 +193,8 @@ typedef struct {
     bool is_mouse;
     int xhci_slot_id;       /* xHCI slot ID (internal, -1 if none) */
     int controller_port;    /* Port number on the controller */
+    uint8_t interface_num;  /* Active interface number */
+    bool msd_registered;    /* True if already registered in blockdev */
 } usb_device_t;
 #pragma pack(pop)
 
@@ -216,8 +218,10 @@ int uhci_poll_mouse(usb_device_t *dev, uint8_t *buf);
 /* xHCI */
 int xhci_init(usb_controller_t *ctrl);
 int xhci_control_transfer(usb_device_t *dev, usb_setup_packet_t *setup, uint8_t *data, int dir);
+int xhci_bulk_transfer(usb_device_t *dev, int ep_addr, void *data, int len, int dir);
 int xhci_poll_keyboard(usb_device_t *dev, uint8_t *buf);
 int xhci_poll_mouse(usb_device_t *dev, uint8_t *buf);
+int xhci_poll_hotplug(void);
 
 /* UHCI */
 int uhci_init(usb_controller_t *ctrl);

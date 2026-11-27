@@ -56,6 +56,8 @@ static const char *const g_kernel_path_names[] = {
     "\\KERNEL.ELF"
 };
 
+extern int g_uefi_livecd;
+
 static int try_open_on_sfs(EFI_SIMPLE_FILE_SYSTEM *sfs,
                            EFI_FILE_PROTOCOL **out_root,
                            EFI_FILE_PROTOCOL **out_file,
@@ -69,6 +71,12 @@ static int try_open_on_sfs(EFI_SIMPLE_FILE_SYSTEM *sfs,
         s = root->Open(root, &file, (CHAR16 *)g_kernel_paths[i],
                        EFI_FILE_MODE_READ, 0);
         if (s == EFI_SUCCESS && file) {
+            EFI_FILE_PROTOCOL *live_marker = 0;
+            if (root->Open(root, &live_marker, L"\\EFI\\ARCTIAN\\LIVECD",
+                           EFI_FILE_MODE_READ, 0) == EFI_SUCCESS && live_marker) {
+                g_uefi_livecd = 1;
+                live_marker->Close(live_marker);
+            }
             *out_root = root;
             *out_file = file;
             *out_idx = (int)i;

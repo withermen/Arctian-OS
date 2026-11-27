@@ -10,5 +10,7 @@ int         diskcrypt_unlock(const char *pass);
 int         diskcrypt_setup(const char *pass);
 int         diskcrypt_disable(const char *pass);
 const char *diskcrypt_status(void);
+uint32_t    diskcrypt_region_base(void);
+uint32_t    diskcrypt_region_end(void);
 
 #endif

@@ -1,1 +1,1 @@
-{ "name": "medya", "title": "Medya Oynatıcı", "category": "Medya", "icon": "icon.png", "w": 880, "h": 560 }
+{ "name": "medya", "title": "Medya Oynatıcı", "category": "Medya", "icon": "icon.png", "w": 880, "h": 560, "handles": "wav,mp3,ogg,flac" }

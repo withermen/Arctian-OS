@@ -176,6 +176,8 @@ void gop_report(EFI_SYSTEM_TABLE *st) {
     serial_puts("\r\n");
 }
 
+int g_uefi_livecd = 0;
+
 /* --- firmware girisi ------------------------------------------------------*/
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST) {
     static CHAR16 banner[] = L"Arctian UEFI\n";
@@ -183,6 +185,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST) {
     UINT8 *u8;
     UINTN i;
 
+    g_uefi_livecd = 0;
     serial_init();
     serial_puts("ARCTIAN-UEFI: basladi\r\n");
 
@@ -199,7 +202,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *ST) {
     rsdp_find(ST);
     fs_load_kernel(ImageHandle, ST);
 
-    ui->magic = ARCTIAN_UEFIINFO_MAGIC;
+    /* Canli ISO'dan acildiysa lib/media.c'nin CD yolunu (0x7100 byte0 == 2)
+     * secebilmesi icin magic=2 yazilir; kurulu diskte tam UEFI magic korunur. */
+    ui->magic = g_uefi_livecd ? 2u : ARCTIAN_UEFIINFO_MAGIC;
     ui->struct_size = (uint32_t)sizeof(*ui);
 
     serial_puts("ARCTIAN-UEFI-OK\r\n");  /* test isareti: ConOut'tan bagimsiz */

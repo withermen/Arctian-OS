@@ -168,6 +168,8 @@ typedef struct {
     volatile uint16_t           *notify;
 } vsnd_queue_t;
 
+typedef uint32_t (*vsnd_stream_pull_fn)(void *dst, uint32_t max_bytes, void *ctx);
+
 typedef struct {
     bool                       present;
     volatile vsnd_common_cfg_t *common;
@@ -185,6 +187,8 @@ typedef struct {
     /* TX headers + period DMA frames */
     uint8_t     *tx_hdr_va;
     uint64_t     tx_hdr_pa;
+    uint8_t     *tx_scratch_va;
+    uint64_t     tx_scratch_pa;
     uint8_t     *tx_buf_va[VSND_TX_BUFS];
     uint64_t     tx_buf_pa[VSND_TX_BUFS];
     bool         tx_slot_busy[VSND_TX_BUFS];
@@ -194,13 +198,16 @@ typedef struct {
     uint64_t     supported_formats;
     uint64_t     supported_rates;
 
-    bool           playing;
-    bool           prepared;
-    int            volume;
-    uint32_t       rate;
-    const uint8_t *src;
-    uint32_t       src_len;
-    uint32_t       src_pos;
+    bool                playing;
+    bool                prepared;
+    bool                stream_mode;
+    vsnd_stream_pull_fn pull_fn;
+    void               *pull_ctx;
+    int                 volume;
+    uint32_t            rate;
+    const uint8_t      *src;
+    uint32_t            src_len;
+    uint32_t            src_pos;
 } vsnd_state_t;
 
 static vsnd_state_t s_vsnd;
@@ -325,29 +332,56 @@ static uint8_t vsnd_rate_enum(uint32_t hz, uint32_t *actual_hz) {
     return VIRTIO_SND_PCM_RATE_48000;
 }
 
-static void vsnd_submit_tx_slot(uint32_t slot) {
-    uint32_t max_slots = s_vsnd.txq.qsize / 3u;
-    if (slot >= VSND_TX_BUFS || slot >= max_slots) return;
-    if (!s_vsnd.src || s_vsnd.src_pos >= s_vsnd.src_len) return;
+void virtio_snd_scale_pcm_s16(int16_t *dst, const uint8_t *src, uint32_t bytes, int volume) {
+    if (!dst || !src || bytes == 0u) return;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
 
-    uint32_t rem = s_vsnd.src_len - s_vsnd.src_pos;
-    uint32_t n   = (rem > VSND_BUF_BYTES) ? VSND_BUF_BYTES : rem;
-    const int16_t *sp = (const int16_t *)(s_vsnd.src + s_vsnd.src_pos);
-    int16_t       *dp = (int16_t *)s_vsnd.tx_buf_va[slot];
-    uint32_t nsamp = n / 2u;
-    int vol = s_vsnd.volume;
-
-    if (vol >= 100) {
-        memcpy(dp, sp, n);
-    } else if (vol <= 0) {
-        memset(dp, 0, n);
-    } else {
-        for (uint32_t i = 0; i < nsamp; i++) {
-            dp[i] = (int16_t)(((int32_t)sp[i] * vol) / 100);
-        }
-        if (n & 1u) ((uint8_t *)dp)[n - 1u] = 0;
+    if (volume == 0) {
+        memset(dst, 0, bytes);
+        return;
     }
-    s_vsnd.src_pos += n;
+    if (volume == 100) {
+        memcpy(dst, src, bytes);
+        return;
+    }
+
+    uint32_t nsamp = bytes / 2u;
+    for (uint32_t i = 0; i < nsamp; i++) {
+        int16_t s = (int16_t)((uint16_t)src[i * 2u] | ((uint16_t)src[i * 2u + 1u] << 8));
+        int32_t scaled = ((int32_t)s * (int32_t)volume) / 100;
+        if (scaled > 32767) scaled = 32767;
+        else if (scaled < -32768) scaled = -32768;
+        dst[i] = (int16_t)scaled;
+    }
+    if (bytes & 1u) ((uint8_t *)dst)[bytes - 1u] = 0;
+}
+
+static bool vsnd_submit_tx_slot(uint32_t slot) {
+    uint32_t max_slots = s_vsnd.txq.qsize / 3u;
+    if (slot >= VSND_TX_BUFS || slot >= max_slots) return false;
+
+    uint32_t n = 0;
+    int16_t *dp = (int16_t *)s_vsnd.tx_buf_va[slot];
+
+    if (s_vsnd.stream_mode && s_vsnd.pull_fn) {
+        if (!s_vsnd.tx_scratch_va) return false;
+        n = s_vsnd.pull_fn(s_vsnd.tx_scratch_va, VSND_BUF_BYTES, s_vsnd.pull_ctx);
+        if (n > VSND_BUF_BYTES) n = VSND_BUF_BYTES;
+        if (n == 0u) {
+            if (s_vsnd.tx_inflight > 0u) return false;
+            n = VSND_BUF_BYTES;
+            memset(dp, 0, n);
+        } else {
+            virtio_snd_scale_pcm_s16(dp, s_vsnd.tx_scratch_va, n, s_vsnd.volume);
+        }
+    } else {
+        if (!s_vsnd.src || s_vsnd.src_pos >= s_vsnd.src_len) return false;
+        uint32_t rem = s_vsnd.src_len - s_vsnd.src_pos;
+        n = (rem > VSND_BUF_BYTES) ? VSND_BUF_BYTES : rem;
+        virtio_snd_scale_pcm_s16(dp, s_vsnd.src + s_vsnd.src_pos, n, s_vsnd.volume);
+        s_vsnd.src_pos += n;
+    }
 
     /* Per-slot headers in tx_hdr page (64 bytes per slot) */
     uint64_t hdr_off = (uint64_t)slot * 64ull;
@@ -385,6 +419,7 @@ static void vsnd_submit_tx_slot(uint32_t slot) {
 
     s_vsnd.tx_slot_busy[slot] = true;
     s_vsnd.tx_inflight++;
+    return true;
 }
 
 int virtio_snd_init(void) {
@@ -488,11 +523,13 @@ int virtio_snd_init(void) {
     if (vsnd_setup_queue(0u, &s_vsnd.ctrlq) != 0) return -5;
     if (vsnd_setup_queue(2u, &s_vsnd.txq) != 0)   return -6;
 
-    s_vsnd.ctrl_dma_pa = vmm_alloc_frame();
-    s_vsnd.tx_hdr_pa   = vmm_alloc_frame();
-    if (!s_vsnd.ctrl_dma_pa || !s_vsnd.tx_hdr_pa) return -7;
-    s_vsnd.ctrl_dma  = (uint8_t *)(uintptr_t)s_vsnd.ctrl_dma_pa;
-    s_vsnd.tx_hdr_va = (uint8_t *)(uintptr_t)s_vsnd.tx_hdr_pa;
+    s_vsnd.ctrl_dma_pa   = vmm_alloc_frame();
+    s_vsnd.tx_hdr_pa     = vmm_alloc_frame();
+    s_vsnd.tx_scratch_pa = vmm_alloc_frame();
+    if (!s_vsnd.ctrl_dma_pa || !s_vsnd.tx_hdr_pa || !s_vsnd.tx_scratch_pa) return -7;
+    s_vsnd.ctrl_dma      = (uint8_t *)(uintptr_t)s_vsnd.ctrl_dma_pa;
+    s_vsnd.tx_hdr_va     = (uint8_t *)(uintptr_t)s_vsnd.tx_hdr_pa;
+    s_vsnd.tx_scratch_va = (uint8_t *)(uintptr_t)s_vsnd.tx_scratch_pa;
 
     for (uint32_t i = 0; i < VSND_TX_BUFS; i++) {
         s_vsnd.tx_buf_pa[i] = vmm_alloc_frame();
@@ -561,6 +598,9 @@ void virtio_snd_stop(void) {
     }
     s_vsnd.playing = false;
     s_vsnd.prepared = false;
+    s_vsnd.stream_mode = false;
+    s_vsnd.pull_fn = 0;
+    s_vsnd.pull_ctx = 0;
     s_vsnd.src = 0;
     s_vsnd.src_len = 0;
     s_vsnd.src_pos = 0;
@@ -569,12 +609,7 @@ void virtio_snd_stop(void) {
     s_vsnd.txq.last_used_idx = s_vsnd.txq.used->idx;
 }
 
-int virtio_snd_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sample_rate) {
-    if (!s_vsnd.present || !pcm_s16_stereo || bytes == 0) return -1;
-    if (sample_rate == 0) sample_rate = 48000u;
-
-    virtio_snd_stop();
-
+static int vsnd_prepare_stream(uint32_t sample_rate, uint32_t *actual_hz_out) {
     uint32_t actual_hz = 48000u;
     uint8_t rate_code = vsnd_rate_enum(sample_rate, &actual_hz);
 
@@ -596,11 +631,25 @@ int virtio_snd_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sam
     }
     if (vsnd_pcm_simple(VIRTIO_SND_R_PCM_PREPARE) != 0) return -3;
     s_vsnd.prepared = true;
+    s_vsnd.rate = actual_hz;
+    if (actual_hz_out) *actual_hz_out = actual_hz;
+    return 0;
+}
 
+int virtio_snd_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sample_rate) {
+    if (!s_vsnd.present || !pcm_s16_stereo || bytes == 0) return -1;
+    if (sample_rate == 0) sample_rate = 48000u;
+
+    virtio_snd_stop();
+
+    uint32_t actual_hz = 48000u;
+    int rc = vsnd_prepare_stream(sample_rate, &actual_hz);
+    if (rc != 0) return rc;
+
+    s_vsnd.stream_mode = false;
     s_vsnd.src = (const uint8_t *)pcm_s16_stereo;
     s_vsnd.src_len = bytes;
     s_vsnd.src_pos = 0;
-    s_vsnd.rate = actual_hz;
 
     uint32_t max_slots = s_vsnd.txq.qsize / 3u;
     if (max_slots > VSND_TX_BUFS) max_slots = VSND_TX_BUFS;
@@ -616,8 +665,41 @@ int virtio_snd_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sam
     }
 
     s_vsnd.playing = true;
-    serial_printf("[vsnd] stream start id=%u rate=%u bytes=%u inflight=%u\n",
-                  s_vsnd.out_stream_id, actual_hz, bytes, s_vsnd.tx_inflight);
+    serial_printf("[vsnd] stream start id=%u rate=%u bytes=%u inflight=%u vol=%d\n",
+                  s_vsnd.out_stream_id, actual_hz, bytes, s_vsnd.tx_inflight, s_vsnd.volume);
+    return 0;
+}
+
+int virtio_snd_stream_start(uint32_t sample_rate, vsnd_stream_pull_fn pull, void *ctx) {
+    if (!s_vsnd.present || !pull) return -1;
+    if (sample_rate == 0) sample_rate = 48000u;
+
+    virtio_snd_stop();
+
+    uint32_t actual_hz = 48000u;
+    int rc = vsnd_prepare_stream(sample_rate, &actual_hz);
+    if (rc != 0) return rc;
+
+    s_vsnd.stream_mode = true;
+    s_vsnd.pull_fn = pull;
+    s_vsnd.pull_ctx = ctx;
+
+    uint32_t max_slots = s_vsnd.txq.qsize / 3u;
+    if (max_slots > VSND_TX_BUFS) max_slots = VSND_TX_BUFS;
+    for (uint32_t i = 0; i < max_slots; i++) {
+        if (!vsnd_submit_tx_slot(i)) break;
+    }
+    __asm__ volatile("mfence" ::: "memory");
+    *s_vsnd.txq.notify = 2u;
+
+    if (vsnd_pcm_simple(VIRTIO_SND_R_PCM_START) != 0) {
+        virtio_snd_stop();
+        return -4;
+    }
+
+    s_vsnd.playing = true;
+    serial_printf("[vsnd] live stream start id=%u rate=%u inflight=%u vol=%d\n",
+                  s_vsnd.out_stream_id, actual_hz, s_vsnd.tx_inflight, s_vsnd.volume);
     return 0;
 }
 
@@ -634,18 +716,29 @@ void virtio_snd_poll(void) {
         if (slot < VSND_TX_BUFS && s_vsnd.tx_slot_busy[slot]) {
             s_vsnd.tx_slot_busy[slot] = false;
             if (s_vsnd.tx_inflight) s_vsnd.tx_inflight--;
-            if (s_vsnd.src_pos < s_vsnd.src_len) {
-                vsnd_submit_tx_slot(slot);
+            if (s_vsnd.stream_mode || s_vsnd.src_pos < s_vsnd.src_len) {
+                if (vsnd_submit_tx_slot(slot)) pushed = true;
+            }
+        }
+    }
+
+    if (s_vsnd.stream_mode) {
+        uint32_t max_slots = s_vsnd.txq.qsize / 3u;
+        if (max_slots > VSND_TX_BUFS) max_slots = VSND_TX_BUFS;
+        for (uint32_t slot = 0; slot < max_slots; slot++) {
+            if (!s_vsnd.tx_slot_busy[slot]) {
+                if (!vsnd_submit_tx_slot(slot)) break;
                 pushed = true;
             }
         }
     }
+
     if (pushed) {
         __asm__ volatile("mfence" ::: "memory");
         *q->notify = 2u;
     }
 
-    if (s_vsnd.src_pos >= s_vsnd.src_len && s_vsnd.tx_inflight == 0) {
+    if (!s_vsnd.stream_mode && s_vsnd.src_pos >= s_vsnd.src_len && s_vsnd.tx_inflight == 0) {
         virtio_snd_stop();
     }
 }

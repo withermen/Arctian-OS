@@ -58,9 +58,16 @@ build/uefi/BOOTX64.EFI  UEFI x86-64 önyükleyici uygulaması (`make efi`)
 build/obj-<hash>/       nesne dosyaları (bayrak kümesinin md5 ön eki)
 ```
 
-> **İsteğe bağlı ISO paket varlıkları:** `tools/arctianpack.py`, `ARCTIAN_WEBKIT_ELF`
+> **İsteğe bağlı ISO paket varlıkları ve Ofis `.wlf`:** `tools/arctianpack.py`, `ARCTIAN_WEBKIT_ELF`
 > (`WEBKIT.ELF`), `ARCTIAN_DEJAVU_TTF` (`DEJAVU.TTF`) ve `ARCTIAN_CACERT_PEM` (`CACERT.PEM`)
-> ortam değişkenleri veya varsayılan yolları bulunursa bunları da ISO'ya ekler.
+> ortam değişkenleri veya varsayılan yolları bulunursa bunları ISO'ya ekler; ayrıca
+> `ARCTIAN_OFFICE_DIR` (varsayılan `build/wlf/`) içindeki 5 Ofis `.wlf` paketini (`safak`,
+> `murekkep`, `abakus`, `sahne`, `mercek`) `SAFAK.WLF`..`MERCEK.WLF` adlarıyla ISO köküne koyar.
+>
+> **Release vs Debug ISO:** `build/arctian.iso` doğrudan grafiksel BIOS/UEFI + Dual-Boot
+> kurulum sihirbazına açılır ("Canlı Masaüstünü Dene" düğmesi yoktur). Kurulumsuz hızlı
+> masaüstü önizlemesi için `make debug` (`build/arctian-debug.iso`) kullanın. Gerçek UEFI
+> donanımda önyükleme öncesi **Secure Boot** devre dışı bırakılmalıdır (`BOOTX64.EFI` imzasızdır).
 
 Nesne dizini derleme bayraklarına göre adlandırılır (`FLAGS_HASH`): `DEBUG=1` ile `DEBUG=0`
 aynı anda bozulmadan durur, karışık nesnelerden imaj üretilmez.
@@ -131,11 +138,14 @@ ISO üretilemezse paketleyici derlemeyi **dur­durur** (yarım/0 baytlık çıkt
 ## QEMU'da denemek
 
 ```sh
-qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 1024M -vga std -serial stdio
-qemu-system-x86_64 -drive file=build/arctian.img,format=raw -m 1024M -vga std -serial stdio
-# VirtIO GPU/Net/Sound ile:
-qemu-system-x86_64 -cdrom build/arctian.iso -boot d -m 2G -device virtio-vga \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 -device intel-hda -device hda-duplex -serial stdio
+# BIOS masaüstü önizleme (Debug ISO) ve VirtIO GPU/Net/Sound + xHCI USB 3.0:
+qemu-system-x86_64 -cdrom build/arctian-debug.iso -boot d -m 2048M -smp 4 -vga none \
+  -device virtio-gpu-pci -nic user,model=virtio-net-pci -device intel-hda -device hda-duplex \
+  -device qemu-xhci -serial stdio
+
+# UEFI (OVMF) ile Debug ISO veya tam GPT+ESP kurulum testi:
+qemu-system-x86_64 -bios /usr/share/OVMF/OVMF_CODE_4M.fd -cdrom build/arctian-debug.iso \
+  -m 2048M -smp 4 -vga std -nic user,model=virtio-net-pci -serial stdio
 ```
 
 Kurulum akışını uçtan uca test etmek için (hedef disk en az **5 GiB** olmalıdır):

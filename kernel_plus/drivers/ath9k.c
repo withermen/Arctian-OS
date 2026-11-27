@@ -136,6 +136,8 @@ extern int  wpa2_unwrap_gtk(const uint8_t kek[16], const uint8_t *wrapped,
 /* Kanal secim formulu (Linux phy.h): */
 #define CHANSEL_DIV             15
 #define CHANSEL_2G(_freq)       (((_freq) * 0x10000) / CHANSEL_DIV)
+#define CHANSEL_5G(_freq)       (((_freq) * 0x10000) / 20)
+#define CHANSEL_5G_FRAC(_freq)  (((_freq) * 0x10000) / 10)
 
 /* ===================================================================== *
  * Descriptor (Linux mac.h: struct ar5416_desc, 96 byte)
@@ -254,8 +256,20 @@ static uint8_t g_tk[32];            /* PTK[32..63]: CCMP unicast TK */
 static uint8_t g_gtk[16];           /* GTK: CCMP grup (multicast) */
 static bool    g_have_gtk = false;
 
-/* Son islenen karenin sinyal gucu (dBm, yaklasik) */
+/* Son islenen karenin sinyal gucu (dBm, yaklasik) ve çoklu-hız uyarlama sayaclari */
 static int g_last_rssi = -90;
+static int g_tx_ok_streak = 0;
+static int g_tx_fail_streak = 0;
+static uint16_t g_dev_id = 0;
+
+static bool ath9k_is_ar93xx(uint16_t dev) {
+    return (dev == 0x0030 || dev == 0x0032 || dev == 0x0033 || dev == 0x0034);
+}
+
+static bool ath9k_is_dualband(uint16_t dev) {
+    return (dev == 0x002A || dev == 0x002C || dev == 0x002D ||
+            dev == 0x002E || dev == 0x0030 || dev == 0x0033 || dev == 0x0034);
+}
 
 /* ===================================================================== *
  * MMIO yardimcilari
@@ -341,14 +355,25 @@ static int hw_reset(void) {
 }
 
 /* ===================================================================== *
- * Kanal secimi — Linux ar9002_phy.c: ar9002_hw_set_channel (2 GHz)
+ * Kanal secimi — Linux ar9002_phy.c: 2.4 GHz (1..14) + 5 GHz (36..165)
  * ===================================================================== */
-static int hw_set_channel(int ch) {
-    uint32_t freq, reg32;
-    int chansel;
+static uint32_t ath9k_chan_to_freq(int ch) {
+    if (ch >= 1 && ch <= 13) return (uint32_t)(2407 + ch * 5);
+    if (ch == 14) return 2484u;
+    if ((ch >= 36 && ch <= 64 && (ch % 4) == 0) ||
+        (ch >= 100 && ch <= 140 && (ch % 4) == 0) ||
+        ch == 149 || ch == 153 || ch == 157 || ch == 161 || ch == 165) {
+        return (uint32_t)(5000 + ch * 5);
+    }
+    return 0u;
+}
 
-    if (ch < 1 || ch > 14) return -1;
-    freq = (ch == 14) ? 2484 : (2407 + ch * 5);
+static int hw_set_channel(int ch) {
+    uint32_t freq, reg32, chansel;
+
+    freq = ath9k_chan_to_freq(ch);
+    if (freq == 0u) return -1;
+    if (freq >= 4900u && !ath9k_is_dualband(g_dev_id)) return -1;
     g_channel = ch;
 
     /* MAC zaman asimlari + PHY mod (11n-20MHz acik) */
@@ -356,20 +381,33 @@ static int hw_set_channel(int ch) {
     wr(AR_GTXTO, 25u << AR_GTXTO_TIMEOUT_LIMIT_S);
     wr(AR_CST, 0xFu << AR_CST_TIMEOUT_LIMIT_S);
 
-    /* CCK TX kontrolu: 14. kanalda Japonya yayilimi */
-    if (ch == 14) wr(AR_PHY_CCK_TX_CTRL, rd(AR_PHY_CCK_TX_CTRL) | AR_PHY_CCK_TX_CTRL_JAPAN);
-    else          wr(AR_PHY_CCK_TX_CTRL, rd(AR_PHY_CCK_TX_CTRL) & ~AR_PHY_CCK_TX_CTRL_JAPAN);
+    if (freq < 4000u) {
+        /* 2.4 GHz bandi: Japonya 14. kanal + bMode=1 */
+        if (ch == 14) wr(AR_PHY_CCK_TX_CTRL, rd(AR_PHY_CCK_TX_CTRL) | AR_PHY_CCK_TX_CTRL_JAPAN);
+        else          wr(AR_PHY_CCK_TX_CTRL, rd(AR_PHY_CCK_TX_CTRL) & ~AR_PHY_CCK_TX_CTRL_JAPAN);
 
-    /* 2 GHz kesirli mod (ar9002_hw_set_channel 2 GHz dallari) */
-    chansel = CHANSEL_2G((int)freq);
-    reg32 = rd(AR_PHY_SYNTH_CONTROL) & 0xC0000000u;
-    reg32 |= (1u << 29)             /* bMode  = 1 (2 GHz)   */
-           | (1u << 28)             /* fracMode = 1         */
-           | (0u << 26)             /* aModeRefSel = 0      */
-           | ((uint32_t)chansel & 0x03FFFFFFu);
-    wr(AR_PHY_SYNTH_CONTROL, reg32);
+        chansel = CHANSEL_2G(freq);
+        reg32 = rd(AR_PHY_SYNTH_CONTROL) & 0xC0000000u;
+        reg32 |= (1u << 29)             /* bMode  = 1 (2.4 GHz) */
+               | (1u << 28)             /* fracMode = 1         */
+               | (0u << 26)             /* aModeRefSel = 0      */
+               | (chansel & 0x03FFFFFFu);
+        wr(AR_PHY_SYNTH_CONTROL, reg32);
+    } else {
+        /* 5 GHz bandi: bMode=0, aModeRefSel = 0 (20MHz grid) veya 1 (10MHz) */
+        uint32_t refsel = ((freq % 20u) == 0u) ? 0u : 1u;
+        wr(AR_PHY_CCK_TX_CTRL, rd(AR_PHY_CCK_TX_CTRL) & ~AR_PHY_CCK_TX_CTRL_JAPAN);
+        chansel = refsel ? CHANSEL_5G_FRAC(freq) : CHANSEL_5G(freq);
+        reg32 = rd(AR_PHY_SYNTH_CONTROL) & 0xC0000000u;
+        reg32 |= (0u << 29)             /* bMode = 0 (5 GHz)    */
+               | (1u << 28)             /* fracMode = 1         */
+               | (refsel << 26)
+               | (chansel & 0x03FFFFFFu);
+        wr(AR_PHY_SYNTH_CONTROL, reg32);
+    }
 
-    kernel_debug("ATH9K: kanal %d (%u MHz) ayarlandi", ch, freq);
+    kernel_debug("ATH9K: kanal %d (%u MHz, %s) ayarlandi",
+                 ch, freq, (freq < 4000u) ? "2.4GHz" : "5GHz");
     return 0;
 }
 
@@ -425,12 +463,50 @@ static int tx_ring_init(void) {
 }
 
 /* ===================================================================== *
- * 802.11 kare gonderimi (tek parca, dogrudan donanima)
+ * Coklu-hiz secimi + 802.11 kare gonderimi (4 asamali donanim fallback)
  * ===================================================================== */
+static void ath9k_select_tx_rates(int is_mgmt, int ch, int rssi,
+                                  uint8_t rates[4], uint8_t tries[4]) {
+    bool is_5g = (ch > 14);
+    uint8_t base_min = is_5g ? RATE_6M : RATE_1M;
+    uint8_t low_mid  = is_5g ? RATE_6M : RATE_2M;
+
+    if (is_mgmt) {
+        rates[0] = base_min;
+        rates[1] = base_min;
+        rates[2] = base_min;
+        rates[3] = base_min;
+        tries[0] = 7; tries[1] = 0; tries[2] = 0; tries[3] = 0;
+        return;
+    }
+
+    int eff_rssi = rssi - (g_tx_fail_streak * 5);
+    if (eff_rssi >= -60) {
+        rates[0] = RATE_54M;
+        rates[1] = RATE_36M;
+        rates[2] = RATE_18M;
+        rates[3] = base_min;
+        tries[0] = 3; tries[1] = 2; tries[2] = 2; tries[3] = 2;
+    } else if (eff_rssi >= -75) {
+        rates[0] = RATE_36M;
+        rates[1] = RATE_24M;
+        rates[2] = RATE_12M;
+        rates[3] = base_min;
+        tries[0] = 3; tries[1] = 2; tries[2] = 2; tries[3] = 2;
+    } else {
+        rates[0] = RATE_12M;
+        rates[1] = RATE_6M;
+        rates[2] = low_mid;
+        rates[3] = base_min;
+        tries[0] = 3; tries[1] = 3; tries[2] = 2; tries[3] = 2;
+    }
+}
+
 static int tx_frame_raw(const uint8_t *frame, int len, int q, int noack,
                         int retries) {
     ath_desc_t *d;
     uint32_t t;
+    uint8_t rates[4], tries[4];
 
     if (!g_hw_up || !frame || len < 10 || len > 4000) return -1;
 
@@ -445,6 +521,9 @@ static int tx_frame_raw(const uint8_t *frame, int len, int q, int noack,
     d->u.tx.status4 = d->u.tx.status5 = d->u.tx.status6 = 0;
     d->u.tx.status7 = d->u.tx.status8 = d->ds_txstatus9 = 0;
 
+    ath9k_select_tx_rates(q == TXQ_MGMT, g_channel, g_last_rssi, rates, tries);
+    if (q == TXQ_MGMT && retries > 0) tries[0] = (uint8_t)(retries & 0x0F);
+
     d->ds_link = 0;                                  /* zincir sonu (EOL) */
     d->ds_data = (uint32_t)(uintptr_t)g_tx_buf;
     /* ds_ctl0: uzunluk + guc(63) ; ds_ctl1: tip + segment uzunlugu */
@@ -452,8 +531,14 @@ static int tx_frame_raw(const uint8_t *frame, int len, int q, int noack,
     d->ds_ctl1 = (0u << AR_FrameType_S)              /* ATH9K_PKT_TYPE_NORMAL */
                | (uint32_t)len;
     if (noack) d->ds_ctl1 |= AR_NoAck;
-    d->ds_ctl2 = ((uint32_t)(retries > 0 ? retries : 7) << AR_XmitDataTries0_S);
-    d->ds_ctl3 = RATE_1M;                            /* oncelikle guvenli CCK */
+    d->ds_ctl2 = ((uint32_t)(tries[0] & 0x0Fu) << 16)
+               | ((uint32_t)(tries[1] & 0x0Fu) << 20)
+               | ((uint32_t)(tries[2] & 0x0Fu) << 24)
+               | ((uint32_t)(tries[3] & 0x0Fu) << 28);
+    d->ds_ctl3 = ((uint32_t)rates[0])
+               | ((uint32_t)rates[1] << 8)
+               | ((uint32_t)rates[2] << 16)
+               | ((uint32_t)rates[3] << 24);
     d->ds_ctl4 = 0;
     d->ds_ctl5 = 0;
     d->ds_ctl6 = 0;                                  /* EncrType: NONE (host CCMP) */
@@ -466,12 +551,19 @@ static int tx_frame_raw(const uint8_t *frame, int len, int q, int noack,
     /* Tamamlanma bekle (AR_TxDone, ds_txstatus9) */
     for (t = 0; t < 2000; t++) {
         if (d->ds_txstatus9 & AR_TxDone) {
-            if (d->ds_txstatus0 & AR_FrmXmitOK) return 0;
+            if (d->ds_txstatus0 & AR_FrmXmitOK) {
+                g_tx_ok_streak++;
+                g_tx_fail_streak = 0;
+                return 0;
+            }
+            if (!noack && q == TXQ_DATA && g_tx_fail_streak < 6) g_tx_fail_streak++;
+            g_tx_ok_streak = 0;
             /* ACK gelmedi: yine de kare gonderilmistir (noack/mgmt icin normal) */
             return 1;
         }
         udelay(20);
     }
+    if (g_tx_fail_streak < 6) g_tx_fail_streak++;
     kernel_debug("ATH9K: TX zaman asimi (q=%d, len=%d)", q, len);
     return -1;
 }
@@ -820,15 +912,16 @@ static void set_bssid(const uint8_t *b, int aid) {
 }
 
 /* ===================================================================== *
- * Desteklenen cipler: AR928x tek-cip aile (EDMA'siz halka yolu)
- * AR9300 (0x0030/32/33/34/35/3A) EDMA kullanir → bilerek disari.
+ * Desteklenen cipler: AR928x + AR93xx ailesi
  * ===================================================================== */
 static int dev_supported(uint16_t device) {
     switch (device) {
     case 0x002A: case 0x002B: case 0x002C:
-    case 0x002D: case 0x002E:                 /* AR9280 (2.4/5 GHz) */
-    case 0x0036: case 0x0039:                 /* AR9285 (2.4 GHz 1x1) */
-    case 0x0037: case 0x0038:                 /* AR9287 (2.4 GHz 2x2) */
+    case 0x002D: case 0x002E:                 /* AR9280 / AR9285 / AR9287 */
+    case 0x0030: case 0x0032: case 0x0033:
+    case 0x0034:                              /* AR93xx / AR94xx */
+    case 0x0036: case 0x0039:                 /* AR9285 / AR9565 */
+    case 0x0037: case 0x0038:                 /* AR9287 */
         return 1;
     default:
         return 0;
@@ -845,11 +938,13 @@ static int drv_init(net_controller_t *nc) {
     if (nc->bar[0].is_io || nc->bar[0].address == 0) return -1;
 
     g_nc = nc;
+    g_dev_id = nc->dev.device;
     g_mmio = (volatile uint32_t *)(uintptr_t)nc->bar[0].address;
 
-    kernel_debug("ATH9K: kart %04X:%04X BAR0=0x%llx",
+    kernel_debug("ATH9K: kart %04X:%04X BAR0=0x%llx%s",
                  nc->dev.vendor, nc->dev.device,
-                 (unsigned long long)nc->bar[0].address);
+                 (unsigned long long)nc->bar[0].address,
+                 ath9k_is_dualband(g_dev_id) ? " (2.4/5GHz)" : " (2.4GHz)");
 
     /* Bus mastering + bellek alani (PCI komut yazmaci 0x04) */
     {
@@ -868,6 +963,9 @@ static int drv_init(net_controller_t *nc) {
         kernel_debug("ATH9K: EEPROM MAC %02x:%02x:%02x:%02x:%02x:%02x",
                      g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
 
+    memcpy(net_if.mac, g_mac, 6);
+    net_if.valid = true;
+
     /* DMA atama boyutu 128B (hw.c: ath9k_hw_init_global_settings) */
     wr(AR_TXCFG, (rd(AR_TXCFG) & ~7u) | 5u);       /* AR_TXCFG_DMASZ_128B */
     wr(AR_RXCFG, (rd(AR_RXCFG) & ~7u) | 5u);       /* AR_RXCFG_DMASZ_128B */
@@ -880,8 +978,8 @@ static int drv_init(net_controller_t *nc) {
     set_bssid(BCAST, 0);
     if (hw_set_channel(1) != 0) return -1;
 
-    /* Alimi baslat — Linux ar9002_hw_rx_enable: AR_CR = AR_CR_RXE */
-    wr(AR_CR, 0x00000004);
+    /* Alimi baslat — AR93xx (11n) veya AR928x RX enable */
+    wr(AR_CR, ath9k_is_ar93xx(g_dev_id) ? AR_CR_RXE_11N : 0x00000004u);
 
     g_hw_up = true;
     g_state = ASI_WIFI_OFF;
@@ -895,16 +993,25 @@ static int drv_init(net_controller_t *nc) {
 static parsed_net_t g_nets[16];
 static int          g_nets_n = 0;
 
+static const int g_scan_channels[] = {
+    1, 6, 11, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13,
+    36, 40, 44, 48, 149, 153, 157, 161, 165
+};
+
 static int drv_scan(asi_wifi_net_t *out, int max) {
-    int ch, i, nfound = 0;
+    int i, nfound = 0;
     uint8_t f[2048];
+    int nchan = ath9k_is_dualband(g_dev_id)
+                ? (int)(sizeof(g_scan_channels) / sizeof(g_scan_channels[0]))
+                : 13;
 
     if (!g_hw_up || !out || max <= 0) return 0;
     g_nets_n = 0;
     set_bssid(BCAST, 0);                    /* tum BSSID'leri kabul et */
-    kernel_debug("ATH9K: tarama 1-14 kanal");
+    kernel_debug("ATH9K: tarama (%d kanal)", nchan);
 
-    for (ch = 1; ch <= 14; ch++) {
+    for (int ci = 0; ci < nchan; ci++) {
+        int ch = g_scan_channels[ci];
         if (hw_set_channel(ch) != 0) continue;
         msleep(30);
         for (i = 0; i < 150; i++) {         /* ~300 ms beacon penceresi */
@@ -1114,7 +1221,7 @@ static int wpa2_handshake(const parsed_net_t *net) {
  * Baglanti
  * ===================================================================== */
 static int drv_connect(const char *ssid, const char *pass) {
-    int ch, i, idx = -1;
+    int i, idx = -1;
     uint8_t f[2048];
     parsed_net_t net;
     int n, aid;
@@ -1129,21 +1236,27 @@ static int drv_connect(const char *ssid, const char *pass) {
     g_have_pmk  = false;
     g_state = ASI_WIFI_CONNECTING;
 
-    /* 1) hedefi bul (yakin tarama) */
+    /* 1) hedefi bul (yakin tarama: 2.4 GHz + destekleniyorsa 5 GHz) */
     set_bssid(BCAST, 0);
-    for (ch = 1; ch <= 14 && idx < 0; ch++) {
-        parsed_net_t p;
-        if (hw_set_channel(ch) != 0) continue;
-        msleep(30);
-        for (i = 0; i < 150; i++) {
-            int rn = 0, rate = 0;
-            if (rx_frame_raw(f, &rn, &rate) != 1) { msleep(2); continue; }
-            if (parse_beacon(f, rn, g_last_rssi, &p) &&
-                strcmp(p.ssid, ssid) == 0) {
-                if (p.channel == 0) p.channel = ch;
-                net = p;
-                idx = 1;
-                break;
+    {
+        int nchan = ath9k_is_dualband(g_dev_id)
+                    ? (int)(sizeof(g_scan_channels) / sizeof(g_scan_channels[0]))
+                    : 13;
+        for (int ci = 0; ci < nchan && idx < 0; ci++) {
+            int ch = g_scan_channels[ci];
+            parsed_net_t p;
+            if (hw_set_channel(ch) != 0) continue;
+            msleep(30);
+            for (i = 0; i < 150; i++) {
+                int rn = 0, rate = 0;
+                if (rx_frame_raw(f, &rn, &rate) != 1) { msleep(2); continue; }
+                if (parse_beacon(f, rn, g_last_rssi, &p) &&
+                    strcmp(p.ssid, ssid) == 0) {
+                    if (p.channel == 0) p.channel = ch;
+                    net = p;
+                    idx = 1;
+                    break;
+                }
             }
         }
     }
@@ -1331,3 +1444,19 @@ static const wifi_driver_t g_drv = {
 };
 
 void ath9k_register(void) { wifi_register_driver(&g_drv); }
+
+bool ath9k_link_up(void) {
+    return g_hw_up && (g_state == ASI_WIFI_CONNECTED);
+}
+
+int ath9k_selftest(void) {
+    if (ath9k_chan_to_freq(1) != 2412u || ath9k_chan_to_freq(14) != 2484u) return -1;
+    if (ath9k_chan_to_freq(36) != 5180u || ath9k_chan_to_freq(149) != 5745u) return -2;
+
+    uint8_t r[4], tr[4];
+    ath9k_select_tx_rates(0, 6, -50, r, tr);
+    if (r[0] != RATE_54M || r[3] != RATE_1M || tr[0] == 0) return -3;
+    ath9k_select_tx_rates(0, 36, -85, r, tr);
+    if (r[0] != RATE_12M || r[3] != RATE_6M) return -4;
+    return 0;
+}

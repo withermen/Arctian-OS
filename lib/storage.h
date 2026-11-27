@@ -10,8 +10,22 @@ int storage_init(void);
 int storage_read(uint64_t lba, uint32_t count, void *buf);
 int storage_write(uint64_t lba, uint32_t count, const void *buf);
 
-/* Secili cihazin toplam 512-byte sektor sayisi (0 = bilinmiyor). */
+/* Secili cihazin/bolumun toplam 512-byte sektor sayisi (0 = bilinmiyor). */
 uint64_t storage_sector_count(void);
+
+/* Bolumleme kesfi: ham LBA 0 (0), MBR (1), GPT (2). */
+#define STORAGE_PART_RAW 0
+#define STORAGE_PART_MBR 1
+#define STORAGE_PART_GPT 2
+
+/* Arctian OS GPT Partition Type GUID: {41524354-4941-4E4F-5350-415254495431} */
+#define ARCTIAN_GPT_TYPE_GUID_INIT \
+    { 0x54, 0x43, 0x52, 0x41, 0x41, 0x49, 0x4F, 0x4E, \
+      0x53, 0x50, 0x41, 0x52, 0x54, 0x49, 0x54, 0x31 }
+
+uint64_t storage_partition_base(void);
+uint64_t storage_partition_sectors(void);
+int      storage_partition_type(void);
 
 /* Biriken (write-back) yazimlari diske indir. */
 int storage_flush(void);

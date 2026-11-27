@@ -24,13 +24,20 @@ enum {
     ARCTIAN_EV_CLOSE       = 8
 };
 
+#define ARCTIAN_MOD_SHIFT 1u
+#define ARCTIAN_MOD_CTRL  2u
+#define ARCTIAN_MOD_ALT   4u
+
 typedef struct {
     uint32_t type;       /* ARCTIAN_EV_* */
     int32_t  x;          /* fare X veya yeni genislik */
     int32_t  y;          /* fare Y veya yeni yukseklik */
     int32_t  delta;      /* tekerlek deltasi veya buton (1=sol,2=sag,3=orta) */
-    uint32_t key;        /* ASCII / LVGL tus kodu */
-    uint32_t mods;       /* Shift=1, Ctrl=2, Alt=4 */
+    union {
+        uint32_t key;    /* Unicode UTF-32 codepoint / ASCII / LVGL tus kodu */
+        uint32_t cp;     /* Unicode codepoint (key ile ayni 32-bit alan) */
+    };
+    uint32_t mods;       /* ARCTIAN_MOD_SHIFT=1, ARCTIAN_MOD_CTRL=2, ARCTIAN_MOD_ALT=4 */
 } arctian_gfx_event_t;
 
 #endif /* ARCTIAN_POSIX_GFX_H */

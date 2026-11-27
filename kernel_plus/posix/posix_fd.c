@@ -9,6 +9,7 @@
 #include "posix.h"
 #include "alloc.h"
 #include "afs.h"
+#include "audio.h"
 #include "clock.h"
 #include "rtc.h"
 #include "net.h"
@@ -72,15 +73,68 @@ static spinlock_t s_efd_tab_lock;
 static char s_resolv_buf[128];
 static const char s_hosts_buf[] = "127.0.0.1 localhost\n";
 
+/* ---- OSS /dev/dsp & /dev/audio akis arayuzu ---- */
+#define OSS_SNDCTL_DSP_RESET      0x00005000u
+#define OSS_SNDCTL_DSP_SYNC       0x00005001u
+#define OSS_SNDCTL_DSP_SPEED      0xC0045002u
+#define OSS_SNDCTL_DSP_STEREO     0xC0045003u
+#define OSS_SNDCTL_DSP_GETBLKSIZE 0xC0045004u
+#define OSS_SNDCTL_DSP_SETFMT     0xC0045005u
+#define OSS_SNDCTL_DSP_CHANNELS   0xC0045006u
+#define OSS_SNDCTL_DSP_GETFMTS    0x8004500Bu
+#define OSS_SNDCTL_DSP_GETOSPACE  0x8010500Cu
+#define OSS_SNDCTL_DSP_GETODELAY  0x80045017u
+
+#define OSS_AFMT_QUERY            0x00000000
+#define OSS_AFMT_U8               0x00000008
+#define OSS_AFMT_S16_LE           0x00000010
+
+typedef struct {
+    int fragments;
+    int fragstotal;
+    int fragsize;
+    int bytes;
+} oss_audio_buf_info_t;
+
+typedef struct {
+    int      used;
+    uint32_t rate;
+    int      channels;
+    int      bits;
+} pdsp_t;
+
+static pdsp_t     s_dsp;
+static spinlock_t s_dsp_lock;
+
+static int dsp_is_path(const char *path) {
+    return path && (strcmp(path, "/dev/dsp") == 0 || strcmp(path, "/dev/audio") == 0);
+}
+
+static int dsp_is_file(const posix_file_t *f) {
+    return f && f->kind == PFD_VFILE && f->obj_id == 0 && dsp_is_path(f->path);
+}
+
+static void dsp_close_obj(void) {
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_dsp_lock);
+    int was_used = s_dsp.used;
+    s_dsp.used = 0;
+    spin_unlock(&s_dsp_lock);
+    sched_irq_restore(fl);
+    if (was_used) audio_stream_close();
+}
+
 void posix_fd_init_subsys(void) {
     memset(s_files, 0, sizeof(s_files));
     memset(s_pipes, 0, sizeof(s_pipes));
     memset(s_epolls, 0, sizeof(s_epolls));
     memset(s_efds, 0, sizeof(s_efds));
+    memset(&s_dsp, 0, sizeof(s_dsp));
     spin_init(&s_file_lock);
     spin_init(&s_pipe_tab_lock);
     spin_init(&s_epoll_tab_lock);
     spin_init(&s_efd_tab_lock);
+    spin_init(&s_dsp_lock);
 }
 
 posix_file_t *posix_file_alloc(int kind) {
@@ -141,9 +195,11 @@ void posix_file_unref(posix_file_t *f) {
     if (!f) return;
     int kind = PFD_NONE;
     int obj_id = -1;
+    int is_dsp = 0;
     uint64_t fl = sched_irq_save();
     spin_lock(&s_file_lock);
     if (--f->refs <= 0) {
+        is_dsp = dsp_is_file(f);
         kind = f->kind;
         obj_id = f->obj_id;
         f->kind = PFD_NONE;
@@ -152,7 +208,8 @@ void posix_file_unref(posix_file_t *f) {
     spin_unlock(&s_file_lock);
     sched_irq_restore(fl);
 
-    if (kind == PFD_PIPE_R) pipe_end_close(obj_id, 0);
+    if (is_dsp) dsp_close_obj();
+    else if (kind == PFD_PIPE_R) pipe_end_close(obj_id, 0);
     else if (kind == PFD_PIPE_W) pipe_end_close(obj_id, 1);
     else if (kind == PFD_SOCK_INET || kind == PFD_SOCK_UNIX)
         posix_sock_close_obj(kind, obj_id);
@@ -338,6 +395,35 @@ int64_t posix_sys_openat(posix_proc_t *p, int dirfd, uint64_t path_va, int flags
         posix_file_t *f = posix_file_alloc(PFD_URANDOM);
         if (!f) return -ENFILE;
         f->flags = (uint32_t)flags;
+        int fd = posix_fd_install(p, f, fd_flags);
+        if (fd < 0) posix_file_unref(f);
+        return fd;
+    }
+    if (dsp_is_path(path)) {
+        if (!audio_present()) return -ENODEV;
+        uint64_t fl = sched_irq_save();
+        spin_lock(&s_dsp_lock);
+        if (s_dsp.used) {
+            spin_unlock(&s_dsp_lock);
+            sched_irq_restore(fl);
+            return -EBUSY;
+        }
+        s_dsp.used = 1;
+        s_dsp.rate = 48000u;
+        s_dsp.channels = 2;
+        s_dsp.bits = 16;
+        spin_unlock(&s_dsp_lock);
+        sched_irq_restore(fl);
+
+        if (audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits) != 0) {
+            s_dsp.used = 0;
+            return -EIO;
+        }
+        posix_file_t *f = posix_file_alloc(PFD_VFILE);
+        if (!f) { dsp_close_obj(); return -ENFILE; }
+        f->flags = (uint32_t)flags;
+        f->obj_id = 0;
+        strncpy(f->path, path, sizeof(f->path) - 1);
         int fd = posix_fd_install(p, f, fd_flags);
         if (fd < 0) posix_file_unref(f);
         return fd;
@@ -583,10 +669,34 @@ static int64_t file_read_kbuf(posix_file_t *f, uint8_t *kbuf, uint64_t len) {
     }
 }
 
+static int64_t dsp_do_write(posix_file_t *f, const uint8_t *src, uint64_t len) {
+    if (!dsp_is_file(f) || !s_dsp.used) return -EBADF;
+    uint64_t done = 0;
+    while (done < len) {
+        uint64_t rem = len - done;
+        uint32_t chunk = (rem > 65536ull) ? 65536u : (uint32_t)rem;
+        int wr = audio_stream_write(src + done, chunk);
+        if (wr < 0) return done ? (int64_t)done : -EIO;
+        if (wr > 0) {
+            done += (uint64_t)wr;
+            continue;
+        }
+        if (f->flags & O_NONBLOCK)
+            return done ? (int64_t)done : -EAGAIN;
+        audio_service();
+        sched_sleep_ms(2);
+        if (!s_dsp.used) break;
+    }
+    return (int64_t)done;
+}
+
 static int64_t file_write_kbuf(posix_file_t *f, const uint8_t *kbuf, uint64_t len) {
     if (len == 0) return 0;
     switch (f->kind) {
     case PFD_DEVNULL: return (int64_t)len;
+    case PFD_VFILE:
+        if (dsp_is_file(f)) return dsp_do_write(f, kbuf, len);
+        return -EBADF;
     case PFD_CONSOLE:
         for (uint64_t i = 0; i < len; i++) serial_putc((char)kbuf[i]);
         return (int64_t)len;
@@ -735,7 +845,7 @@ int64_t posix_sys_writev(posix_proc_t *p, int fd, uint64_t iov_va, int iovcnt) {
 int64_t posix_sys_lseek(posix_proc_t *p, int fd, int64_t off, int whence) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f) return -EBADF;
-    if (f->kind == PFD_PIPE_R || f->kind == PFD_PIPE_W ||
+    if (dsp_is_file(f) || f->kind == PFD_PIPE_R || f->kind == PFD_PIPE_W ||
         f->kind == PFD_SOCK_INET || f->kind == PFD_SOCK_UNIX)
         return -ESPIPE;
 
@@ -762,7 +872,8 @@ static void fill_stat_for_file(posix_file_t *f, posix_stat_t *st) {
     st->st_ino = (uint64_t)(uintptr_t)f;
     st->st_nlink = 1;
     st->st_blksize = 4096;
-    if (f->kind == PFD_CONSOLE || f->kind == PFD_DEVNULL || f->kind == PFD_URANDOM) {
+    if (f->kind == PFD_CONSOLE || f->kind == PFD_DEVNULL ||
+        f->kind == PFD_URANDOM || dsp_is_file(f)) {
         st->st_mode = S_IFCHR | 0666u;
     } else if (f->kind == PFD_PIPE_R || f->kind == PFD_PIPE_W) {
         st->st_mode = S_IFIFO | 0600u;
@@ -813,7 +924,8 @@ int64_t posix_sys_newfstatat(posix_proc_t *p, int dirfd, uint64_t path_va, uint6
     } else if (strcmp(path, "/etc/hosts") == 0) {
         st.st_mode = S_IFREG | 0444u;
         st.st_size = (int64_t)(sizeof(s_hosts_buf) - 1);
-    } else if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/urandom") == 0) {
+    } else if (strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/urandom") == 0 ||
+               dsp_is_path(path)) {
         st.st_mode = S_IFCHR | 0666u;
     } else {
         void *h = afs_lookup_path(path);
@@ -1363,7 +1475,8 @@ int64_t posix_sys_access(posix_proc_t *p, int dirfd, uint64_t path_va, int mode)
     resolve_path_at(p, dirfd, raw, path, sizeof(path));
     if (strcmp(path, "/") == 0 || strcmp(path, "/etc") == 0 || strcmp(path, "/dev") == 0 ||
         strcmp(path, "/etc/resolv.conf") == 0 ||
-        strcmp(path, "/etc/hosts") == 0 || strcmp(path, "/dev/null") == 0)
+        strcmp(path, "/etc/hosts") == 0 || strcmp(path, "/dev/null") == 0 ||
+        dsp_is_path(path))
         return 0;
     return afs_lookup_path(path) ? 0 : -ENOENT;
 }
@@ -1431,6 +1544,111 @@ int64_t posix_sys_statfs(uint64_t buf_va) {
     return 0;
 }
 
+static int dsp_handle_ioctl(uint32_t req32, int *ival, oss_audio_buf_info_t *osp) {
+    switch (req32) {
+    case OSS_SNDCTL_DSP_RESET:
+        audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits);
+        return 0;
+    case OSS_SNDCTL_DSP_SYNC:
+        audio_service();
+        return 0;
+    case OSS_SNDCTL_DSP_SETFMT: {
+        int fmt = *ival;
+        if (fmt == OSS_AFMT_QUERY) {
+            *ival = (s_dsp.bits == 8) ? OSS_AFMT_U8 : OSS_AFMT_S16_LE;
+            return 0;
+        }
+        if (fmt == OSS_AFMT_U8) s_dsp.bits = 8;
+        else { s_dsp.bits = 16; *ival = OSS_AFMT_S16_LE; }
+        audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits);
+        return 0;
+    }
+    case OSS_SNDCTL_DSP_CHANNELS: {
+        int ch = *ival;
+        if (ch != 0) {
+            if (ch < 1) ch = 1;
+            if (ch > 2) ch = 2;
+            s_dsp.channels = ch;
+            audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits);
+        }
+        *ival = s_dsp.channels;
+        return 0;
+    }
+    case OSS_SNDCTL_DSP_STEREO: {
+        int st = *ival;
+        s_dsp.channels = st ? 2 : 1;
+        audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits);
+        *ival = (s_dsp.channels == 2) ? 1 : 0;
+        return 0;
+    }
+    case OSS_SNDCTL_DSP_SPEED: {
+        int spd = *ival;
+        if (spd > 0) {
+            if (spd < 8000) spd = 8000;
+            if (spd > 96000) spd = 96000;
+            s_dsp.rate = (uint32_t)spd;
+            audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits);
+        }
+        *ival = (int)s_dsp.rate;
+        return 0;
+    }
+    case OSS_SNDCTL_DSP_GETFMTS:
+        *ival = OSS_AFMT_S16_LE | OSS_AFMT_U8;
+        return 0;
+    case OSS_SNDCTL_DSP_GETBLKSIZE:
+        *ival = 4096;
+        return 0;
+    case OSS_SNDCTL_DSP_GETODELAY:
+        *ival = (int)audio_stream_buffered();
+        return 0;
+    case OSS_SNDCTL_DSP_GETOSPACE: {
+        uint32_t free_b = audio_stream_free();
+        uint32_t frag = 4096u;
+        uint32_t tot_b = 65536u;
+        osp->fragsize = (int)frag;
+        osp->fragstotal = (int)(tot_b / frag);
+        osp->bytes = (int)free_b;
+        osp->fragments = (int)(free_b / frag);
+        return 0;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
+int posix_dsp_selftest(void) {
+    if (!audio_present()) return 0;
+    if (s_dsp.used) return -1;
+
+    s_dsp.used = 1;
+    s_dsp.rate = 48000u;
+    s_dsp.channels = 2;
+    s_dsp.bits = 16;
+    if (audio_stream_open(s_dsp.rate, s_dsp.channels, s_dsp.bits) != 0) {
+        s_dsp.used = 0;
+        return -1;
+    }
+
+    int fmt = OSS_AFMT_S16_LE;
+    int ch = 2;
+    int spd = 44100;
+    oss_audio_buf_info_t bi;
+    memset(&bi, 0, sizeof(bi));
+
+    int ok = 1;
+    if (dsp_handle_ioctl(OSS_SNDCTL_DSP_SETFMT, &fmt, &bi) != 0 || fmt != OSS_AFMT_S16_LE) ok = 0;
+    if (dsp_handle_ioctl(OSS_SNDCTL_DSP_CHANNELS, &ch, &bi) != 0 || ch != 2) ok = 0;
+    if (dsp_handle_ioctl(OSS_SNDCTL_DSP_SPEED, &spd, &bi) != 0 || spd != 44100) ok = 0;
+    if (dsp_handle_ioctl(OSS_SNDCTL_DSP_GETOSPACE, &fmt, &bi) != 0 || bi.bytes <= 0 || bi.fragsize != 4096) ok = 0;
+
+    uint8_t pcm[512];
+    memset(pcm, 0, sizeof(pcm));
+    if (audio_stream_write(pcm, sizeof(pcm)) != (int)sizeof(pcm)) ok = 0;
+
+    dsp_close_obj();
+    return ok ? 0 : -1;
+}
+
 int64_t posix_sys_ioctl(posix_proc_t *p, int fd, uint64_t req, uint64_t arg) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f) return -EBADF;
@@ -1444,6 +1662,24 @@ int64_t posix_sys_ioctl(posix_proc_t *p, int fd, uint64_t req, uint64_t arg) {
     if (req == 0x5413u /* TIOCGWINSZ */ && f->kind == PFD_CONSOLE) {
         uint16_t ws[4] = { 25, 80, 0, 0 };
         posix_ucopy_out(arg, ws, sizeof(ws));
+        return 0;
+    }
+    if (dsp_is_file(f)) {
+        uint32_t req32 = (uint32_t)req;
+        int ival = 0;
+        oss_audio_buf_info_t osp;
+        memset(&osp, 0, sizeof(osp));
+        if (req32 == OSS_SNDCTL_DSP_SETFMT || req32 == OSS_SNDCTL_DSP_CHANNELS ||
+            req32 == OSS_SNDCTL_DSP_STEREO || req32 == OSS_SNDCTL_DSP_SPEED) {
+            if (!arg || posix_ucopy_in(&ival, arg, sizeof(ival)) < 0) return -EFAULT;
+        }
+        int rc = dsp_handle_ioctl(req32, &ival, &osp);
+        if (rc != 0) return rc;
+        if (req32 == OSS_SNDCTL_DSP_GETOSPACE) {
+            if (!arg || posix_ucopy_out(arg, &osp, sizeof(osp)) < 0) return -EFAULT;
+        } else if (req32 != OSS_SNDCTL_DSP_RESET && req32 != OSS_SNDCTL_DSP_SYNC) {
+            if (arg && posix_ucopy_out(arg, &ival, sizeof(ival)) < 0) return -EFAULT;
+        }
         return 0;
     }
     return -ENOTTY;

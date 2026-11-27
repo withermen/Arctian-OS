@@ -1,20 +1,21 @@
 #include "app.h"
 #include "adl_wolf.h"
 #include "lv_port.h"
+#include "png.h"
+#include "miniz.h"
 #include <stdint.h>
 
-#define FM_MAX_ENT 200
-#define FM_PATH    200
-#define FM_NAME    68
-#define FM_FLAT    512
-#define FM_NAV     7
-#define FM_HISTORY 16
-#define FM_CRUMBS  16
-#define FM_MENU_W  228
+#define FM_CAP_INIT 256
+#define FM_MAX_CAP  4096
+#define FM_PATH     240
+#define FM_NAME     96
+#define FM_FLAT     2048
+#define FM_NAV      7
+#define FM_HISTORY  16
+#define FM_CRUMBS   16
+#define FM_MENU_W   236
+#define FM_TRASH_DIR "C:/Cop"
 
-/* Geri oku: 16px SVG, 1.5px cizgi (metin karakteri degil).
- * make_icon() masaustu kabugunda (dsk_util.c) yasar; uygulamalar ayni
- * ikiliye baglandigi icin burada yalnizca bildirim gerekir. */
 lv_obj_t *make_icon(lv_obj_t *parent, const char *svg, int size);
 static const char FM_SVG_BACK[] =
     "<svg viewBox=\"0 0 16 16\"><path d=\"M10 3 L5.5 8 L10 13\" stroke=\"#E4E6EB\" "
@@ -35,6 +36,7 @@ extern const unsigned int font_plex_sb_len;
 
 typedef struct {
     char     name[FM_NAME];
+    char     rel[FM_PATH];
     int      is_dir;
     uint32_t size;
     uint32_t child_count;
@@ -42,8 +44,10 @@ typedef struct {
 
 static asi_t     *A;
 static char       cwd[FM_PATH];
-static fm_ent_t   ents[FM_MAX_ENT];
-static lv_obj_t  *rows[FM_MAX_ENT];
+static fm_ent_t  *ents;
+static lv_obj_t **rows;
+static char      *s_multi;
+static int        ent_cap;
 static int        ent_n;
 static int        sel;
 static int        list_w;
@@ -57,27 +61,28 @@ static unsigned   s_usb_poll_ticks;
 static lv_obj_t  *fm_body;
 static lv_timer_t *relayout_timer;
 static int        s_menu_focused;
-static lv_color_t sel_bg;
 
 static lv_obj_t *path_lbl;
 static lv_obj_t *crumb_box;
 static lv_obj_t *list_box;
 static lv_obj_t *table_head;
-static lv_obj_t *ui_tb;      /* toolbar */
-static lv_obj_t *ui_side;    /* quick access */
-static lv_obj_t *ui_det;     /* details panel */
-static lv_obj_t *ui_st;      /* status bar */
+static lv_obj_t *ui_tb;
+static lv_obj_t *ui_side;
+static lv_obj_t *ui_det;
+static lv_obj_t *ui_st;
 static lv_obj_t *status_lbl;
 static lv_obj_t *det_name;
 static lv_obj_t *det_meta;
 static lv_obj_t *det_prev;
 static lv_obj_t *det_hint;
+static lv_obj_t *det_img;
+static uint32_t *det_img_buf;
 static lv_obj_t *head_name;
 static lv_obj_t *head_count;
 static lv_obj_t *back_btn;
 static lv_obj_t *context_menu;
 static lv_obj_t *context_backdrop;
-static lv_obj_t *menu_items[FM_NAV + 4];
+static lv_obj_t *menu_items[16];
 static int        menu_item_n;
 static lv_group_t *menu_prev_group;
 static lv_group_t *menu_group;
@@ -89,27 +94,24 @@ static char       s_history[FM_HISTORY][FM_PATH];
 static int        s_history_n;
 static char       s_crumb_path[FM_CRUMBS][FM_PATH];
 static int        s_crumb_n;
-
-static lv_obj_t *nav_btns[FM_NAV];
+static lv_obj_t  *nav_btns[FM_NAV];
 
 static lv_group_t *g_group;
 static void      (*g_prompt_ok)(const char *);
 static lv_obj_t  *g_prompt_ta;
 static lv_obj_t  *g_prompt_ov;
 
-/* ---- Coklu secim, pano, geri al, arama, surukle-birak --------- */
-static char  s_multi[FM_MAX_ENT];   /* 1 = satir coklu secimde */
-static int   s_last_sel = -1;       /* Shift aralik secimi icin son tiklanan */
-static lv_obj_t *s_search;          /* klasor ici arama kutusu */
-static char  s_filter[48];          /* arama filtresi (bos = kapali) */
-static int   s_drag_i = -1;         /* basili tutulan satir (-1 = yok) */
-static int   s_drag_on;             /* surukleme esigi asildi mi */
-static int   s_drag_x, s_drag_y;    /* basinç noktasi */
-static int   s_cut;                 /* pano kes modu (yapistirinca tasir) */
-static lv_obj_t *s_empty_lbl;       /* Bos klasor yonlendirmesi metni */
-static lv_obj_t *s_empty_btn;       /* "Olustur" dugmesi */
+static int   s_last_sel = -1;
+static lv_obj_t *s_search;
+static lv_obj_t *s_rec_btn;
+static int   s_search_rec;
+static char  s_filter[48];
+static int   s_drag_i = -1;
+static int   s_drag_on;
+static int   s_drag_x, s_drag_y;
+static int   s_cut;
+static lv_obj_t *s_empty_lbl;
 
-/* Geri al yigini: 4 seviye x 12 dosya (kopya/taşı islemleri) */
 #define FM_UNDO_LV   4
 #define FM_UNDO_FILES 12
 typedef struct {
@@ -131,8 +133,7 @@ static void fm_hotkey(int hk);
 static int  fm_drop_cb(const char *src);
 static void search_changed_cb(lv_event_t *e);
 static void search_click_cb(lv_event_t *e);
-static void path_click_cb(lv_event_t *e);
-static void path_ok(const char *p);
+static void rec_toggle_cb(lv_event_t *e);
 static void row_press_cb(lv_event_t *e);
 static void row_pressing_cb(lv_event_t *e);
 static void row_release_cb(lv_event_t *e);
@@ -146,8 +147,9 @@ static void update_detail(void);
 static void fm_update_toolbar(void);
 static void fm_update_status(void);
 static void fm_update_sort_labels(void);
-static int ent_vis(int i);
-
+static int  ent_vis(int i);
+static void fm_zip_compress_sel(void);
+static void fm_zip_extract_sel(void);
 
 static const char *const NAV_PATH[FM_NAV] = {
     "C:", "C:/apps", "C:/indirilenler", "C:/belgeler", "C:/masaustu", "C:/logs", "D:"
@@ -156,12 +158,10 @@ static const char *const NAV_LABEL[FM_NAV] = {
     "Bu Bilgisayar", "Uygulamalar", "İndirilenler", "Belgeler", "Masaüstü", "Günlükler", "USB Bellek"
 };
 
-static void update_detail(void);
 static void refresh(void);
 static void row_click_cb(lv_event_t *e);
 static void row_dbl_cb(lv_event_t *e);
 static void nav_cb(lv_event_t *e);
-static void up_cb(lv_event_t *e);
 static void open_cb(lv_event_t *e);
 static void refresh_cb(lv_event_t *e);
 static void del_cb(lv_event_t *e);
@@ -205,15 +205,6 @@ static int starts_with(const char *s, const char *p) {
 
 static char lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
-static int scmpi(const char *a, const char *b) {
-    while (*a && *b) {
-        char x = lower(*a), y = lower(*b);
-        if (x != y) return (int)(unsigned char)x - (int)(unsigned char)y;
-        a++; b++;
-    }
-    return (int)(unsigned char)lower(*a) - (int)(unsigned char)lower(*b);
-}
-
 static int ci_eq(const char *a, const char *b) {
     while (*a && *b) { if (lower(*a) != lower(*b)) return 0; a++; b++; }
     return *a == 0 && *b == 0;
@@ -233,6 +224,10 @@ static int is_text(const char *name) {
            ci_eq(e, "sh") || ci_eq(e, "ini") || ci_eq(e, "csv");
 }
 
+static int is_png_file(const char *name) {
+    return ci_eq(ext_of(name), "png");
+}
+
 static uint32_t type_color(const char *name) {
     const char *e = ext_of(name);
     if (ci_eq(e, "png") || ci_eq(e, "jpg") || ci_eq(e, "jpeg") || ci_eq(e, "gif") || ci_eq(e, "bmp"))
@@ -244,25 +239,45 @@ static uint32_t type_color(const char *name) {
     return FM_SECONDARY;
 }
 
-static lv_font_t *fm_text_font(void) {
-    return fm_font ? fm_font : (lv_font_t *)lv_font_get_default();
+static int fm_ensure_cap(int need) {
+    if (need <= ent_cap && ents && rows && s_multi) return 1;
+    if (!A || !A->mem || !A->mem->alloc || need > FM_MAX_CAP) return 0;
+    int ncap = ent_cap ? ent_cap * 2 : FM_CAP_INIT;
+    while (ncap < need && ncap < FM_MAX_CAP) ncap *= 2;
+    if (ncap > FM_MAX_CAP) ncap = FM_MAX_CAP;
+
+    fm_ent_t *ne = (fm_ent_t *)A->mem->alloc((size_t)ncap * sizeof(fm_ent_t));
+    lv_obj_t **nr = (lv_obj_t **)A->mem->alloc((size_t)ncap * sizeof(lv_obj_t *));
+    char *nm = (char *)A->mem->alloc((size_t)ncap);
+    if (!ne || !nr || !nm) {
+        if (ne) A->mem->free(ne);
+        if (nr) A->mem->free(nr);
+        if (nm) A->mem->free(nm);
+        return 0;
+    }
+    for (int i = 0; i < ncap; i++) { nr[i] = 0; nm[i] = 0; }
+    if (ents && ent_n > 0) {
+        for (int i = 0; i < ent_n; i++) {
+            ne[i] = ents[i];
+            nr[i] = rows ? rows[i] : 0;
+            nm[i] = s_multi ? s_multi[i] : 0;
+        }
+    }
+    if (ents) A->mem->free(ents);
+    if (rows) A->mem->free(rows);
+    if (s_multi) A->mem->free(s_multi);
+    ents = ne;
+    rows = nr;
+    s_multi = nm;
+    ent_cap = ncap;
+    return 1;
 }
 
-static lv_font_t *fm_heading_font(void) {
-    return fm_font_bold ? fm_font_bold : fm_text_font();
-}
-
-static void fm_style_font(lv_obj_t *obj, lv_font_t *font) {
-    if (obj && font) lv_obj_set_style_text_font(obj, font, 0);
-}
-
-static int fm_has_selection(void) {
-    return s_selected_n > 0;
-}
-
-static int fm_selected(int i) {
-    return i == sel || s_multi[i];
-}
+static lv_font_t *fm_text_font(void) { return fm_font ? fm_font : (lv_font_t *)lv_font_get_default(); }
+static lv_font_t *fm_heading_font(void) { return fm_font_bold ? fm_font_bold : fm_text_font(); }
+static void fm_style_font(lv_obj_t *obj, lv_font_t *font) { if (obj && font) lv_obj_set_style_text_font(obj, font, 0); }
+static int fm_has_selection(void) { return s_selected_n > 0; }
+static int fm_selected(int i) { return i == sel || (s_multi && s_multi[i]); }
 
 static void fm_add_history(const char *path) {
     if (!path || seq(path, cwd)) return;
@@ -310,7 +325,7 @@ static int fm_char_rank(const char *s, int *bytes) {
     *bytes = 1;
     if (p[0] < 0x80) {
         unsigned char c = p[0];
-        if (c == 'I') return 11; /* Türkçe büyük I, noktasız ı */
+        if (c == 'I') return 11;
         if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
         if (c >= 'a' && c <= 'z') {
             switch (c) {
@@ -326,13 +341,13 @@ static int fm_char_rank(const char *s, int *bytes) {
         return 0x100 + c;
     }
     *bytes = 2;
-    if (p[0] == 0xC3 && (p[1] == 0xA7 || p[1] == 0x87)) return 4;  /* ç / Ç */
-    if (p[0] == 0xC4 && (p[1] == 0x9F || p[1] == 0x9E)) return 9;  /* ğ / Ğ */
-    if (p[0] == 0xC4 && p[1] == 0xB1) return 11; /* ı */
-    if (p[0] == 0xC4 && p[1] == 0xB0) return 12; /* İ */
-    if (p[0] == 0xC3 && (p[1] == 0xB6 || p[1] == 0x96)) return 19; /* ö / Ö */
-    if (p[0] == 0xC5 && (p[1] == 0x9F || p[1] == 0x9E)) return 23; /* ş / Ş */
-    if (p[0] == 0xC3 && (p[1] == 0xBC || p[1] == 0x9C)) return 26; /* ü / Ü */
+    if (p[0] == 0xC3 && (p[1] == 0xA7 || p[1] == 0x87)) return 4;
+    if (p[0] == 0xC4 && (p[1] == 0x9F || p[1] == 0x9E)) return 9;
+    if (p[0] == 0xC4 && p[1] == 0xB1) return 11;
+    if (p[0] == 0xC4 && p[1] == 0xB0) return 12;
+    if (p[0] == 0xC3 && (p[1] == 0xB6 || p[1] == 0x96)) return 19;
+    if (p[0] == 0xC5 && (p[1] == 0x9F || p[1] == 0x9E)) return 23;
+    if (p[0] == 0xC3 && (p[1] == 0xBC || p[1] == 0x9C)) return 26;
     return 0x1000 + ((int)p[0] << 8) + p[1];
 }
 
@@ -376,30 +391,29 @@ static void u2s(char *out, int cap, uint32_t v) {
 static void human(char *out, int cap, uint32_t v) {
     out[0] = 0;
     if (v < 1024) { u2s(out, cap, v); scat(out, cap, " B"); return; }
-    uint32_t whole = v / 1024, frac = (v % 1024) * 10 / 1024;
+    if (v < 1024u * 1024u) {
+        uint32_t whole = v / 1024, frac = (v % 1024) * 10 / 1024;
+        u2s(out, cap, whole);
+        char f[3] = { '.', (char)('0' + frac), 0 };
+        scat(out, cap, f);
+        scat(out, cap, " KB");
+        return;
+    }
+    uint32_t whole = v / (1024u * 1024u);
+    uint32_t frac = ((v % (1024u * 1024u)) * 10u) / (1024u * 1024u);
     u2s(out, cap, whole);
-    char f[3];
-    f[0] = '.'; f[1] = (char)('0' + frac); f[2] = 0;
+    char f[3] = { '.', (char)('0' + frac), 0 };
     scat(out, cap, f);
-    scat(out, cap, " KB");
+    scat(out, cap, " MB");
 }
 
 static void path_child(const char *dir, const char *name, int is_dir, char *out, int cap) {
     out[0] = 0;
     scat(out, cap, dir);
-    scat(out, cap, "/");
+    int l = slen(out);
+    if (l > 0 && out[l - 1] != '/') scat(out, cap, "/");
     scat(out, cap, name);
     if (is_dir) scat(out, cap, "/");
-}
-
-static int path_up(char *p) {
-    int n = slen(p);
-    if (n <= 2) return 0;
-    int i = n - 1;
-    while (i > 0 && p[i] != '/') i--;
-    if (i <= 2) { p[2] = 0; return 1; }
-    p[i] = 0;
-    return 1;
 }
 
 static void trim_name(char *out, int cap, const char *in) {
@@ -415,16 +429,18 @@ static void trim_name(char *out, int cap, const char *in) {
     out[o] = 0;
 }
 
-static int flat_exists(const char *full) {
-    if (!A || !A->fs || !A->fs->name) return 0;
-    for (int i = 0; i < FM_FLAT; i++) {
-        const char *fn = A->fs->name(i);
-        if (fn && seq(fn, full)) return 1;
+static int fm_path_exists(const char *full) {
+    if (!A || !A->fs) return 0;
+    if (A->fs->stat) {
+        asi_stat_t st;
+        if (A->fs->stat(full, &st) == 0) return 1;
+    }
+    if (A->fs->find) {
+        if (A->fs->find(0, full)) return 1;
     }
     return 0;
 }
 
-/* 16x16 klasor: dolu #3b82f6 govde + sekme (spesifikasyon). */
 static void folder_icon(lv_obj_t *row) {
     lv_obj_t *ic = lv_obj_create(row);
     lv_obj_remove_style_all(ic);
@@ -449,7 +465,6 @@ static void folder_icon(lv_obj_t *row) {
     lv_obj_set_pos(f, 0, 4);
 }
 
-/* 16x16 dosya: ince cizgili yaprak + iki metin satiri; uzantiya gore renk. */
 static void file_icon(lv_obj_t *row, uint32_t col) {
     lv_obj_t *ic = lv_obj_create(row);
     lv_obj_remove_style_all(ic);
@@ -488,42 +503,32 @@ static void fm_update_status(void) {
     if (!status_lbl) return;
     int shown = 0;
     for (int i = 0; i < ent_n; i++) if (ent_vis(i)) shown++;
-    char text[96];
-    char num[12];
-    /* Not: u2s() yazdigi tamponu bastan yazar; kuyruga eklemek icin ayri
-     * tampon kullanilir (sayilar ardisik eklenir, basa yazilmaz). */
+    char text[96], num[12];
     text[0] = 0;
     if (s_filter[0]) {
-        u2s(num, sizeof(num), (uint32_t)shown);
-        scat(text, sizeof(text), num);
+        u2s(num, sizeof(num), (uint32_t)shown); scat(text, sizeof(text), num);
         scat(text, sizeof(text), " / ");
-        u2s(num, sizeof(num), (uint32_t)ent_n);
-        scat(text, sizeof(text), num);
+        u2s(num, sizeof(num), (uint32_t)ent_n); scat(text, sizeof(text), num);
         scat(text, sizeof(text), " öğe");
     } else {
-        u2s(num, sizeof(num), (uint32_t)ent_n);
-        scat(text, sizeof(text), num);
+        u2s(num, sizeof(num), (uint32_t)ent_n); scat(text, sizeof(text), num);
         scat(text, sizeof(text), " öğe");
     }
     if (s_selected_n) {
         scat(text, sizeof(text), " · ");
-        u2s(num, sizeof(num), (uint32_t)s_selected_n);
-        scat(text, sizeof(text), num);
+        u2s(num, sizeof(num), (uint32_t)s_selected_n); scat(text, sizeof(text), num);
         scat(text, sizeof(text), " seçili");
     }
     lv_label_set_text(status_lbl, text);
 }
 
-
 static void apply_sel(void) {
     s_selected_n = 0;
     for (int i = 0; i < ent_n; i++) {
         if (fm_selected(i)) s_selected_n++;
-        if (rows[i]) {
+        if (rows && rows[i]) {
             uint32_t sel_bg = fm_selected(i) ? FM_SELECTED : FM_WINDOW;
             lv_obj_set_style_bg_color(rows[i], lv_color_hex(sel_bg), 0);
-            /* Secili satir hover'da rengini korusun (hover rengi seciliden
-             * cok daha koyu; aksi halde secim kaybolmus gibi gorunuyordu). */
             lv_obj_set_style_bg_color(rows[i], lv_color_hex(sel_bg), LV_STATE_HOVERED);
         }
     }
@@ -550,17 +555,19 @@ static lv_obj_t *make_row(int i) {
     else file_icon(b, type_color(ents[i].name));
 
     lv_obj_t *nm = lv_label_create(b);
-    lv_label_set_text(nm, ents[i].name);
+    lv_label_set_text(nm, (s_search_rec && s_filter[0]) ? ents[i].rel : ents[i].name);
     lv_obj_set_style_text_color(nm, lv_color_hex(FM_TEXT), 0);
     fm_style_font(nm, fm_text_font());
     lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(nm, list_w - 122);
+    int nw = list_w - 130;
+    if (nw < 80) nw = 80;
+    lv_obj_set_width(nm, nw);
     lv_obj_align(nm, LV_ALIGN_LEFT_MID, 26, 0);
 
     lv_obj_t *count = lv_label_create(b);
-    char cnt[16];
+    char cnt[20];
     if (ents[i].is_dir) u2s(cnt, sizeof(cnt), ents[i].child_count);
-    else human(cnt, sizeof(cnt), ents[i].size);   /* dosyada sayi yerine boyut */
+    else human(cnt, sizeof(cnt), ents[i].size);
     lv_label_set_text(count, cnt);
     lv_obj_set_style_text_color(count, lv_color_hex(FM_SECONDARY), 0);
     fm_style_font(count, fm_text_font());
@@ -607,16 +614,14 @@ static void row_click_cb(lv_event_t *e) {
 static void row_dbl_cb(lv_event_t *e) {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     if (i < 0 || i >= ent_n) return;
+    char full[FM_PATH];
+    path_child(cwd, ents[i].rel, 0, full, sizeof(full));
     if (!ents[i].is_dir) {
-        char full[FM_PATH];
-        path_child(cwd, ents[i].name, 0, full, sizeof(full));
         arctian_shell_open_file(full);
         return;
     }
-    char np[FM_PATH];
-    path_child(cwd, ents[i].name, 0, np, sizeof(np));
-    if (slen(np) >= FM_PATH) return;
-    fm_navigate(np, 1);
+    if (slen(full) >= FM_PATH) return;
+    fm_navigate(full, 1);
 }
 
 static void row_press_cb(lv_event_t *e) {
@@ -654,12 +659,72 @@ static void row_release_cb(lv_event_t *e) {
         }
     }
     char full[FM_PATH];
-    path_child(cwd, ents[i].name, 0, full, sizeof(full));
+    path_child(cwd, ents[i].rel, 0, full, sizeof(full));
     arctian_shell_drop_at(mx, my, full);
+}
+
+static void clear_det_img(void) {
+    if (det_img) { lv_obj_delete(det_img); det_img = 0; }
+    if (det_img_buf && A && A->mem && A->mem->free) A->mem->free(det_img_buf);
+    det_img_buf = 0;
+}
+
+static void show_png_thumb(const char *full, uint32_t fsize) {
+    if (!A || !A->fs || !A->fs->read_path || !A->mem || !A->mem->alloc) return;
+    if (fsize == 0 || fsize > 2u * 1024u * 1024u) {
+        lv_label_set_text(det_prev, "Önizleme sınırı aşıldı (>2 MB)");
+        return;
+    }
+    uint8_t *raw = (uint8_t *)A->mem->alloc(fsize);
+    if (!raw) return;
+    uint32_t got = A->fs->read_path(full, raw, fsize);
+    uint32_t *px = 0;
+    int pw = 0, ph = 0;
+    int rc = (got == fsize) ? png_decode_argb(raw, fsize, A->mem->alloc, A->mem->free, &px, &pw, &ph) : -1;
+    A->mem->free(raw);
+    if (rc != 0 || !px || pw <= 0 || ph <= 0) {
+        if (px) A->mem->free(px);
+        lv_label_set_text(det_prev, "PNG çözülemedi");
+        return;
+    }
+
+    int max_w = 212, max_h = 140;
+    int dw = pw, dh = ph;
+    if (dw > max_w) { dh = dh * max_w / dw; dw = max_w; }
+    if (dh > max_h) { dw = dw * max_h / dh; dh = max_h; }
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+
+    uint32_t *scaled = (uint32_t *)A->mem->alloc((size_t)dw * (size_t)dh * 4u);
+    if (!scaled) { A->mem->free(px); return; }
+    for (int y = 0; y < dh; y++) {
+        int sy = (int)((int64_t)y * ph / dh);
+        if (sy >= ph) sy = ph - 1;
+        for (int x = 0; x < dw; x++) {
+            int sx = (int)((int64_t)x * pw / dw);
+            if (sx >= pw) sx = pw - 1;
+            scaled[y * dw + x] = px[sy * pw + sx];
+        }
+    }
+    A->mem->free(px);
+    det_img_buf = scaled;
+    det_img = lv_canvas_create(ui_det);
+    lv_obj_remove_style_all(det_img);
+    lv_canvas_set_buffer(det_img, det_img_buf, dw, dh, LV_COLOR_FORMAT_ARGB8888);
+    lv_obj_set_style_radius(det_img, 6, 0);
+    lv_obj_move_to_index(det_img, 2);
+
+    char res[48], nb[12];
+    u2s(nb, sizeof(nb), (uint32_t)pw); scpy(res, sizeof(res), nb);
+    scat(res, sizeof(res), " x ");
+    u2s(nb, sizeof(nb), (uint32_t)ph); scat(res, sizeof(res), nb);
+    scat(res, sizeof(res), " px PNG");
+    lv_label_set_text(det_prev, res);
 }
 
 static void update_detail(void) {
     if (!det_name) return;
+    clear_det_img();
     int n = s_selected_n;
     int single = sel >= 0 && sel < ent_n && n == 1;
     if (!single) {
@@ -695,12 +760,9 @@ static void update_detail(void) {
     fm_style_font(det_name, fm_heading_font());
     lv_label_set_text(det_name, en->name);
     if (en->is_dir) {
-        char meta[56];
+        char meta[56], fullmeta[72];
         u2s(meta, sizeof(meta), en->child_count);
-        char suffix[32];
-        scpy(suffix, sizeof(suffix), " öğe");
-        scat(meta, sizeof(meta), suffix);
-        char fullmeta[72];
+        scat(meta, sizeof(meta), " öğe");
         scpy(fullmeta, sizeof(fullmeta), "Klasör · ");
         scat(fullmeta, sizeof(fullmeta), meta);
         lv_label_set_text(det_meta, fullmeta);
@@ -708,18 +770,22 @@ static void update_detail(void) {
         lv_label_set_text(det_hint, "");
         return;
     }
-    char meta[48];
+    char meta[48], hs[24];
     scpy(meta, sizeof(meta), "Dosya · ");
-    char hs[24];
     human(hs, sizeof(hs), en->size);
     scat(meta, sizeof(meta), hs);
     lv_label_set_text(det_meta, meta);
     lv_label_set_text(det_hint, "");
+
+    char full[FM_PATH];
+    path_child(cwd, en->rel, 0, full, sizeof(full));
+    if (is_png_file(en->name)) {
+        show_png_thumb(full, en->size);
+        return;
+    }
     if (!is_text(en->name)) { lv_label_set_text(det_prev, "Önizleme yok"); return; }
     if (!A || !A->fs || !A->fs->read_path) { lv_label_set_text(det_prev, "Önizleme yok"); return; }
     static char pv[1024];
-    char full[FM_PATH];
-    path_child(cwd, en->name, 0, full, sizeof(full));
     uint32_t bytes = A->fs->read_path(full, pv, sizeof(pv) - 1);
     if (!bytes) { lv_label_set_text(det_prev, "Boş dosya"); return; }
     pv[bytes] = 0;
@@ -732,7 +798,8 @@ static void update_detail(void) {
 }
 
 static int ent_vis(int i) {
-    return !s_filter[0] || fm_contains_ci(ents[i].name, s_filter);
+    if (!s_filter[0]) return 1;
+    return fm_contains_ci(ents[i].name, s_filter) || fm_contains_ci(ents[i].rel, s_filter);
 }
 
 static void update_breadcrumb(void) {
@@ -740,20 +807,16 @@ static void update_breadcrumb(void) {
     lv_obj_clean(crumb_box);
     lv_obj_set_style_pad_all(crumb_box, 0, 0);
     lv_obj_set_style_pad_column(crumb_box, 6, 0);
-    lv_obj_set_style_pad_all(crumb_box, 0, 0);
-    lv_obj_set_style_pad_column(crumb_box, 6, 0);
     s_crumb_n = 0;
 
     lv_obj_t *home = lv_button_create(crumb_box);
     lv_obj_set_size(home, LV_SIZE_CONTENT, 30);
-    adl_focus_ring_attach(home);
     adl_focus_ring_attach(home);
     lv_obj_set_style_bg_opa(home, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(home, 0, 0);
     lv_obj_set_style_pad_all(home, 4, 0);
     lv_obj_set_style_radius(home, 4, 0);
     lv_obj_set_style_bg_color(home, lv_color_hex(FM_HOVER), LV_STATE_HOVERED);
-    fm_style_font(home, fm_text_font());
     lv_obj_t *hl = lv_label_create(home);
     lv_label_set_text(hl, "Bu Bilgisayar");
     lv_obj_set_style_text_color(hl, lv_color_hex(FM_SECONDARY), 0);
@@ -774,13 +837,11 @@ static void update_breadcrumb(void) {
     lv_obj_t *root = lv_button_create(crumb_box);
     lv_obj_set_size(root, LV_SIZE_CONTENT, 30);
     adl_focus_ring_attach(root);
-    adl_focus_ring_attach(root);
     lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(root, 0, 0);
     lv_obj_set_style_pad_all(root, 4, 0);
     lv_obj_set_style_radius(root, 4, 0);
     lv_obj_set_style_bg_color(root, lv_color_hex(FM_HOVER), LV_STATE_HOVERED);
-    fm_style_font(root, fm_text_font());
     lv_obj_t *rl = lv_label_create(root);
     lv_label_set_text(rl, (drive[0] == 'D' || drive[0] == 'd') ? "USB Bellek" : "C:");
     lv_obj_set_style_text_color(rl, lv_color_hex(active ? FM_TEXT : FM_SECONDARY), 0);
@@ -810,13 +871,11 @@ static void update_breadcrumb(void) {
         lv_obj_t *seg = lv_button_create(crumb_box);
         lv_obj_set_size(seg, LV_SIZE_CONTENT, 30);
         adl_focus_ring_attach(seg);
-        adl_focus_ring_attach(seg);
         lv_obj_set_style_bg_opa(seg, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(seg, 0, 0);
         lv_obj_set_style_pad_all(seg, 4, 0);
         lv_obj_set_style_radius(seg, 4, 0);
         lv_obj_set_style_bg_color(seg, lv_color_hex(FM_HOVER), LV_STATE_HOVERED);
-        fm_style_font(seg, fm_text_font());
         lv_obj_t *label = lv_label_create(seg);
         lv_label_set_text(label, name);
         lv_obj_set_style_text_color(label, lv_color_hex(active ? FM_TEXT : FM_SECONDARY), 0);
@@ -826,28 +885,73 @@ static void update_breadcrumb(void) {
     }
 }
 
+static void fm_scan_recursive(const char *dir, const char *rel_pref, int depth) {
+    if (depth > 6 || !A || !A->fs || !A->fs->count_dir || !A->fs->list_dir) return;
+    int n = fm_count_children(dir);
+    for (int i = 0; i < n && ent_n < FM_MAX_CAP; i++) {
+        char name[FM_NAME];
+        int is_dir = 0;
+        if (A->fs->list_dir(dir, i, name, sizeof(name), &is_dir) != 0 || !name[0]) continue;
+        char rel[FM_PATH];
+        scpy(rel, sizeof(rel), rel_pref);
+        if (rel[0]) scat(rel, sizeof(rel), "/");
+        scat(rel, sizeof(rel), name);
+
+        char full[FM_PATH];
+        path_child(dir, name, is_dir, full, sizeof(full));
+
+        if (fm_contains_ci(name, s_filter) || fm_contains_ci(rel, s_filter)) {
+            if (!fm_ensure_cap(ent_n + 1)) return;
+            fm_ent_t *en = &ents[ent_n++];
+            scpy(en->name, sizeof(en->name), name);
+            scpy(en->rel, sizeof(en->rel), rel);
+            en->is_dir = is_dir;
+            en->size = 0;
+            en->child_count = 0;
+            if (is_dir) en->child_count = (uint32_t)fm_count_children(full);
+            else if (A->fs->stat) {
+                asi_stat_t st;
+                if (A->fs->stat(full, &st) == 0) en->size = st.size;
+            }
+        }
+        if (is_dir) {
+            char sub[FM_PATH];
+            path_child(dir, name, 0, sub, sizeof(sub));
+            fm_scan_recursive(sub, rel, depth + 1);
+        }
+    }
+}
+
 static void refresh(void) {
     if (!list_box) return;
-    for (int i = 0; i < FM_MAX_ENT; i++) rows[i] = 0;
+    fm_sync_usb();
+    if (rows) for (int i = 0; i < ent_cap; i++) rows[i] = 0;
     lv_obj_clean(list_box);
     ent_n = 0;
 
-    int n = fm_count_children(cwd);
-    for (int i = 0; i < n && ent_n < FM_MAX_ENT; i++) {
-        char name[FM_NAME];
-        int is_dir = 0;
-        if (!A || !A->fs || !A->fs->list_dir || A->fs->list_dir(cwd, i, name, sizeof(name), &is_dir) != 0) continue;
-        fm_ent_t *en = &ents[ent_n++];
-        scpy(en->name, sizeof(en->name), name);
-        en->is_dir = is_dir;
-        en->size = 0;
-        en->child_count = 0;
-        char full[FM_PATH];
-        path_child(cwd, name, is_dir, full, sizeof(full));
-        if (is_dir) en->child_count = (uint32_t)fm_count_children(full);
-        else if (A->fs->stat) {
-            asi_stat_t st;
-            if (A->fs->stat(full, &st) == 0) en->size = st.size;
+    if (s_search_rec && s_filter[0]) {
+        fm_scan_recursive(cwd, "", 0);
+    } else {
+        int n = fm_count_children(cwd);
+        if (n > FM_MAX_CAP) n = FM_MAX_CAP;
+        for (int i = 0; i < n && ent_n < FM_MAX_CAP; i++) {
+            char name[FM_NAME];
+            int is_dir = 0;
+            if (!A || !A->fs || !A->fs->list_dir || A->fs->list_dir(cwd, i, name, sizeof(name), &is_dir) != 0) continue;
+            if (!fm_ensure_cap(ent_n + 1)) break;
+            fm_ent_t *en = &ents[ent_n++];
+            scpy(en->name, sizeof(en->name), name);
+            scpy(en->rel, sizeof(en->rel), name);
+            en->is_dir = is_dir;
+            en->size = 0;
+            en->child_count = 0;
+            char full[FM_PATH];
+            path_child(cwd, name, is_dir, full, sizeof(full));
+            if (is_dir) en->child_count = (uint32_t)fm_count_children(full);
+            else if (A->fs->stat) {
+                asi_stat_t st;
+                if (A->fs->stat(full, &st) == 0) en->size = st.size;
+            }
         }
     }
 
@@ -858,7 +962,7 @@ static void refresh(void) {
         ents[j + 1] = item;
     }
 
-    for (int i = 0; i < ent_n; i++) s_multi[i] = 0;
+    if (s_multi) for (int i = 0; i < ent_n; i++) s_multi[i] = 0;
     sel = -1;
     s_last_sel = -1;
     s_selected_n = 0;
@@ -898,6 +1002,7 @@ static void refresh(void) {
 
 static void fm_navigate(const char *path, int remember) {
     if (!path || !path[0]) return;
+    if (fm_path_is_usb(path)) fm_sync_usb();
     if (remember) fm_add_history(cwd);
     scpy(cwd, FM_PATH, path);
     sel = -1;
@@ -909,42 +1014,163 @@ static void nav_cb(lv_event_t *e) {
     fm_navigate(path, 1);
 }
 
-static void up_cb(lv_event_t *e) {
-    (void)e;
-    char parent[FM_PATH];
-    scpy(parent, sizeof(parent), cwd);
-    if (path_up(parent)) fm_navigate(parent, 1);
-}
-
 static void open_cb(lv_event_t *e) {
     (void)e;
     if (sel < 0 || sel >= ent_n) return;
+    char full[FM_PATH];
+    path_child(cwd, ents[sel].rel, 0, full, sizeof(full));
     if (!ents[sel].is_dir) {
-        char full[FM_PATH];
-        path_child(cwd, ents[sel].name, 0, full, sizeof(full));
         arctian_shell_open_file(full);
         return;
     }
-    char next[FM_PATH];
-    path_child(cwd, ents[sel].name, 0, next, sizeof(next));
-    fm_navigate(next, 1);
+    fm_navigate(full, 1);
 }
 
 static void refresh_cb(lv_event_t *e) { (void)e; refresh(); }
 
+/* ---- Recursive remove / Trash with .meta ---- */
+static int fm_remove_tree(const char *path, int depth) {
+    if (depth > 12 || !A || !A->fs) return -1;
+    asi_stat_t st;
+    if (A->fs->stat && A->fs->stat(path, &st) == 0 && st.is_dir) {
+        if (A->fs->count_dir && A->fs->list_dir) {
+            for (;;) {
+                int c = A->fs->count_dir(path);
+                if (c <= 0) break;
+                char nm[FM_NAME];
+                int isd = 0;
+                if (A->fs->list_dir(path, 0, nm, sizeof(nm), &isd) != 0 || !nm[0]) break;
+                char sub[FM_PATH];
+                path_child(path, nm, 0, sub, sizeof(sub));
+                if (fm_remove_tree(sub, depth + 1) != 0) break;
+            }
+        }
+        char dp[FM_PATH];
+        scpy(dp, sizeof(dp), path);
+        int l = slen(dp);
+        if (l > 0 && dp[l - 1] != '/') scat(dp, sizeof(dp), "/");
+        return A->fs->remove(dp);
+    }
+    return A->fs->remove(path);
+}
+
+static int fm_copy_file_data(const char *src_full, const char *dst_dir, const char *dst_nm) {
+    if (!A || !A->fs || !A->fs->stat || !A->fs->read_path || !A->fs->create_in || !A->fs->write) return 0;
+    asi_stat_t st;
+    if (A->fs->stat(src_full, &st) != 0 || st.is_dir) return 0;
+    uint8_t *buf = (uint8_t *)A->mem->alloc(st.size ? st.size : 1u);
+    if (!buf) return 0;
+    if (st.size > 0 && A->fs->read_path(src_full, buf, st.size) != st.size) {
+        A->mem->free(buf);
+        return 0;
+    }
+    void *dh = dst_dir[0] ? A->fs->create_in(dst_dir, dst_nm, 0)
+                          : (A->fs->create ? A->fs->create(0, dst_nm, 0) : 0);
+    int ok = (dh && A->fs->write(dh, buf, st.size) == 0);
+    A->mem->free(buf);
+    return ok;
+}
+
+static int fm_copy_tree_into(const char *src_dir, const char *dst_dir, int depth) {
+    if (depth > 12 || !A || !A->fs) return 0;
+    if (A->fs->mkdir && A->fs->mkdir(dst_dir) != 0) return 0;
+    if (!A->fs->count_dir || !A->fs->list_dir) return 1;
+    int cnt = A->fs->count_dir(src_dir);
+    for (int i = 0; i < cnt; i++) {
+        char nm[FM_NAME];
+        int isd = 0;
+        if (A->fs->list_dir(src_dir, i, nm, sizeof(nm), &isd) != 0 || !nm[0]) continue;
+        char sp[FM_PATH], dp[FM_PATH];
+        path_child(src_dir, nm, 0, sp, sizeof(sp));
+        path_child(dst_dir, nm, 0, dp, sizeof(dp));
+        if (isd) {
+            if (!fm_copy_tree_into(sp, dp, depth + 1)) return 0;
+        } else {
+            if (!fm_copy_file_data(sp, dst_dir, nm)) return 0;
+        }
+    }
+    return 1;
+}
+
+static int fm_trash_item(const char *full_no_slash, int is_dir) {
+    if (!A || !A->fs || !A->fs->mkdir || !A->fs->create_in || !A->fs->write) return -1;
+    A->fs->mkdir(FM_TRASH_DIR);
+
+    const char *base = full_no_slash;
+    for (const char *p = full_no_slash; *p; p++) if (*p == '/') base = p + 1;
+    if (!base[0]) return -1;
+
+    char cand[FM_NAME];
+    int bl = slen(base);
+    if (bl >= FM_NAME - 8) bl = FM_NAME - 9;
+    int dot = -1;
+    if (!is_dir) for (int i = 0; i < bl; i++) if (base[i] == '.') dot = i;
+
+    for (int k = 1; k < 500; k++) {
+        if (k == 1) {
+            scpy(cand, sizeof(cand), base);
+        } else {
+            char suf[16], num[8];
+            u2s(num, sizeof(num), (uint32_t)k);
+            scpy(suf, sizeof(suf), " ("); scat(suf, sizeof(suf), num); scat(suf, sizeof(suf), ")");
+            if (dot > 0) {
+                int o = 0;
+                for (int i = 0; i < dot && o < FM_NAME - 1; i++) cand[o++] = base[i];
+                cand[o] = 0;
+                scat(cand, sizeof(cand), suf);
+                scat(cand, sizeof(cand), base + dot);
+            } else {
+                scpy(cand, sizeof(cand), base);
+                scat(cand, sizeof(cand), suf);
+            }
+        }
+        char tchk[FM_PATH];
+        path_child(FM_TRASH_DIR, cand, 0, tchk, sizeof(tchk));
+        if (!fm_path_exists(tchk)) break;
+        if (k == 499) return -1;
+    }
+
+    char dst_full[FM_PATH];
+    path_child(FM_TRASH_DIR, cand, 0, dst_full, sizeof(dst_full));
+
+    int moved = 0;
+    if (A->fs->rename && A->fs->rename(full_no_slash, dst_full) == 0) {
+        moved = 1;
+    } else if (is_dir) {
+        if (fm_copy_tree_into(full_no_slash, dst_full, 0)) {
+            fm_remove_tree(full_no_slash, 0);
+            moved = 1;
+        }
+    } else {
+        if (fm_copy_file_data(full_no_slash, FM_TRASH_DIR, cand)) {
+            A->fs->remove(full_no_slash);
+            moved = 1;
+        }
+    }
+    if (!moved) return -1;
+
+    char meta_nm[FM_NAME + 8];
+    scpy(meta_nm, sizeof(meta_nm), cand);
+    scat(meta_nm, sizeof(meta_nm), ".meta");
+    void *mh = A->fs->create_in(FM_TRASH_DIR, meta_nm, 0);
+    if (mh) A->fs->write(mh, full_no_slash, (uint32_t)slen(full_no_slash));
+    return 0;
+}
+
 static void del_cb(lv_event_t *e) {
     (void)e;
-    if (!A || !A->fs || !A->fs->remove || !A->fs->name || !fm_has_selection()) return;
+    if (!A || !A->fs || !A->fs->remove || !fm_has_selection()) return;
+    int in_trash = starts_with(cwd, FM_TRASH_DIR);
     for (int i = 0; i < ent_n; i++) {
         if (!fm_selected(i)) continue;
         char full[FM_PATH];
-        path_child(cwd, ents[i].name, ents[i].is_dir, full, sizeof(full));
-        if (ents[i].is_dir) {
-            for (int k = 0; k < FM_FLAT; k++) {
-                const char *name = A->fs->name(k);
-                if (name && starts_with(name, full)) A->fs->remove(name);
-            }
-        } else if (arctian_shell_trash(full) != 0) A->fs->remove(full);
+        path_child(cwd, ents[i].rel, 0, full, sizeof(full));
+        if (in_trash) {
+            fm_remove_tree(full, 0);
+        } else {
+            if (fm_trash_item(full, ents[i].is_dir) != 0)
+                fm_remove_tree(full, 0);
+        }
     }
     sel = -1;
     s_selected_n = 0;
@@ -956,8 +1182,8 @@ static void newdir_ok(const char *name) {
     trim_name(nm, sizeof(nm), name);
     if (!nm[0]) return;
     char full[FM_PATH];
-    path_child(cwd, nm, 1, full, sizeof(full));
-    if (flat_exists(full)) return;
+    path_child(cwd, nm, 0, full, sizeof(full));
+    if (fm_path_exists(full)) return;
     if (A && A->fs && A->fs->create_in) A->fs->create_in(cwd, nm, 1);
     refresh();
 }
@@ -968,7 +1194,7 @@ static void newfile_ok(const char *name) {
     if (!nm[0]) return;
     char full[FM_PATH];
     path_child(cwd, nm, 0, full, sizeof(full));
-    if (flat_exists(full)) return;
+    if (fm_path_exists(full)) return;
     if (A && A->fs && A->fs->create_in) {
         void *h = A->fs->create_in(cwd, nm, 0);
         if (h && A->fs->write) A->fs->write(h, "", 0);
@@ -1048,6 +1274,15 @@ static void fm_search_changed_cb(lv_event_t *e) {
     refresh();
 }
 
+static void rec_toggle_cb(lv_event_t *e) {
+    (void)e;
+    s_search_rec = !s_search_rec;
+    if (s_rec_btn) {
+        lv_obj_set_style_bg_color(s_rec_btn, lv_color_hex(s_search_rec ? FM_ACCENT : FM_RAISED), 0);
+    }
+    refresh();
+}
+
 static void fm_header_sort_cb(lv_event_t *e) {
     int by_count = (int)(intptr_t)lv_event_get_user_data(e);
     if (s_sort_count == by_count) s_sort_desc = !s_sort_desc;
@@ -1103,6 +1338,10 @@ static void fm_menu_action_cb(lv_event_t *e) {
         case 5: clip_sel(1); break;
         case 6: del_cb(0); break;
         case 7: refresh_cb(0); break;
+        case 8: fm_zip_compress_sel(); break;
+        case 9: fm_zip_extract_sel(); break;
+        case 10: props_cb(0); break;
+        case 11: do_paste(); break;
     }
 }
 
@@ -1188,17 +1427,26 @@ static void fm_menu_show(int x, int y, int empty_space) {
     lv_obj_remove_flag(context_menu, LV_OBJ_FLAG_SCROLLABLE);
 
     int has_sel = fm_has_selection();
+    const char *clip = arctian_clipboard_get();
+    int has_clip = clip && clip[0];
+    int is_zip = has_sel && sel >= 0 && sel < ent_n && !ents[sel].is_dir && ci_eq(ext_of(ents[sel].name), "zip");
+
     if (!empty_space) {
         fm_menu_add_item(context_menu, "Aç", "Enter", 0, has_sel, 1);
         fm_menu_separator(context_menu);
     }
-    fm_menu_add_item(context_menu, "Yeni klasör", "Ctrl+Shift+N", 1, 1, 0);
-    fm_menu_add_item(context_menu, "Yeni dosya", "Ctrl+N", 2, 1, 0);
+    fm_menu_add_item(context_menu, "Yeni klasör", "", 1, 1, 0);
+    fm_menu_add_item(context_menu, "Yeni dosya", "", 2, 1, 0);
+    if (has_clip) fm_menu_add_item(context_menu, "Yapıştır", "Ctrl+V", 11, 1, 0);
     fm_menu_separator(context_menu);
     if (!empty_space) {
         fm_menu_add_item(context_menu, "Yeniden adlandır", "F2", 3, has_sel, 0);
         fm_menu_add_item(context_menu, "Kopyala", "Ctrl+C", 4, has_sel, 0);
         fm_menu_add_item(context_menu, "Taşı", "Ctrl+X", 5, has_sel, 0);
+        fm_menu_separator(context_menu);
+        fm_menu_add_item(context_menu, "ZIP olarak sıkıştır", "", 8, has_sel, 0);
+        if (is_zip) fm_menu_add_item(context_menu, "ZIP'i buraya çıkar", "", 9, 1, 0);
+        fm_menu_add_item(context_menu, "Özellikler", "", 10, has_sel, 0);
         fm_menu_separator(context_menu);
         fm_menu_add_item(context_menu, "Sil", "Del", 6, has_sel, 0);
         fm_menu_separator(context_menu);
@@ -1269,15 +1517,15 @@ static void fm_input_poll_cb(lv_timer_t *t) {
         else {
             int found = -1;
             for (int i = 0; i < ent_n; i++) {
-                if (!rows[i]) continue;
+                if (!rows || !rows[i]) continue;
                 lv_area_t a;
                 lv_obj_get_coords(rows[i], &a);
                 if (x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2) { found = i; break; }
             }
             if (found >= 0) {
                 if (!fm_selected(found)) {
-                    for (int i = 0; i < ent_n; i++) s_multi[i] = 0;
-                    s_multi[found] = 1;
+                    if (s_multi) for (int i = 0; i < ent_n; i++) s_multi[i] = 0;
+                    if (s_multi) s_multi[found] = 1;
                     sel = found;
                     s_last_sel = found;
                     apply_sel();
@@ -1285,9 +1533,8 @@ static void fm_input_poll_cb(lv_timer_t *t) {
                 }
                 fm_menu_show(x, y, 0);
             } else {
-                lv_area_t a;
+                lv_area_t a, h;
                 lv_obj_get_coords(list_box, &a);
-                lv_area_t h;
                 lv_obj_get_coords(table_head, &h);
                 if ((x >= a.x1 && x <= a.x2 && y >= a.y1 && y <= a.y2) ||
                     (x >= h.x1 && x <= h.x2 && y >= h.y1 && y <= h.y2))
@@ -1300,9 +1547,6 @@ static void fm_input_poll_cb(lv_timer_t *t) {
 }
 
 static void build_ui(lv_obj_t *win) {
-    /* Govde yeni olusturulmus olabilir: olcumden once LVGL koordinatlarini
-     * tazele, yoksa W/H eski/varsayilan deger kalir ve duzen fallback'e duser
-     * (ilk acilista 820x500 olarak cizilme hatasi). */
     lv_obj_update_layout(win);
     int W = lv_obj_get_width(win), H = lv_obj_get_height(win);
     lv_obj_set_style_bg_color(win, lv_color_hex(FM_WINDOW), 0);
@@ -1311,9 +1555,15 @@ static void build_ui(lv_obj_t *win) {
     lv_obj_set_style_radius(win, 0, 0);
     lv_obj_set_style_pad_all(win, 0, 0);
     lv_obj_remove_flag(win, LV_OBJ_FLAG_SCROLLABLE);
-    if (W < 460) W = 820;
-    if (H < 280) H = 500;
-    const int toolbar_h = 52, status_h = 28, side_w = 184, detail_w = 260, head_h = 30;
+    if (W < 360) W = 820;
+    if (H < 240) H = 500;
+    const int toolbar_h = 52, status_h = 28, side_w = (W < 600) ? 148 : 184, head_h = 30;
+    int hide_det = (W < 760);
+    int detail_w = hide_det ? 0 : 260;
+    int search_w = (W < 760) ? 136 : 210;
+    int rec_w = 60;
+    int crumb_w = W - 56 - search_w - rec_w - 30;
+    if (crumb_w < 80) crumb_w = 80;
     int body_h = H - toolbar_h - status_h;
     if (body_h < 100) body_h = 100;
     list_w = W - side_w - detail_w;
@@ -1343,18 +1593,23 @@ static void build_ui(lv_obj_t *win) {
 
     crumb_box = lv_obj_create(toolbar);
     lv_obj_remove_style_all(crumb_box);
-    lv_obj_set_size(crumb_box, W - 320, 32);
+    lv_obj_set_size(crumb_box, crumb_w, 32);
     lv_obj_set_pos(crumb_box, 56, 10);
     lv_obj_set_flex_flow(crumb_box, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(crumb_box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(crumb_box, 6, 0);
     lv_obj_remove_flag(crumb_box, LV_OBJ_FLAG_SCROLLABLE);
 
+    s_rec_btn = mk_btn(toolbar, "Alt kl.", rec_w, 32, FM_RAISED, rec_toggle_cb, 0);
+    lv_obj_set_style_border_width(s_rec_btn, 1, 0);
+    lv_obj_set_style_border_color(s_rec_btn, lv_color_hex(FM_BORDER), 0);
+    lv_obj_align(s_rec_btn, LV_ALIGN_RIGHT_MID, -(search_w + 20), 0);
+
     s_search = lv_textarea_create(toolbar);
     lv_textarea_set_one_line(s_search, true);
-    lv_obj_set_scrollbar_mode(s_search, LV_SCROLLBAR_MODE_OFF);  /* sagdaki dikey cizgi */
+    lv_obj_set_scrollbar_mode(s_search, LV_SCROLLBAR_MODE_OFF);
     lv_textarea_set_cursor_click_pos(s_search, true);
-    lv_obj_set_size(s_search, 240, 32);
+    lv_obj_set_size(s_search, search_w, 32);
     lv_obj_align(s_search, LV_ALIGN_RIGHT_MID, -14, 0);
     lv_textarea_set_placeholder_text(s_search, "Ara");
     lv_obj_set_style_bg_color(s_search, lv_color_hex(FM_RAISED), 0);
@@ -1467,12 +1722,11 @@ static void build_ui(lv_obj_t *win) {
     lv_obj_align(s_empty_lbl, LV_ALIGN_TOP_LEFT, side_w + 12,
                  toolbar_h + head_h + (body_h - head_h) / 2 - 10);
     lv_obj_add_flag(s_empty_lbl, LV_OBJ_FLAG_HIDDEN);
-    s_empty_btn = 0;
 
     ui_det = lv_obj_create(win);
     lv_obj_remove_style_all(ui_det);
-    lv_obj_set_pos(ui_det, W - detail_w, toolbar_h);
-    lv_obj_set_size(ui_det, detail_w, body_h);
+    lv_obj_set_pos(ui_det, W - 260, toolbar_h);
+    lv_obj_set_size(ui_det, 260, body_h);
     lv_obj_set_style_bg_color(ui_det, lv_color_hex(FM_WINDOW), 0);
     lv_obj_set_style_bg_opa(ui_det, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(ui_det, 1, 0);
@@ -1481,10 +1735,9 @@ static void build_ui(lv_obj_t *win) {
     lv_obj_set_style_pad_all(ui_det, 20, 0);
     lv_obj_set_style_pad_row(ui_det, 6, 0);
     lv_obj_set_flex_flow(ui_det, LV_FLEX_FLOW_COLUMN);
-    /* Icerik ustten hizalanir; dikey ortalama secimden sonra basligi
-     * panelin ortasina kaydiriyordu. */
     lv_obj_set_flex_align(ui_det, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_remove_flag(ui_det, LV_OBJ_FLAG_SCROLLABLE);
+    if (hide_det) lv_obj_add_flag(ui_det, LV_OBJ_FLAG_HIDDEN);
 
     det_name = lv_label_create(ui_det);
     lv_label_set_text(det_name, "Bir öğe seçin");
@@ -1538,12 +1791,21 @@ static void fm_relayout(lv_obj_t *win) {
     int outer_w = shell ? lv_obj_get_width(shell) : lv_obj_get_width(win) + (is_max ? 0 : 4);
     int outer_h = shell ? lv_obj_get_height(shell) : lv_obj_get_height(win) + 40;
     int W = is_max ? outer_w : (outer_w - 4), H = outer_h - 40;
-    if (W < 460 || H < 280) return;
-    const int toolbar_h = 52, status_h = 28, side_w = 184, detail_w = 260, head_h = 30;
+    if (W < 360 || H < 240) return;
+
+    const int toolbar_h = 52, status_h = 28, head_h = 30;
+    int side_w = (W < 600) ? 148 : 184;
+    int hide_det = (W < 760);
+    int detail_w = hide_det ? 0 : 260;
+    int search_w = hide_det ? 136 : 210;
+    int rec_w = 60;
+    int crumb_w = W - 56 - search_w - rec_w - 30;
+    if (crumb_w < 80) crumb_w = 80;
     int body_h = H - toolbar_h - status_h;
     if (body_h < 100) body_h = 100;
     list_w = W - side_w - detail_w;
     if (list_w < 100) list_w = 100;
+
     if (shell) {
         lv_obj_t *titlebar = lv_obj_get_child(shell, 0);
         if (titlebar) {
@@ -1553,46 +1815,47 @@ static void fm_relayout(lv_obj_t *win) {
         lv_obj_set_pos(win, is_max ? 0 : 2, 40);
         lv_obj_set_size(win, W, H);
     }
-    if (crumb_box) { lv_obj_set_pos(crumb_box, 56, 10); lv_obj_set_size(crumb_box, W - 320, 32); }
+    if (crumb_box) { lv_obj_set_pos(crumb_box, 56, 10); lv_obj_set_size(crumb_box, crumb_w, 32); }
     if (ui_tb) lv_obj_set_size(ui_tb, W, toolbar_h);
     if (back_btn) lv_obj_set_pos(back_btn, 14, (toolbar_h - 32) / 2);
-    if (s_search) lv_obj_align(s_search, LV_ALIGN_RIGHT_MID, -14, 0);
+    if (s_rec_btn) lv_obj_align(s_rec_btn, LV_ALIGN_RIGHT_MID, -(search_w + 20), 0);
+    if (s_search) { lv_obj_set_size(s_search, search_w, 32); lv_obj_align(s_search, LV_ALIGN_RIGHT_MID, -14, 0); }
     if (ui_side) lv_obj_set_size(ui_side, side_w, body_h);
     if (table_head) { lv_obj_set_pos(table_head, side_w, toolbar_h); lv_obj_set_size(table_head, list_w, head_h); }
     if (head_name) lv_obj_set_width(lv_obj_get_parent(head_name), list_w - 100);
     if (list_box) { lv_obj_set_pos(list_box, side_w, toolbar_h + head_h); lv_obj_set_size(list_box, list_w, body_h - head_h); }
     if (s_empty_lbl) {
         lv_obj_set_width(s_empty_lbl, list_w - 24);
-        lv_obj_set_pos(s_empty_lbl, side_w + 12,
-                       toolbar_h + head_h + (body_h - head_h) / 2 - 10);
+        lv_obj_set_pos(s_empty_lbl, side_w + 12, toolbar_h + head_h + (body_h - head_h) / 2 - 10);
     }
-    if (ui_det) { lv_obj_set_pos(ui_det, W - detail_w, toolbar_h); lv_obj_set_size(ui_det, detail_w, body_h); }
+    if (ui_det) {
+        if (hide_det) {
+            lv_obj_add_flag(ui_det, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(ui_det, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(ui_det, W - detail_w, toolbar_h);
+            lv_obj_set_size(ui_det, detail_w, body_h);
+        }
+    }
     if (ui_st) { lv_obj_set_pos(ui_st, 0, H - status_h); lv_obj_set_size(ui_st, W, status_h); }
     if (context_menu) fm_menu_close();
-    if (ent_n) refresh();
+    refresh();
 }
 
-/* Pencere govdesi boyut degistiginde (snap/buyut/kucult) yeniden akis */
 static void fm_resize_cb(lv_event_t *e) {
     if (lv_event_get_code(e) == LV_EVENT_SIZE_CHANGED)
         fm_relayout(lv_event_get_target(e));
 }
 
-/* Ilk acilista koordinatlar tazelenmeden cizim yapilmisti; 300 ms sonra
- * bir kez daha akis (timer tek seferlik, cb'de kendini temizler). */
 static void fm_relayout_timer_cb(lv_timer_t *t) {
     (void)t;
-    relayout_timer = 0;   /* repeat 1 oldugu icin LVGL sonra siler */
+    relayout_timer = 0;
     if (fm_body) fm_relayout(fm_body);
 }
 
-
-
 /* ------------------------------------------------------------------ */
-/* Dosya islemleri: kopya/taşı, pano, geri al                         */
+/* Dosya/Klasör kopyalama, taşıma, ZIP                                */
 /* ------------------------------------------------------------------ */
-
-/* "C:/belgeler/a.txt" -> dir="C:/belgeler", nm="a.txt" (kokta dir="") */
 static void fm_split(const char *full, char *dir, int dcap, char *nm, int ncap) {
     int last = -1;
     for (int i = 0; full[i]; i++) if (full[i] == '/') last = i;
@@ -1605,96 +1868,68 @@ static void fm_split(const char *full, char *dir, int dcap, char *nm, int ncap) 
 
 static void fm_full_in(const char *dir, const char *nm, char *out, int cap) {
     out[0] = 0;
-    if (dir[0]) { scat(out, cap, dir); scat(out, cap, "/"); }
+    if (dir[0]) { scat(out, cap, dir); int l = slen(out); if (l > 0 && out[l - 1] != '/') scat(out, cap, "/"); }
     scat(out, cap, nm);
 }
 
-/* Dosyanin tam yolu var mi? (stat yoksa duz ad AFS listesinde aranir) */
-static int fm_path_exists(const char *full) {
-    if (!A || !A->fs) return 0;
-    if (A->fs->stat) {
-        asi_stat_t st;
-        if (A->fs->stat(full, &st) == 0) return 1;
-    }
-    return flat_exists(full);
-}
-
-/* Dosyayi handle olarak ac (kok dosya: find(0, ad); klasor: find_in) */
-static void *fm_src_open(const char *full, char *nm_out, int cap) {
-    if (!A || !A->fs) return 0;
-    char dir[FM_PATH], nm[FM_NAME];
-    fm_split(full, dir, sizeof(dir), nm, sizeof(nm));
-    scpy(nm_out, cap, nm);
-    if (!dir[0]) return A->fs->find ? A->fs->find(0, nm) : 0;
-    return A->fs->find_in ? A->fs->find_in(dir, nm) : 0;
-}
-
-/* Handle'lar arasi kopya (4 KB parcalar halinde) */
-static int fm_copy_h(void *sh, void *dh) {
-    if (!sh || !dh || !A->fs->read || !A->fs->write) return 0;
-    char buf[4096];
-    uint32_t n;
-    while ((n = A->fs->read(sh, buf, sizeof(buf))) > 0) {
-        if (A->fs->write(dh, buf, n) != 0) return 0;
-        if (n < sizeof(buf)) break;
-    }
-    return 1;
-}
-
-/* Dosyayi hedef klasore kopyala. Cakismada " (kopya)" ekler.
- * dst_nm_out: olusan ad. 1 = basarili. */
 static int fm_copy_one(const char *src_full, const char *dst_dir,
                        char *dst_nm_out, int cap) {
-    if (!A || !A->fs) return 0;
-    char snm[FM_NAME];
-    void *sh = fm_src_open(src_full, snm, sizeof(snm));
-    if (!sh) return 0;
+    if (!A || !A->fs || !A->fs->stat) return 0;
+    asi_stat_t st;
+    if (A->fs->stat(src_full, &st) != 0) return 0;
+
+    char sdir[FM_PATH], snm[FM_NAME];
+    fm_split(src_full, sdir, sizeof(sdir), snm, sizeof(snm));
+    if (!snm[0]) return 0;
+
+    if (st.is_dir) {
+        char sp_slash[FM_PATH], dp_slash[FM_PATH];
+        scpy(sp_slash, sizeof(sp_slash), src_full); scat(sp_slash, sizeof(sp_slash), "/");
+        scpy(dp_slash, sizeof(dp_slash), dst_dir); scat(dp_slash, sizeof(dp_slash), "/");
+        if (starts_with(dp_slash, sp_slash)) return 0; /* Kendisinin icine kopyalanamaz */
+    }
+
     char cand[FM_NAME];
     scpy(cand, FM_NAME, snm);
-    for (int t = 0; t < 4; t++) {
+    for (int t = 0; t < 6; t++) {
         char full[FM_PATH];
         fm_full_in(dst_dir, cand, full, sizeof(full));
         if (!fm_path_exists(full)) {
-            void *dh = dst_dir[0]
-                       ? (A->fs->create_in ? A->fs->create_in(dst_dir, cand, 0) : 0)
-                       : (A->fs->create ? A->fs->create(0, cand, 0) : 0);
-            if (dh) {
-                if (dst_nm_out) scpy(dst_nm_out, cap, cand);
-                return fm_copy_h(sh, dh);
-            }
+            if (dst_nm_out) scpy(dst_nm_out, cap, cand);
+            if (st.is_dir) return fm_copy_tree_into(src_full, full, 0);
+            return fm_copy_file_data(src_full, dst_dir, cand);
         }
-        char alt[FM_NAME];
+        char alt[FM_NAME], nb[8];
         scpy(alt, FM_NAME, snm);
-        scat(alt, FM_NAME, t == 0 ? " (kopya)" : (t == 1 ? " (kopya 2)" : " (kopya 3)"));
+        if (t == 0) scat(alt, FM_NAME, " (kopya)");
+        else { u2s(nb, sizeof(nb), (uint32_t)(t + 1)); scat(alt, FM_NAME, " (kopya "); scat(alt, FM_NAME, nb); scat(alt, FM_NAME, ")"); }
         scpy(cand, FM_NAME, alt);
     }
     return 0;
 }
 
 static void push_op(const fm_op_t *op) {
-    if (s_op_n >= FM_UNDO_LV) {            /* yer ac: en eskisini at */
+    if (s_op_n >= FM_UNDO_LV) {
         for (int i = 1; i < FM_UNDO_LV; i++) s_ops[i - 1] = s_ops[i];
         s_op_n--;
     }
     s_ops[s_op_n++] = *op;
 }
 
-/* Secili dosyalari ('\n' ile ayrilmis yollar) panoya yaz; cut=1: kes modu */
 static void clip_sel(int cut) {
     static char acc[2048];
     acc[0] = 0;
     int n = 0;
     for (int i = 0; i < ent_n; i++) {
-        if (!s_multi[i] && i != sel) continue;
-        if (ents[i].is_dir) continue;       /* klasorler pano disi */
+        if (!fm_selected(i)) continue;
         char full[FM_PATH];
-        path_child(cwd, ents[i].name, 0, full, sizeof(full));
+        path_child(cwd, ents[i].rel, 0, full, sizeof(full));
         if (n) scat(acc, sizeof(acc), "\n");
         scat(acc, sizeof(acc), full);
         n++;
     }
     if (!n) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Seçili dosya yok");
+        if (status_lbl) lv_label_set_text(status_lbl, "Seçili öge yok");
         return;
     }
     arctian_clipboard_set(acc);
@@ -1702,16 +1937,15 @@ static void clip_sel(int cut) {
     if (status_lbl) {
         char st[64];
         u2s(st, sizeof(st), (uint32_t)n);
-        scat(st, sizeof(st), cut ? " öğe kesildi" : " öğe kopyalandı");
+        scat(st, sizeof(st), cut ? " öge kesildi" : " öge kopyalandı");
         lv_label_set_text(status_lbl, st);
     }
 }
 
-/* Panodaki dosya yollarini bulundugun klasore yapistir (kes modunda tasi) */
 static void do_paste(void) {
     const char *clip = arctian_clipboard_get();
     if (!clip || !clip[0]) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Panoda dosya yok");
+        if (status_lbl) lv_label_set_text(status_lbl, "Panoda öge yok");
         return;
     }
     char srcs[FM_UNDO_FILES][FM_PATH];
@@ -1723,12 +1957,12 @@ static void do_paste(void) {
         while (*p && *p != '\n' && k < FM_PATH - 1) line[k++] = *p++;
         line[k] = 0;
         if (*p == '\n') p++;
-        if (!line[0] || !fm_path_exists(line)) continue;   /* metin satiri: atla */
+        if (!line[0] || !fm_path_exists(line)) continue;
         scpy(srcs[n], FM_PATH, line);
         n++;
     }
     if (!n) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Panoda dosya yok");
+        if (status_lbl) lv_label_set_text(status_lbl, "Panoda öge yok");
         return;
     }
     fm_op_t op;
@@ -1742,39 +1976,100 @@ static void do_paste(void) {
         scpy(op.src[op.n], FM_PATH, srcs[i]);
         scpy(op.dst[op.n], FM_PATH, dfull);
         op.n++;
-        if (s_cut && A->fs->remove) A->fs->remove(srcs[i]);
+        if (s_cut) fm_remove_tree(srcs[i], 0);
     }
     if (s_cut) s_cut = 0;
     if (op.n > 0) push_op(&op);
     if (status_lbl) {
         char st[64];
         u2s(st, sizeof(st), (uint32_t)op.n);
-        scat(st, sizeof(st), " öğe yapıştırıldı");
+        scat(st, sizeof(st), " öge yapıştırıldı");
         lv_label_set_text(status_lbl, st);
     }
     refresh();
 }
 
-/* ---- 0.6: Ozellikler penceresi ----
- * Secili ogenin yolu, turu, boyutu ve izinlerini gosterir. Izinler `fs->stat`
- * uzerinden gelir (AFS mode alani; 0644 / 0755 gibi). */
+static void fm_zip_compress_sel(void) {
+    if (!fm_has_selection() || !A || !A->mem || !A->mem->alloc) return;
+    int first = -1, cnt = 0;
+    for (int i = 0; i < ent_n; i++) {
+        if (!fm_selected(i)) continue;
+        if (first < 0) first = i;
+        cnt++;
+    }
+    if (first < 0 || cnt <= 0) return;
+
+    const char **paths = (const char **)A->mem->alloc((size_t)cnt * sizeof(const char *));
+    char *buf = (char *)A->mem->alloc((size_t)cnt * FM_PATH);
+    if (!paths || !buf) {
+        if (paths) A->mem->free(paths);
+        if (buf) A->mem->free(buf);
+        return;
+    }
+    int k = 0;
+    for (int i = 0; i < ent_n; i++) {
+        if (!fm_selected(i)) continue;
+        char *dst = buf + k * FM_PATH;
+        path_child(cwd, ents[i].rel, 0, dst, FM_PATH);
+        paths[k++] = dst;
+    }
+
+    char out_zip[FM_PATH], zname[FM_NAME];
+    scpy(zname, sizeof(zname), ents[first].name);
+    scat(zname, sizeof(zname), ".zip");
+    path_child(cwd, zname, 0, out_zip, sizeof(out_zip));
+
+    int added = 0;
+    int rc = mz_zip_create(A, out_zip, paths, k, 1, &added);
+    A->mem->free(paths);
+    A->mem->free(buf);
+
+    if (rc == 0) {
+        if (status_lbl) {
+            char st[96];
+            scpy(st, sizeof(st), "ZIP oluşturuldu: ");
+            scat(st, sizeof(st), zname);
+            lv_label_set_text(status_lbl, st);
+        }
+        refresh();
+    } else if (status_lbl) {
+        lv_label_set_text(status_lbl, "ZIP oluşturulamadı");
+    }
+}
+
+static void fm_zip_extract_sel(void) {
+    if (sel < 0 || sel >= ent_n || ents[sel].is_dir) return;
+    char zfull[FM_PATH];
+    path_child(cwd, ents[sel].rel, 0, zfull, sizeof(zfull));
+    int ext = 0;
+    if (mz_zip_extract(A, zfull, cwd, &ext) == 0) {
+        if (status_lbl) {
+            char st[64], nb[12];
+            u2s(nb, sizeof(nb), (uint32_t)ext);
+            scpy(st, sizeof(st), "ZIP çıkarıldı: ");
+            scat(st, sizeof(st), nb);
+            scat(st, sizeof(st), " öge");
+            lv_label_set_text(status_lbl, st);
+        }
+        refresh();
+    } else if (status_lbl) {
+        lv_label_set_text(status_lbl, "ZIP çıkarılamadı");
+    }
+}
+
 static void props_close_cb(lv_event_t *e) {
     lv_obj_t *ov = (lv_obj_t *)lv_event_get_user_data(e);
     if (ov) lv_obj_delete(ov);
 }
 
-static void props_now_cb(lv_event_t *e) {
-    (void)e;
-}
-
 static void props_show(void) {
     if (sel < 0 || sel >= ent_n) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Once bir oge secin");
+        if (status_lbl) lv_label_set_text(status_lbl, "Önce bir öge seçin");
         return;
     }
     fm_ent_t *en = &ents[sel];
     char full[FM_PATH];
-    path_child(cwd, en->name, en->is_dir, full, sizeof(full));
+    path_child(cwd, en->rel, en->is_dir, full, sizeof(full));
 
     asi_stat_t st;
     int have = 0;
@@ -1804,26 +2099,21 @@ static void props_show(void) {
     lv_obj_remove_flag(p, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *t = lv_label_create(p);
-    lv_label_set_text(t, "Ozellikler");
+    lv_label_set_text(t, "Özellikler");
     lv_obj_set_style_text_color(t, lv_color_hex(ADL_TEXT), 0);
+    fm_style_font(t, fm_heading_font());
 
-    const char *rows[4];
-    char v0[FM_PATH + 8], v1[40], v2[64], v3[96];
-    /* Ad */
+    char v0[FM_PATH + 8], v1[FM_NAME], v2[64], v3[96], perm[32];
     scpy(v1, sizeof(v1), en->name);
-    /* Tur */
-    if (en->is_dir) scpy(v2, sizeof(v2), "Klasor");
+    if (en->is_dir) scpy(v2, sizeof(v2), "Klasör");
     else {
         const char *ex = ext_of(en->name);
         if (ex[0]) { scpy(v2, sizeof(v2), "Dosya ("); scat(v2, sizeof(v2), ex); scat(v2, sizeof(v2), ")"); }
         else scpy(v2, sizeof(v2), "Dosya");
     }
-    /* Boyut */
     if (have && !st.is_dir) human(v3, sizeof(v3), st.size);
     else if (en->is_dir) scpy(v3, sizeof(v3), "-");
     else scpy(v3, sizeof(v3), "bilinmiyor");
-    /* Izinler */
-    char perm[32];
     if (have) {
         uint32_t m = st.mode & 0777u;
         perm[0] = '0';
@@ -1832,12 +2122,10 @@ static void props_show(void) {
         perm[3] = (char)('0' + (m & 7));
         perm[4] = 0;
     } else scpy(perm, sizeof(perm), "-");
-    /* Yol */
     scpy(v0, sizeof(v0), full);
 
-    const char *labels[5] = {"Ad", "Tur", "Boyut", "Izinler", "Yol"};
+    const char *labels[5] = {"Ad", "Tür", "Boyut", "İzinler", "Yol"};
     const char *vals[5] = {v1, v2, v3, perm, v0};
-    rows[0] = 0; (void)rows;
     for (int i = 0; i < 5; i++) {
         lv_obj_t *r = lv_obj_create(p);
         lv_obj_remove_style_all(r);
@@ -1846,12 +2134,14 @@ static void props_show(void) {
         lv_obj_t *l = lv_label_create(r);
         lv_label_set_text(l, labels[i]);
         lv_obj_set_style_text_color(l, lv_color_hex(ADL_TEXT_DIM), 0);
+        fm_style_font(l, fm_text_font());
         lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_t *vl = lv_label_create(r);
         lv_label_set_text(vl, vals[i]);
         lv_label_set_long_mode(vl, LV_LABEL_LONG_DOT);
         lv_obj_set_width(vl, 360);
         lv_obj_set_style_text_color(vl, lv_color_hex(ADL_TEXT), 0);
+        fm_style_font(vl, fm_text_font());
         lv_obj_align(vl, LV_ALIGN_RIGHT_MID, 0, 0);
     }
 
@@ -1865,51 +2155,53 @@ static void props_show(void) {
     lv_obj_t *bl = lv_label_create(b);
     lv_label_set_text(bl, "Kapat");
     lv_obj_set_style_text_color(bl, lv_color_hex(0xFFFFFF), 0);
+    fm_style_font(bl, fm_text_font());
     lv_obj_center(bl);
-    (void)props_now_cb;
 }
 
 static void props_cb(lv_event_t *e) { (void)e; props_show(); }
 
-/* 0.6: secili ogeyi yeniden adlandir. Yerel AFS rename kullanilir; dosya
- * icerigi kopyalanmaz, yalnizca ad degisir (buyuk dosyada aninda biter). */
 static void rename_ok(const char *name) {
     char nm[FM_NAME];
     trim_name(nm, sizeof(nm), name);
     if (!nm[0] || sel < 0 || sel >= ent_n) return;
     if (seq(nm, ents[sel].name)) return;
 
+    char parent[FM_PATH], orig_nm[FM_NAME];
+    char cur_full[FM_PATH];
+    path_child(cwd, ents[sel].rel, 0, cur_full, sizeof(cur_full));
+    fm_split(cur_full, parent, sizeof(parent), orig_nm, sizeof(orig_nm));
+
     char from[FM_PATH], to[FM_PATH];
-    path_child(cwd, ents[sel].name, ents[sel].is_dir, from, sizeof(from));
-    path_child(cwd, nm, ents[sel].is_dir, to, sizeof(to));
-    if (flat_exists(to)) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Bu adda bir oge zaten var");
+    path_child(parent, orig_nm, ents[sel].is_dir, from, sizeof(from));
+    path_child(parent, nm, ents[sel].is_dir, to, sizeof(to));
+    if (fm_path_exists(to)) {
+        if (status_lbl) lv_label_set_text(status_lbl, "Bu adda bir öge zaten var");
         return;
     }
 
     int rc = -1;
     if (A && A->fs && A->fs->rename) rc = A->fs->rename(from, to);
     if (rc != 0) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Yeniden adlandirilamadi");
+        if (status_lbl) lv_label_set_text(status_lbl, "Yeniden adlandırılamadı");
         return;
     }
-    if (status_lbl) lv_label_set_text(status_lbl, "Yeniden adlandirildi");
+    if (status_lbl) lv_label_set_text(status_lbl, "Yeniden adlandırıldı");
     refresh();
 }
 
 static void rename_cb(lv_event_t *e) {
     (void)e;
     if (sel < 0 || sel >= ent_n) {
-        if (status_lbl) lv_label_set_text(status_lbl, "Once bir oge secin");
+        if (status_lbl) lv_label_set_text(status_lbl, "Önce bir öge seçin");
         return;
     }
-    char title[80];
-    scpy(title, sizeof(title), "Yeniden adlandir: ");
+    char title[128];
+    scpy(title, sizeof(title), "Yeniden adlandır: ");
     scat(title, sizeof(title), ents[sel].name);
     prompt_open(title, ents[sel].name, rename_ok);
 }
 
-/* Son islemi geri al: kopya = hedefi sil; tasi = geri kopyala + hedefi sil */
 static void do_undo(void) {
     if (s_op_n <= 0) {
         if (status_lbl) lv_label_set_text(status_lbl, "Geri alınacak işlem yok");
@@ -1919,35 +2211,35 @@ static void do_undo(void) {
     fm_op_t op = s_ops[--s_op_n];
     for (int i = 0; i < op.n; i++) {
         if (op.type == 1) {
-            if (A->fs->remove) A->fs->remove(op.dst[i]);
+            fm_remove_tree(op.dst[i], 0);
         } else {
-            /* tasi geri al: dst -> src yolu */
             char sdir[FM_PATH], snm[FM_NAME];
             fm_split(op.src[i], sdir, sizeof(sdir), snm, sizeof(snm));
-            void *sh = fm_src_open(op.dst[i], snm, sizeof(snm));
-            void *dh = sdir[0]
-                       ? (A->fs->create_in ? A->fs->create_in(sdir, snm, 0) : 0)
-                       : (A->fs->create ? A->fs->create(0, snm, 0) : 0);
-            fm_copy_h(sh, dh);
-            if (A->fs->remove) A->fs->remove(op.dst[i]);
+            asi_stat_t st;
+            if (A->fs->stat && A->fs->stat(op.dst[i], &st) == 0 && st.is_dir) {
+                if (fm_copy_tree_into(op.dst[i], op.src[i], 0))
+                    fm_remove_tree(op.dst[i], 0);
+            } else {
+                if (fm_copy_file_data(op.dst[i], sdir, snm))
+                    A->fs->remove(op.dst[i]);
+            }
         }
     }
     if (status_lbl) lv_label_set_text(status_lbl, "İşlem geri alındı");
     refresh();
 }
 
-/* Secili satiri hedef klasore tasi (surukle-birak) */
 static void do_move_to(int i, const char *dst_dir) {
     if (!A || !A->fs || !A->fs->remove) return;
     if (seq(cwd, dst_dir)) return;
     char full[FM_PATH];
-    path_child(cwd, ents[i].name, 0, full, sizeof(full));
+    path_child(cwd, ents[i].rel, 0, full, sizeof(full));
     char dname[FM_NAME];
     if (!fm_copy_one(full, dst_dir, dname, sizeof(dname))) {
         if (status_lbl) lv_label_set_text(status_lbl, "Taşınamadı");
         return;
     }
-    A->fs->remove(full);
+    fm_remove_tree(full, 0);
     fm_op_t op;
     op.type = 2;
     op.n = 1;
@@ -1958,15 +2250,13 @@ static void do_move_to(int i, const char *dst_dir) {
     refresh();
 }
 
-/* Masaustu/CLI kisayollari: pencereye yonlendirilir      */
 static void fm_hotkey(int hk) {
-    if (hk == 3) clip_sel(0);        /* Ctrl+C kopyala */
-    else if (hk == 4) clip_sel(1);   /* Ctrl+X kes */
-    else if (hk == 5) do_paste();    /* Ctrl+V yapistir */
-    else if (hk == 7) do_undo();     /* Ctrl+Z geri al */
+    if (hk == 3) clip_sel(0);
+    else if (hk == 4) clip_sel(1);
+    else if (hk == 5) do_paste();
+    else if (hk == 7) do_undo();
 }
 
-/* Baska bir yerden bu pencereye birakilan dosya -> kopyala      */
 static int fm_drop_cb(const char *src) {
     if (!src || !src[0] || !fm_path_exists(src)) return 0;
     char dname[FM_NAME];
@@ -1983,19 +2273,7 @@ static int fm_drop_cb(const char *src) {
     return 1;
 }
 
-/* ---- Arama kutusu + duzenlenebilir yol --------- */
-
-static void search_changed_cb(lv_event_t *e) {
-    (void)e;
-    if (!s_search) return;
-    scpy(s_filter, sizeof(s_filter), lv_textarea_get_text(s_search));
-    if (!s_filter[0]) {
-        /* filtre kalkti: keypad grubunu masaustuna geri birak */
-        lv_indev_t *kp = lv_port_get_keypad();
-        if (kp) lv_indev_set_group(kp, 0);
-    }
-    refresh();
-}
+static void search_changed_cb(lv_event_t *e) { fm_search_changed_cb(e); }
 
 static void search_click_cb(lv_event_t *e) {
     (void)e;
@@ -2008,25 +2286,6 @@ static void search_click_cb(lv_event_t *e) {
     lv_group_focus_obj(s_search);
 }
 
-static void path_ok(const char *p) {
-    char t[FM_PATH];
-    int i = 0;
-    if (p) while (p[i] == ' ') i++;
-    scpy(t, FM_PATH, p ? p + i : "");
-    int n = slen(t);
-    while (n > 0 && t[n - 1] == ' ') t[--n] = 0;
-    if (!t[0]) return;
-    scpy(cwd, FM_PATH, t);
-    sel = -1;
-    refresh();
-}
-
-static void path_click_cb(lv_event_t *e) {
-    (void)e;
-    prompt_open("Yola Git", cwd, path_ok);
-}
-
-
 static void prompt_close(void) {
     lv_indev_t *kp = lv_port_get_keypad();
     if (kp) lv_indev_set_group(kp, 0);
@@ -2037,7 +2296,7 @@ static void prompt_close(void) {
 
 static void prompt_ok_cb(lv_event_t *e) {
     (void)e;
-    char buf[FM_PATH];      /* yol girişi uzun olabilir */
+    char buf[FM_PATH];
     const char *t = g_prompt_ta ? lv_textarea_get_text(g_prompt_ta) : "";
     if (!t || !t[0]) t = g_prompt_ta ? lv_textarea_get_placeholder_text(g_prompt_ta) : "";
     scpy(buf, FM_PATH, t ? t : "");
@@ -2046,10 +2305,7 @@ static void prompt_ok_cb(lv_event_t *e) {
     if (fn) fn(buf);
 }
 
-static void prompt_cancel_cb(lv_event_t *e) {
-    (void)e;
-    prompt_close();
-}
+static void prompt_cancel_cb(lv_event_t *e) { (void)e; prompt_close(); }
 
 static void prompt_open(const char *title, const char *def, void (*ok)(const char *)) {
     prompt_close();
@@ -2104,71 +2360,43 @@ static void prompt_open(const char *title, const char *def, void (*ok)(const cha
     mk_btn(rowc, "Tamam", 90, 36, ADL_ACCENT, prompt_ok_cb, 0);
 
     g_prompt_ov = ov;
-
     if (!g_group) g_group = lv_group_create();
     lv_group_remove_all_objs(g_group);
     lv_group_add_obj(g_group, g_prompt_ta);
-    /* Enter da Tamam gibi onaylar (tek satir kutusunda READY olayi)     */
     lv_obj_add_event_cb(g_prompt_ta, prompt_ok_cb, LV_EVENT_READY, 0);
     lv_indev_t *kp = lv_port_get_keypad();
     if (kp) lv_indev_set_group(kp, g_group);
     lv_group_focus_obj(g_prompt_ta);
 }
 
-static void prompt_newdir_cb(lv_event_t *e) {
-    (void)e;
-    prompt_open("Yeni Klasör", "yeni_klasor", newdir_ok);
-}
-
-static void prompt_newfile_cb(lv_event_t *e) {
-    (void)e;
-    prompt_open("Yeni Dosya", "yeni_dosya.txt", newfile_ok);
-}
+static void prompt_newdir_cb(lv_event_t *e) { (void)e; prompt_open("Yeni Klasör", "yeni_klasor", newdir_ok); }
+static void prompt_newfile_cb(lv_event_t *e) { (void)e; prompt_open("Yeni Dosya", "yeni_dosya.txt", newfile_ok); }
 
 static void fm_del_cb(lv_event_t *e) {
     (void)e;
     prompt_close();
     fm_menu_close();
+    clear_det_img();
     if (input_timer) { lv_timer_delete(input_timer); input_timer = 0; }
     if (relayout_timer) { lv_timer_delete(relayout_timer); relayout_timer = 0; }
     if (fm_font) { lv_tiny_ttf_destroy(fm_font); fm_font = 0; }
     if (fm_font_small) { lv_tiny_ttf_destroy(fm_font_small); fm_font_small = 0; }
     if (fm_font_bold) { lv_tiny_ttf_destroy(fm_font_bold); fm_font_bold = 0; }
-    path_lbl = 0;
-    crumb_box = 0;
-    table_head = 0;
-    list_box = 0;
-    ui_tb = 0;
-    back_btn = 0;
-    context_menu = 0;
-    context_backdrop = 0;
-    fm_body = 0;
-    ui_side = 0;
-    ui_det = 0;
-    ui_st = 0;
-    status_lbl = 0;
-    det_name = 0;
-    det_meta = 0;
-    det_prev = 0;
-    det_hint = 0;
-    head_name = 0;
-    head_count = 0;
+    if (A && A->mem && A->mem->free) {
+        if (ents) A->mem->free(ents);
+        if (rows) A->mem->free(rows);
+        if (s_multi) A->mem->free(s_multi);
+    }
+    ents = 0; rows = 0; s_multi = 0; ent_cap = 0;
+    path_lbl = 0; crumb_box = 0; table_head = 0; list_box = 0; ui_tb = 0; back_btn = 0;
+    context_menu = 0; context_backdrop = 0; fm_body = 0; ui_side = 0; ui_det = 0; ui_st = 0;
+    status_lbl = 0; det_name = 0; det_meta = 0; det_prev = 0; det_hint = 0;
+    head_name = 0; head_count = 0;
     for (int i = 0; i < FM_NAV; i++) nav_btns[i] = 0;
-    s_search = 0;
-    s_filter[0] = 0;
-    s_drag_i = -1;
-    s_drag_on = 0;
-    s_cut = 0;
-    s_empty_lbl = 0;
-    s_empty_btn = 0;
-    s_history_n = 0;
-    s_selected_n = 0;
-    s_usb_poll_ticks = 0;
-    s_prev_right = 0;
-    s_prev_left = 0;
-    sel = -1;
-    s_last_sel = -1;
-    ent_n = 0;
+    s_search = 0; s_rec_btn = 0; s_search_rec = 0; s_filter[0] = 0;
+    s_drag_i = -1; s_drag_on = 0; s_cut = 0; s_empty_lbl = 0;
+    s_history_n = 0; s_selected_n = 0; s_usb_poll_ticks = 0;
+    s_prev_right = 0; s_prev_left = 0; sel = -1; s_last_sel = -1; ent_n = 0;
     A = 0;
 }
 
@@ -2178,9 +2406,9 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     fm_font = lv_tiny_ttf_create_data(font_plex, font_plex_len, 14);
     fm_font_small = lv_tiny_ttf_create_data(font_plex, font_plex_len, 12);
     fm_font_bold = lv_tiny_ttf_create_data(font_plex_sb, font_plex_sb_len, 16);
+    fm_ensure_cap(FM_CAP_INIT);
+
     lv_obj_t *shell = lv_obj_get_parent(win);
-    /* Pencere yeni olusturuldu: koordinatlar tazelenmeden olculurse govde
-     * eski/varsayilan boyutla yerlesir (ilk acilista 820x500 hatasi). */
     if (shell) lv_obj_update_layout(shell);
     if (shell) {
         lv_obj_set_style_bg_color(shell, lv_color_hex(FM_WINDOW), 0);
@@ -2202,9 +2430,6 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
                 lv_obj_set_style_text_color(title, lv_color_hex(FM_TEXT), 0);
                 fm_style_font(title, fm_font);
             }
-            /* Kontrol butonlari WM tarafindan SVG ikonlarla cizilir
-             * (windows.c add_ctrl). Burada yalnizca boyut/hizalari
-             * duzenlenir; metin sembolu EKLENMEZ. */
             for (int i = 1; i <= 3; i++) {
                 lv_obj_t *control = lv_obj_get_child(titlebar, i);
                 if (!control) continue;
@@ -2217,35 +2442,19 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
         lv_obj_set_pos(win, 2, 40);
         lv_obj_set_size(win, lv_obj_get_width(shell) - 4, lv_obj_get_height(shell) - 40);
     }
-    if (shell) {
-        lv_obj_t *titlebar = lv_obj_get_child(shell, 0);
-        lv_obj_t *title = titlebar ? lv_obj_get_child(titlebar, 0) : 0;
-        if (title) fm_style_font(title, fm_font);
-    }
-    sel = -1;
-    s_last_sel = -1;
-    s_selected_n = 0;
-    s_history_n = 0;
-    s_sort_count = 0;
-    s_sort_desc = 0;
-    s_usb_poll_ticks = 0;
-    s_prev_right = 0;
-    s_prev_left = 0;
-    s_op_n = 0;
-    s_cut = 0;
-    s_filter[0] = 0;
-    ent_n = 0;
+
+    sel = -1; s_last_sel = -1; s_selected_n = 0; s_history_n = 0;
+    s_sort_count = 0; s_sort_desc = 0; s_usb_poll_ticks = 0;
+    s_prev_right = 0; s_prev_left = 0; s_op_n = 0; s_cut = 0;
+    s_search_rec = 0; s_filter[0] = 0; ent_n = 0;
     scpy(cwd, FM_PATH, "C:");
 
     build_ui(win);
-    arctian_shell_set_relayout(win, fm_relayout);   /* Yeniden akis */
-    /* Ilk acilista govde boyutu tazelenmeden olculmustu (820x500 hatasi):
-     * boyut olayi + 300 ms sonraki tek seferlik timer ile duzeltilir. */
+    arctian_shell_set_relayout(win, fm_relayout);
     lv_obj_add_event_cb(win, fm_resize_cb, LV_EVENT_SIZE_CHANGED, 0);
     if (relayout_timer) lv_timer_delete(relayout_timer);
     relayout_timer = lv_timer_create(fm_relayout_timer_cb, 300, 0);
     lv_timer_set_repeat_count(relayout_timer, 1);
-    /* Klavye kisayollari + surukle-birak hedefi     */
     arctian_shell_set_hotkey(win, fm_hotkey);
     arctian_shell_set_drop(win, fm_drop_cb);
 
@@ -2254,4 +2463,5 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     fm_sync_usb();
     refresh();
     input_timer = lv_timer_create(fm_input_poll_cb, 25, 0);
+    (void)search_changed_cb;
 }

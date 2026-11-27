@@ -102,6 +102,9 @@ typedef struct {
      * tiklanma olmus demektir; yavas kare hizinda (TCG) kaybolan tiklamalar
      * bu sayacla yakalanir. Yapisal ABI icin EN SONA eklendi. */
     uint32_t (*mouse_press_seq)(void);
+    /* v1.1 UTF-8 Turkce klavye girisi (ABI uyumu icin EN SONA eklendi). */
+    uint32_t (*key_pop_cp)(void);
+    int      (*key_pop_utf8)(char out[5]);
 } asi_input_t;
 
 typedef struct {
@@ -120,6 +123,10 @@ typedef struct {
      * recover_end: basariyla tamamlaninca cagirilir. */
     void (*recover_begin)(arctian_recover_t *ctx, uint32_t timeout_ms);
     void (*recover_end)(void);
+    /* v1.1 UEFI ESP OTA yardimcisi (ABI uyumu icin EN SONA):
+     * elf_data == NULL || elf_size == 0 -> ESP varligini yoklar (0=var, 1=yok).
+     * elf_data != NULL && elf_size > 0  -> \EFI\ARCTIAN\KERNEL.ELF atomik guncelle. */
+    int  (*esp_update_kernel)(const void *elf_data, uint32_t elf_size);
 } asi_system_t;
 
 typedef struct {
@@ -300,6 +307,10 @@ typedef struct {
     void (*ws_close)(int id);
 } asi_net_t;
 
+#define ASI_PROC_FLAG_IDLE  (1u << 0)
+#define ASI_PROC_FLAG_POSIX (1u << 1)
+#define ASI_PROC_FLAG_APP   (1u << 2)
+
 typedef struct {
     int      pid;
     int      ppid;
@@ -310,6 +321,12 @@ typedef struct {
     uint32_t gid;
     uint32_t cpu_ticks;
     char     name[32];
+    /* v1.1 gercek surec metrikleri (ABI uyumu icin EN SONA) */
+    uint32_t ram_kb;
+    uint64_t io_bytes;
+    uint64_t net_bytes;
+    uint32_t flags;      /* ASI_PROC_FLAG_* */
+    uint32_t is_idle;    /* 1 = idle thread / bosta gecen surec */
 } asi_proc_info_t;
 
 #define ASI_OOM_OK          0
@@ -391,6 +408,8 @@ typedef struct {
     void        (*dispatch_end)(void);
     int         (*dispatch_active)(void);
     int         (*set_policy)(int (*fn)(const char *path, int is_write));
+    /* v1.1 aktif oturum kullanici kimligi (ABI uyumu icin EN SONA) */
+    void        (*set_user)(uint16_t uid, uint16_t gid);
 } asi_sandbox_t;
 
 typedef struct {
@@ -470,6 +489,9 @@ typedef struct {
     int  (*minutes)(void);       /* kalan sure (dk), -1 bilinmiyor */
     int  (*acpi)(void);          /* 1 = ACPI tablolari bulundu */
     void (*sleep)(void);         /* uyku (tus/fare ile uyanir) */
+    /* v1.1 parlaklik kontrolu (ABI uyumu icin EN SONA) */
+    int  (*brightness_get)(void);
+    int  (*brightness_set)(int percent);
 } asi_power_t;
 
 typedef struct {
@@ -531,6 +553,11 @@ typedef struct {
                           int32_t x, int32_t y, int32_t w, int32_t h);
     void (*gfx_push_event)(int win_id, const arctian_gfx_event_t *ev);
     void (*gfx_drain)(void);
+    /* v1.1 Dinamik pencere boyutlandirma & sistem panosu (ABI uyumu icin EN SONA) */
+    int      (*gfx_resize)(int win_id, uint32_t w, uint32_t h);
+    uint32_t (*clip_seq)(void);
+    int      (*clip_get)(char *out, uint32_t cap);
+    void     (*clip_set)(const char *str, uint32_t len, uint32_t *seq_out);
 } asi_posix_t;
 
 typedef struct {

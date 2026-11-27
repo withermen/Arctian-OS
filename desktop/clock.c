@@ -165,7 +165,7 @@ void cal_render(void) {
     int cellw = 34, cellh = 27, gx = 8, gy = 66;
     for (int c = 0; c < 7; c++) {
         lv_obj_t *wl = label(panel, g_wday_tr[c], ADL_TEXT_DIM);
-        lv_obj_set_style_text_font(wl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(wl, adl_font(), 0);
         lv_obj_set_pos(wl, gx + c * cellw, 42);
     }
 
@@ -191,7 +191,7 @@ void cal_render(void) {
         if (d < 10) { ds[0] = (char)('0' + d); ds[1] = 0; }
         else { ds[0] = (char)('0' + d / 10); ds[1] = (char)('0' + d % 10); ds[2] = 0; }
         lv_obj_t *dl = label(cell, ds, is_today ? 0xFFFFFF : ADL_TEXT);
-        lv_obj_set_style_text_font(dl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(dl, adl_font(), 0);
         lv_obj_center(dl);
     }
 }

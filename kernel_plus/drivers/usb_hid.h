@@ -21,6 +21,7 @@ typedef struct {
 } hid_mouse_event_t;
 
 int usb_hid_init(void);
+int usb_hid_init_device(usb_device_t *dev);
 void usb_hid_poll(void);
 
 int usb_hid_keyboard_count(void);

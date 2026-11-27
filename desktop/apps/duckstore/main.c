@@ -38,15 +38,16 @@ static uint32_t ds_icon_hash(const char *s) {
 
 #define DS_MAX_APPS   32
 #define DS_MAX_WALLS  24
-#define DS_URL_MAX    160
+#define DS_URL_MAX    288
 #define DS_ICON_MAX   1200
 #define DS_DESC_MAX   220
-#define DS_PKG_MAX    160
-#define DS_IMG_MAX    160
+#define DS_PKG_MAX    288
+#define DS_IMG_MAX    288
 #define DS_QUERY_MAX  64
 #define DS_WP_MAX     (6u * 1024u * 1024u)   /* arka plan PNG ust siniri (~6 MB) */
 #define DS_WP_SLACK   (8u * 1024u)           /* HTTP basliklari icin pay */
-#define DS_DEFAULT_URL "http://45.143.99.75:8090"
+#define DS_CATALOG_URL \
+    "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/catalog.txt"
 
 /* ---------------- Durum ---------------- */
 typedef struct {
@@ -85,6 +86,8 @@ static asi_t *s_asi;
 static ds_app_t g_apps[DS_MAX_APPS];
 static int      g_app_count = 0;
 static int      g_feed_ok = 0;
+static int      g_offline_fallback = 0;
+static int      g_is_dsf = 0;
 
 static ds_wall_t g_walls[DS_MAX_WALLS];
 static int       g_wall_count = 0;
@@ -98,6 +101,7 @@ static int  g_inst_wp_count = 0;
 static uint8_t  *g_dl_buf = 0;
 static uint32_t  g_dl_cap = 0;
 
+static char     g_catalog_url[DS_URL_MAX];
 static char     g_base_url[DS_URL_MAX];
 static char     g_query[DS_QUERY_MAX];
 static char     g_filter_cat[32];
@@ -338,9 +342,11 @@ static void ds_render_now(void) {
 
 /* ---------------- Ag ---------------- */
 static const char *ds_http_get(const char *url, uint32_t *len_out) {
-    if (!s_asi || !s_asi->net || !s_asi->net->http_get) return 0;
+    if (!s_asi || !s_asi->net) return 0;
     if (s_asi->net->link_type && s_asi->net->link_type() == ASI_LINK_NONE) return 0;
-    return s_asi->net->http_get(url, len_out);
+    if (dstarts(url, "https://") && s_asi->net->https_get)
+        return s_asi->net->https_get(url, len_out);
+    return s_asi->net->http_get ? s_asi->net->http_get(url, len_out) : 0;
 }
 
 static void ds_make_url(char *out, int cap, const char *path) {
@@ -353,14 +359,180 @@ static int ds_installed(const char *id) {
     return (arctian_store && arctian_store->installed) ? arctian_store->installed(id) : 0;
 }
 
-/* ---------------- Yapilandirma (sabit sunucu) ---------------- */
-static void ds_cfg_load(void) {
-    dcpy(g_base_url, sizeof(g_base_url), DS_DEFAULT_URL);
+/* ---------------- Yapilandirma (C:/etc/store.cfg + wfstore.txt) ---------------- */
+static int ds_cfg_read_file(const char *path, char *out, int cap) {
+    if (!s_asi || !s_asi->fs || !s_asi->fs->read_path) return -1;
+    char buf[320];
+    uint32_t n = s_asi->fs->read_path(path, buf, sizeof(buf) - 1);
+    if (n == 0) return -1;
+    buf[n] = 0;
+    uint32_t i = 0;
+    while (i < n) {
+        uint32_t s = i;
+        while (i < n && buf[i] != '\n' && buf[i] != '\r') i++;
+        uint32_t e = i;
+        while (i < n && (buf[i] == '\n' || buf[i] == '\r')) i++;
+        while (s < e && (buf[s] == ' ' || buf[s] == '\t')) s++;
+        while (e > s && (buf[e - 1] == ' ' || buf[e - 1] == '\t')) e--;
+        if (e <= s || buf[s] == '#') continue;
+        buf[e] = 0;
+        const char *v = buf + s;
+        if (dstarts(v, "catalog=")) v += 8;
+        else if (dstarts(v, "url=")) v += 4;
+        while (*v == ' ' || *v == '\t') v++;
+        if (v[0]) {
+            dcpy(out, cap, v);
+            return 0;
+        }
+    }
+    return -1;
 }
 
-/* ---------------- Feed ayristirma ---------------- */
+static void ds_cfg_load(void) {
+    dcpy(g_catalog_url, sizeof(g_catalog_url), DS_CATALOG_URL);
+    if (ds_cfg_read_file("C:/etc/store.cfg", g_catalog_url, sizeof(g_catalog_url)) != 0)
+        ds_cfg_read_file("C:/etc/wfstore.txt", g_catalog_url, sizeof(g_catalog_url));
+
+    /* g_base_url: goreli paket yollari icin kok URL */
+    dcpy(g_base_url, sizeof(g_base_url), g_catalog_url);
+    int last_sl = -1;
+    for (int i = 0; g_base_url[i]; i++) {
+        if (g_base_url[i] == '/' && i > 8) last_sl = i;
+    }
+    if (dhas_ci(g_base_url, ".txt") || dhas_ci(g_base_url, "/v1/")) {
+        if (last_sl > 8) g_base_url[last_sl] = 0;
+    } else {
+        int n = dlen(g_base_url);
+        while (n > 8 && g_base_url[n - 1] == '/') g_base_url[--n] = 0;
+    }
+}
+
+/* ---------------- Yerlesik katalog (cevrimdisi + zengin meta) ---------------- */
+typedef struct {
+    const char *id;
+    const char *title;
+    const char *category;
+    const char *version;
+    const char *publisher;
+    const char *size;
+    const char *desc;
+    const char *pkg;
+    const char *perm;
+    const char *icon;
+} ds_builtin_t;
+
+static const ds_builtin_t g_builtin_apps[] = {
+    {
+        "safak", "Şafak", "Ofis", "0.8.4", "Arctian", "39",
+        "Arctian Ofis başlangıç ekranı — son belgeler, arama ve tek tıkla uygulama başlatıcı.",
+        "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/safak.wlf",
+        "fs,exec",
+        "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#93C5FD\" stroke-width=\"1.8\"><rect x=\"3\" y=\"3\" width=\"8\" height=\"8\" rx=\"1.5\"/><rect x=\"13\" y=\"3\" width=\"8\" height=\"8\" rx=\"1.5\"/><rect x=\"3\" y=\"13\" width=\"8\" height=\"8\" rx=\"1.5\"/><rect x=\"13\" y=\"13\" width=\"8\" height=\"8\" rx=\"1.5\"/></svg>"
+    },
+    {
+        "murekkep", "Mürekkep", "Ofis", "0.8.5", "Arctian", "55",
+        "Markdown ve düz metin belge editörü. Aç / Farklı Kaydet penceresi ile tüm klasörlerde çalışır.",
+        "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/murekkep.wlf",
+        "fs,exec",
+        "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#60A5FA\" stroke-width=\"1.8\"><path d=\"M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z\"/><path d=\"M14 3v6h6M8 13h8M8 17h6\"/></svg>"
+    },
+    {
+        "abakus", "Abaküs", "Ofis", "0.8.4", "Arctian", "66",
+        "Hücreli hesap tablosu — TOPLA/ORT formülleri, iki sayfa ve CSV Aç / Farklı Kaydet desteği.",
+        "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/abakus.wlf",
+        "fs,exec",
+        "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#34D399\" stroke-width=\"1.8\"><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/><path d=\"M3 9h18M3 15h18M9 3v18M15 3v18\"/></svg>"
+    },
+    {
+        "sahne", "Sahne", "Ofis", "0.8.4", "Arctian", "61",
+        "Slayt sunum editörü — yerinde metin düzenleme, tema seçimi ve .sln Aç / Farklı Kaydet.",
+        "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/sahne.wlf",
+        "fs,exec",
+        "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#FB923C\" stroke-width=\"1.8\"><rect x=\"2\" y=\"4\" width=\"20\" height=\"13\" rx=\"2\"/><path d=\"M8 21h8M12 17v4M7 10h10\"/></svg>"
+    },
+    {
+        "mercek", "Mercek", "Ofis", "0.8.6", "Arctian", "50",
+        "PDF ve PNG belge görüntüleyici — sayfa gezintisi, yakınlaştırma ve FlateDecode desteği.",
+        "https://github.com/withermen/Arctian-OS/releases/download/apps-v1/mercek.wlf",
+        "fs,exec",
+        "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#F87171\" stroke-width=\"1.8\"><circle cx=\"11\" cy=\"11\" r=\"7\"/><path d=\"M20 20l-4-4\"/></svg>"
+    }
+};
+#define DS_BUILTIN_N ((int)(sizeof(g_builtin_apps) / sizeof(g_builtin_apps[0])))
+
+static void ds_enrich_app(ds_app_t *a) {
+    if (!a || !a->id[0]) return;
+    for (int i = 0; i < DS_BUILTIN_N; i++) {
+        if (deq_ci(a->id, g_builtin_apps[i].id)) {
+            const ds_builtin_t *b = &g_builtin_apps[i];
+            if (!a->title[0])     dcpy(a->title, sizeof(a->title), b->title);
+            if (!a->category[0])  dcpy(a->category, sizeof(a->category), b->category);
+            if (!a->version[0])   dcpy(a->version, sizeof(a->version), b->version);
+            if (!a->publisher[0]) dcpy(a->publisher, sizeof(a->publisher), b->publisher);
+            if (!a->size[0])      dcpy(a->size, sizeof(a->size), b->size);
+            if (!a->desc[0])      dcpy(a->desc, sizeof(a->desc), b->desc);
+            if (!a->pkg[0])       dcpy(a->pkg, sizeof(a->pkg), b->pkg);
+            if (!a->perm[0])      dcpy(a->perm, sizeof(a->perm), b->perm);
+            if (!a->icon[0])      dcpy(a->icon, sizeof(a->icon), b->icon);
+            return;
+        }
+    }
+    if (!a->title[0]) dcpy(a->title, sizeof(a->title), a->id);
+    if (!a->category[0]) dcpy(a->category, sizeof(a->category), "Genel");
+    if (!a->publisher[0]) dcpy(a->publisher, sizeof(a->publisher), "Arctian");
+}
+
+static void ds_load_offline_catalog(void) {
+    g_app_count = 0;
+    for (int i = 0; i < DS_BUILTIN_N && g_app_count < DS_MAX_APPS; i++) {
+        ds_app_t *a = &g_apps[g_app_count++];
+        for (unsigned k = 0; k < sizeof(*a); k++) ((char *)a)[k] = 0;
+        dcpy(a->id, sizeof(a->id), g_builtin_apps[i].id);
+        ds_enrich_app(a);
+        if (arctian_store && arctian_store->installed_version) {
+            const char *iv = arctian_store->installed_version(a->id);
+            if (iv && iv[0]) dcpy(a->version, sizeof(a->version), iv);
+        }
+    }
+    if (arctian_store && arctian_store->count_installed) {
+        int cnt = arctian_store->count_installed();
+        for (int i = 0; i < cnt && g_app_count < DS_MAX_APPS; i++) {
+            const char *id = arctian_store->installed_id(i);
+            if (!id || !id[0]) continue;
+            int dup = 0;
+            for (int j = 0; j < g_app_count; j++) {
+                if (deq_ci(g_apps[j].id, id)) { dup = 1; break; }
+            }
+            if (dup) continue;
+            ds_app_t *a = &g_apps[g_app_count++];
+            for (unsigned k = 0; k < sizeof(*a); k++) ((char *)a)[k] = 0;
+            dcpy(a->id, sizeof(a->id), id);
+            const char *t = arctian_store->installed_title(i);
+            const char *v = arctian_store->installed_version_at(i);
+            if (t && t[0]) dcpy(a->title, sizeof(a->title), t);
+            if (v && v[0]) dcpy(a->version, sizeof(a->version), v);
+            dcpy(a->category, sizeof(a->category), "Yüklü");
+            dcpy(a->publisher, sizeof(a->publisher), "Yerel");
+            dcpy(a->desc, sizeof(a->desc), "Cihazda kurulu uygulama.");
+        }
+    }
+    g_feed_ok = g_app_count > 0;
+    g_offline_fallback = 1;
+    g_is_dsf = 0;
+}
+
+/* ---------------- Feed ayristirma (DSF @app + catalog.txt ad=url) ---------------- */
 static void ds_feed_parse(const char *t, uint32_t n) {
     g_app_count = 0;
+    g_is_dsf = 0;
+    for (uint32_t i = 0; i + 4 <= n; i++) {
+        if ((i == 0 || t[i - 1] == '\n' || t[i - 1] == '\r') &&
+            t[i] == '@' && t[i + 1] == 'a' && t[i + 2] == 'p' && t[i + 3] == 'p') {
+            g_is_dsf = 1;
+            break;
+        }
+    }
+
     ds_app_t *cur = 0;
     uint32_t i = 0;
     while (i < n) {
@@ -369,48 +541,85 @@ static void ds_feed_parse(const char *t, uint32_t n) {
         uint32_t le = i;
         while (i < n && (t[i] == '\n' || t[i] == '\r')) i++;
         int ll = (int)(le - ls);
-        if (ll <= 0) continue;
-        if (t[ls] == '#') continue;
+        if (ll <= 0 || t[ls] == '#') continue;
 
-        if (ll == 4 && t[ls] == '@' && t[ls + 1] == 'a' && t[ls + 2] == 'p' && t[ls + 3] == 'p') {
-            if (g_app_count >= DS_MAX_APPS) { cur = 0; continue; }
+        if (g_is_dsf) {
+            if (ll == 4 && t[ls] == '@' && t[ls + 1] == 'a' &&
+                t[ls + 2] == 'p' && t[ls + 3] == 'p') {
+                if (g_app_count >= DS_MAX_APPS) { cur = 0; continue; }
+                cur = &g_apps[g_app_count++];
+                for (unsigned k = 0; k < sizeof(*cur); k++) ((char *)cur)[k] = 0;
+                continue;
+            }
+            if (!cur) continue;
+
+            uint32_t eq = ls;
+            while (eq < le && t[eq] != '=') eq++;
+            if (eq >= le) continue;
+            int klen = (int)(eq - ls);
+            const char *key = t + ls;
+            char val[DS_ICON_MAX];
+            pct_dec(val, sizeof(val), t + eq + 1, (int)(le - eq - 1));
+
+            if (key_is(key, klen, "id")) dcpy(cur->id, sizeof(cur->id), val);
+            else if (key_is(key, klen, "title")) dcpy(cur->title, sizeof(cur->title), val);
+            else if (key_is(key, klen, "category")) dcpy(cur->category, sizeof(cur->category), val);
+            else if (key_is(key, klen, "version")) dcpy(cur->version, sizeof(cur->version), val);
+            else if (key_is(key, klen, "publisher")) dcpy(cur->publisher, sizeof(cur->publisher), val);
+            else if (key_is(key, klen, "size")) dcpy(cur->size, sizeof(cur->size), val);
+            else if (key_is(key, klen, "desc")) dcpy(cur->desc, sizeof(cur->desc), val);
+            else if (key_is(key, klen, "package")) dcpy(cur->pkg, sizeof(cur->pkg), val);
+            else if (key_is(key, klen, "icon")) dcpy(cur->icon, sizeof(cur->icon), val);
+            else if (key_is(key, klen, "permissions")) dcpy(cur->perm, sizeof(cur->perm), val);
+        } else {
+            /* Satir bazli katalog: ad=url */
+            uint32_t eq = ls;
+            while (eq < le && t[eq] != '=') eq++;
+            if (eq <= ls || eq >= le) continue;
+            if (g_app_count >= DS_MAX_APPS) break;
             cur = &g_apps[g_app_count++];
             for (unsigned k = 0; k < sizeof(*cur); k++) ((char *)cur)[k] = 0;
-            continue;
+
+            int idlen = (int)(eq - ls);
+            if (idlen >= (int)sizeof(cur->id)) idlen = (int)sizeof(cur->id) - 1;
+            for (int k = 0; k < idlen; k++) cur->id[k] = t[ls + (uint32_t)k];
+            cur->id[idlen] = 0;
+
+            int vlen = (int)(le - eq - 1);
+            if (vlen >= (int)sizeof(cur->pkg)) vlen = (int)sizeof(cur->pkg) - 1;
+            for (int k = 0; k < vlen; k++) cur->pkg[k] = t[eq + 1 + (uint32_t)k];
+            cur->pkg[vlen] = 0;
+
+            ds_enrich_app(cur);
         }
-        if (!cur) continue;
-
-        uint32_t eq = ls;
-        while (eq < le && t[eq] != '=') eq++;
-        if (eq >= le) continue;
-        int klen = (int)(eq - ls);
-        const char *key = t + ls;
-        char val[DS_ICON_MAX];
-        pct_dec(val, sizeof(val), t + eq + 1, (int)(le - eq - 1));
-
-        if (key_is(key, klen, "id")) dcpy(cur->id, sizeof(cur->id), val);
-        else if (key_is(key, klen, "title")) dcpy(cur->title, sizeof(cur->title), val);
-        else if (key_is(key, klen, "category")) dcpy(cur->category, sizeof(cur->category), val);
-        else if (key_is(key, klen, "version")) dcpy(cur->version, sizeof(cur->version), val);
-        else if (key_is(key, klen, "publisher")) dcpy(cur->publisher, sizeof(cur->publisher), val);
-        else if (key_is(key, klen, "size")) dcpy(cur->size, sizeof(cur->size), val);
-        else if (key_is(key, klen, "desc")) dcpy(cur->desc, sizeof(cur->desc), val);
-        else if (key_is(key, klen, "package")) dcpy(cur->pkg, sizeof(cur->pkg), val);
-        else if (key_is(key, klen, "icon")) dcpy(cur->icon, sizeof(cur->icon), val);
-        else if (key_is(key, klen, "permissions")) dcpy(cur->perm, sizeof(cur->perm), val);
+    }
+    if (g_is_dsf) {
+        for (int k = 0; k < g_app_count; k++) ds_enrich_app(&g_apps[k]);
     }
 }
 
 static int ds_feed_load(void) {
-    char url[DS_URL_MAX + 16];
-    dcpy(url, sizeof(url), g_base_url);
-    dcat(url, sizeof(url), "/v1/feed");
+    char url[DS_URL_MAX + 24];
+    dcpy(url, sizeof(url), g_catalog_url);
+    if (!dhas_ci(url, ".txt") && !dhas_ci(url, "/v1/")) {
+        int n = dlen(url);
+        while (n > 8 && url[n - 1] == '/') url[--n] = 0;
+        dcat(url, sizeof(url), "/v1/feed");
+    }
     uint32_t len = 0;
     const char *body = ds_http_get(url, &len);
-    if (!body || len == 0) { g_feed_ok = 0; return -1; }
+    if (!body || len == 0) {
+        ds_load_offline_catalog();
+        return -1;
+    }
     ds_feed_parse(body, len);
-    g_feed_ok = g_app_count > 0;
-    return g_feed_ok ? 0 : -1;
+    if (g_app_count == 0) {
+        ds_load_offline_catalog();
+        return -1;
+    }
+    g_feed_ok = 1;
+    g_offline_fallback = 0;
+    return 0;
 }
 
 /* ---------------- Arama (sunucu, yoksa yerel) ---------------- */
@@ -540,8 +749,9 @@ static int g_feed_rc;
 static void ds_feed_work(void *u) { (void)u; g_feed_rc = ds_feed_load(); }
 static void ds_feed_done(void *u) {
     (void)u;
-    if (g_feed_rc == 0) ds_status("", ADL_OK);
-    else ds_status("Sunucuya ulasilamadi", ADL_DANGER);
+    if (g_feed_rc == 0) ds_status("Katalog hazır", ADL_OK);
+    else if (g_offline_fallback) ds_status("Çevrimdışı katalog", ADL_TEXT_DIM);
+    else ds_status("Sunucuya ulaşılamadı", ADL_DANGER);
     ds_rebuild();
 }
 static void ds_feed_fetch(void) {
@@ -561,6 +771,10 @@ static void ds_search_done(void *u) {
     ds_rebuild();
 }
 static void ds_search_fetch(void) {
+    if (!g_is_dsf) {
+        ds_rebuild();
+        return;
+    }
     if (!ds_async(ds_search_work, ds_search_done, 0)) {
         g_search_rc = ds_search_server(g_query);
         ds_search_done(0);
@@ -569,11 +783,18 @@ static void ds_search_fetch(void) {
 
 /* Arka plan (wallpaper) listesi */
 static int g_walls_rc;
-static void ds_walls_work(void *u) { (void)u; g_walls_rc = ds_walls_load(); }
+static void ds_walls_work(void *u) {
+    (void)u;
+    if (!g_is_dsf && dstarts(g_catalog_url, "https://github.com/")) {
+        g_wall_ok = 0;
+        g_walls_rc = -1;
+        return;
+    }
+    g_walls_rc = ds_walls_load();
+}
 static void ds_walls_done(void *u) {
     (void)u;
     if (g_walls_rc == 0) ds_status("", ADL_OK);
-    else ds_status("Sunucuya ulasilamadi", ADL_DANGER);
     ds_rebuild();
 }
 static void ds_walls_fetch(void) {
@@ -795,10 +1016,11 @@ static void ds_search_cb(lv_event_t *e) {
     const char *q = g_search_ta ? lv_textarea_get_text(g_search_ta) : "";
     dcpy(g_query, sizeof(g_query), q);
     g_page = PAGE_SEARCH;
-    if (g_query[0]) {
-        ds_status("Araniyor...", ADL_WARN);
+    if (g_query[0] && g_is_dsf) {
+        ds_status("Aranıyor...", ADL_WARN);
         ds_render_now();
         ds_search_fetch();
+        return;
     }
     ds_rebuild();
 }
@@ -871,7 +1093,7 @@ static lv_obj_t *ds_card(lv_obj_t *parent, int idx) {
     if (s_font_small) lv_obj_set_style_text_font(cat, s_font_small, 0);
 
     int inst = ds_installed(a->id);
-    lv_obj_t *b = ds_button(c, inst ? "Ac" : "Yukle",
+    lv_obj_t *b = ds_button(c, inst ? "Aç" : "Yükle",
                             inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 76, 26);
     if (s_font_small) lv_obj_set_style_text_font(b, s_font_small, 0);
     if (inst) lv_obj_add_event_cb(b, ds_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
@@ -943,7 +1165,7 @@ static lv_obj_t *ds_hero(lv_obj_t *parent, int idx) {
     lv_obj_remove_flag(col, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *kick = lv_label_create(col);
-    lv_label_set_text(kick, "BU HAFTA SECILDI");
+    lv_label_set_text(kick, "ÖNE ÇIKAN UYGULAMA");
     lv_obj_set_style_text_color(kick, lv_color_hex(0x7FA8F0), 0);
     if (s_font_small) lv_obj_set_style_text_font(kick, s_font_small, 0);
     lv_obj_set_style_text_letter_space(kick, 2, 0);
@@ -972,11 +1194,11 @@ static lv_obj_t *ds_hero(lv_obj_t *parent, int idx) {
     lv_obj_set_style_pad_top(br, 4, 0);
     lv_obj_remove_flag(br, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *b1 = ds_button(br, inst ? "Ac" : "Al",
+    lv_obj_t *b1 = ds_button(br, inst ? "Aç" : "Al",
                              inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 88, 28);
     if (inst) lv_obj_add_event_cb(b1, ds_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
     else      lv_obj_add_event_cb(b1, ds_install_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
-    lv_obj_t *b2 = ds_button_ol(br, "Ayrintilar", 88, 28);
+    lv_obj_t *b2 = ds_button_ol(br, "Ayrıntılar", 88, 28);
     lv_obj_add_event_cb(b2, ds_detail_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
     return hero;
 }
@@ -1017,7 +1239,7 @@ static lv_obj_t *ds_rec_card(lv_obj_t *parent, int idx) {
     if (s_font_small) lv_obj_set_style_text_font(mt, s_font_small, 0);
 
     int inst = ds_installed(a->id);
-    lv_obj_t *b = ds_button(c, inst ? "Ac" : "Al",
+    lv_obj_t *b = ds_button(c, inst ? "Aç" : "Al",
                             inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 76, 26);
     if (s_font_small) lv_obj_set_style_text_font(b, s_font_small, 0);
     lv_obj_set_style_pad_top(b, 4, 0);
@@ -1084,7 +1306,7 @@ static void ds_pop_row(lv_obj_t *parent, int idx, int rank) {
     if (s_font_small) lv_obj_set_style_text_font(sz, s_font_small, 0);
 
     int inst = ds_installed(a->id);
-    lv_obj_t *b = ds_button(row, inst ? "Ac" : "Al",
+    lv_obj_t *b = ds_button(row, inst ? "Aç" : "Al",
                             inst ? ADL_OK : ADL_ACCENT, 0xFFFFFF, 74, 28);
     if (s_font_small) lv_obj_set_style_text_font(b, s_font_small, 0);
     if (inst) lv_obj_add_event_cb(b, ds_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)idx);
@@ -1096,16 +1318,7 @@ static void ds_pop_row(lv_obj_t *parent, int idx, int rank) {
 /* ---------------- Sayfalar ---------------- */
 static void ds_page_home(void) {
     if (!g_feed_ok) {
-        ds_section(g_content, "Baglanti bekleniyor");
-        lv_obj_t *m = lv_label_create(g_content);
-        lv_obj_set_width(m, LV_PCT(96));
-        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
-        lv_label_set_text_fmt(m,
-            "Sunucuya ulasilamadi: %s\n\n"
-            "Ag baglantinizi kontrol edip 'Yenile' deneyin.",
-            g_base_url);
-        lv_obj_set_style_text_color(m, lv_color_hex(ADL_TEXT_DIM), 0);
-        return;
+        ds_load_offline_catalog();
     }
 
     if (g_app_count == 0) {
@@ -1130,11 +1343,11 @@ static void ds_page_home(void) {
         lv_obj_set_style_pad_top(hdr, 10, 0);
         lv_obj_remove_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_t *ht = lv_label_create(hdr);
-        lv_label_set_text(ht, "Onerilenler");
+        lv_label_set_text(ht, "Önerilenler");
         lv_obj_set_style_text_color(ht, lv_color_hex(ADL_TEXT), 0);
         if (s_font_sec) lv_obj_set_style_text_font(ht, s_font_sec, 0);
         lv_obj_t *more = lv_label_create(hdr);
-        lv_label_set_text(more, "Tumunu gor >");
+        lv_label_set_text(more, "Tümünü gör >");
         lv_obj_set_style_text_color(more, lv_color_hex(ADL_TEXT_DIM), 0);
         if (s_font_small) lv_obj_set_style_text_font(more, s_font_small, 0);
 
@@ -1150,7 +1363,7 @@ static void ds_page_home(void) {
 
     /*3. Populer: uygulamalarin sirali listesi (ilk alti) */
     if (g_app_count > 0) {
-        ds_section(g_content, "Populer");
+        ds_section(g_content, "Popüler");
         lv_obj_t *col = lv_obj_create(g_content);
         lv_obj_remove_style_all(col);
         lv_obj_set_size(col, LV_PCT(100), LV_SIZE_CONTENT);
@@ -1551,7 +1764,7 @@ static void ds_page_walls(void) {
         lv_obj_t *m = lv_label_create(g_content);
         lv_obj_set_width(m, LV_PCT(96));
         lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
-        lv_label_set_text(m, "Sunucudan arka plan listesi alinamadi. 'Yenile' deneyin.");
+        lv_label_set_text(m, "Çevrimiçi arka plan beslemesi bağlı değil. Yerel .wp dosyaları kullanılabilir.");
         lv_obj_set_style_text_color(m, lv_color_hex(ADL_TEXT_DIM), 0);
         return;
     }
@@ -1729,7 +1942,7 @@ static void ds_rebuild(void) {
  *16 px ikon +10 px bosluk, aktif ogede sol3 px vurgu cubugu,
  * bolum basliklari11 px, sayac rozeti mavi daire. */
 static const char *g_nav_labels[6] = {
-    "Ana Sayfa", "Ara", "Kategoriler", "Kitapligim", "Guncellemeler", "Arka Planlar"
+    "Ana Sayfa", "Ara", "Kategoriler", "Kitaplığım", "Güncellemeler", "Arka Planlar"
 };
 
 static void ds_build_nav(void) {
@@ -1923,6 +2136,7 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     if (!s_font_sec)   s_font_sec   = lv_tiny_ttf_create_data(font_ttf, font_ttf_len, 15);
 
     ds_cfg_load();
+    ds_load_offline_catalog();
     ds_build_toolbar();
 
     g_body = lv_obj_create(win);
@@ -1941,10 +2155,10 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     ds_set_nav_active();
     ds_page_home();
 
-    ds_status("Sunucuya baglaniliyor...", ADL_WARN);
+    ds_status("Katalog güncelleniyor...", ADL_TEXT_DIM);
     ds_render_now();
     ds_feed_fetch();
-    ds_walls_fetch();
+    if (!dstarts(g_catalog_url, "https://github.com/")) ds_walls_fetch();
 
     ds_rebuild();
 }

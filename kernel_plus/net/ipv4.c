@@ -4,6 +4,7 @@
 #include "udp.h"
 #include "dhcp.h"
 #include "net.h"
+#include "pci.h"
 #include "net_task.h"
 #include "firewall.h"
 #include "kernel.h"
@@ -60,23 +61,63 @@ void ipv4_set_default_gateway(const uint8_t gw[4]) {
     for (int i = 0; i < 4; i++) ipv4_config.gateway[i] = gw[i];
 }
 
+bool ipv4_is_virtual_nic_for_dev(int drv_type, uint16_t vendor, uint16_t device) {
+    if (drv_type == NET_TYPE_VIRTIO ||
+        drv_type == NET_TYPE_RTL8139 ||
+        drv_type == NET_TYPE_PCNET) {
+        return true;
+    }
+    if (drv_type == NET_TYPE_E1000) {
+        return (vendor == PCI_VENDOR_INTEL && device == PCI_DEV_E1000_82540EM);
+    }
+    return false;
+}
+
+static bool ipv4_active_nic_is_virtual(void) {
+    int drv = net_driver_type();
+    if (drv == NET_TYPE_VIRTIO || drv == NET_TYPE_RTL8139 || drv == NET_TYPE_PCNET) {
+        return true;
+    }
+    if (drv == NET_TYPE_E1000) {
+        for (int i = 0; i < net_controller_count; i++) {
+            const net_controller_t *nc = &net_controllers[i];
+            if (nc->initialized && nc->net_type == NET_TYPE_E1000) {
+                return ipv4_is_virtual_nic_for_dev(drv, nc->dev.vendor, nc->dev.device);
+            }
+        }
+    }
+    return false;
+}
+
 void ipv4_config_dhcp(void) {
     /* Once gercek DHCP dene (kopru/NAT aglarinda dogru adresleri verir).
-     * Yanit gelmezse QEMU/VirtualBox kullanici-modu NAT (slirp)
-     * varsayilanlarina dus. */
+     * Yanit gelmezse YALNIZCA sanal NIC'lerde (VIRTIO, QEMU e1000 0x100E,
+     * RTL8139, PCNET) SLIRP 10.0.2.15 varsayilanina dus; gercek donanimda
+     * sahte IP atama, configured = 0 birak. */
     if (dhcp_configure()) {
         serial_printf("[ip] DHCP ile yapilandirildi\n");
         return;
     }
 
-    uint8_t dhcp_ip[4]    = {10, 0, 2, 15};
-    uint8_t dhcp_gw[4]    = {10, 0, 2, 2};
-    uint8_t dhcp_mask[4]  = {255, 255, 255, 0};
-    uint8_t dhcp_dns[4]   = {10, 0, 2, 3};
-    ipv4_configure(dhcp_ip, dhcp_gw, dhcp_mask, dhcp_dns);
-    serial_printf("[ip] slirp varsayilani: %d.%d.%d.%d gw %d.%d.%d.%d\n",
-                  dhcp_ip[0], dhcp_ip[1], dhcp_ip[2], dhcp_ip[3],
-                  dhcp_gw[0], dhcp_gw[1], dhcp_gw[2], dhcp_gw[3]);
+    if (ipv4_active_nic_is_virtual()) {
+        uint8_t dhcp_ip[4]    = {10, 0, 2, 15};
+        uint8_t dhcp_gw[4]    = {10, 0, 2, 2};
+        uint8_t dhcp_mask[4]  = {255, 255, 255, 0};
+        uint8_t dhcp_dns[4]   = {10, 0, 2, 3};
+        ipv4_configure(dhcp_ip, dhcp_gw, dhcp_mask, dhcp_dns);
+        serial_printf("[ip] slirp varsayilani: %d.%d.%d.%d gw %d.%d.%d.%d\n",
+                      dhcp_ip[0], dhcp_ip[1], dhcp_ip[2], dhcp_ip[3],
+                      dhcp_gw[0], dhcp_gw[1], dhcp_gw[2], dhcp_gw[3]);
+    } else {
+        for (int i = 0; i < 4; i++) {
+            ipv4_config.src_ip[i] = 0;
+            ipv4_config.gateway[i] = 0;
+            ipv4_config.subnet_mask[i] = 0;
+            ipv4_config.dns_server[i] = 0;
+        }
+        ipv4_config.configured = false;
+        serial_printf("[ip] DHCP yanit vermedi (gercek NIC, slirp yedegi yok, configured=0)\n");
+    }
 }
 
 static bool is_same_subnet(const uint8_t a[4], const uint8_t b[4]) {

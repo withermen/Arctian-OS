@@ -61,7 +61,7 @@ C:/projler/sayac/wolf.json
 C:/projler/sayac/README.txt
 ```
 
-`main.c`'yi `editor` ile düzenleyin, `wf build` ile derleyin.
+`main.c`'yi **Metin** (`metin`) ile düzenleyin, `wf build` ile derleyin.
 
 ## wolf.json
 
@@ -191,9 +191,17 @@ int wolf_main(const wolf_api_t *api) {
 
 ## SDK'daki Diğer Bileşenler
 
+- `sdk/office/`: ISO'ya hazır kurulu 5 Ofis `.wlf` uygulaması (**Şafak**, **Mürekkep**, **Abaküs**,
+  **Sahne**, **Mercek**) ve ortak Aç/Farklı Kaydet dosya seçicisi (`office_picker.h`).
 - `sdk/toolchain/`: Ring-3 ELF64 C/C++20 (musl 1.2.5 + `libstdc++` 14.2) çapraz
-  derleme araç zinciri (`arctian-cc`, `arctian-cxx`, `arctian-pkg-config`, `arctian.cmake`).
-- `sdk/webkit/`: WPE WebKit tabanlı Ring-3 tarayıcı arka ucu (`arctian_wpe_backend.cpp`).
+  derleme araç zinciri (`arctian-cc`, `arctian-cxx`, `arctian-pkg-config`, `arctian.cmake`)
+  ve paylaşımlı pencere + pano köprüsü (`include/arctian/gfx.h`).
+- `sdk/webkit/`: WPE WebKit 1.1 tabanlı Ring-3 tarayıcı arka ucu (`arctian_wpe_backend.cpp` +
+  `arctian_webkit_browser.cpp`: çoklu sekme, `Ctrl+C/V` sistem panosu, canlı boyutlandırma,
+  Türkçe UTF-8 girdi, kalıcı çerezler, yer imleri, geçmiş, `C:/indirilenler/` indirme
+  yöneticisi, yakınlaştırma ve sayfada bul). *Not:* Statik `libWPEWebKit-2.0.a` arşivinde
+  GStreamer/video devre dışıdır; ses çıkışı gereken yerel/POSIX uygulamalar `/dev/dsp` PCM
+  akışını kullanır.
 
 ## Dosyalar
 

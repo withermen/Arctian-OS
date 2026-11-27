@@ -1,4 +1,5 @@
 #include "dsk.h"
+#include "imgdec.h"
 
 
 int has_ext(const char *name, char ext[], int extsz) {
@@ -429,8 +430,9 @@ static int ext_is_text(const char *e) {
     return 0;
 }
 
-static int ext_is_image(const char *e) {   /* png -> kutu goruntuleyici */
-    return ext_eq(e, "png");
+static int ext_is_image(const char *e) {   /* png/jpg/jpeg/bmp/gif -> goruntuleyici */
+    return ext_eq(e, "png") || ext_eq(e, "jpg") || ext_eq(e, "jpeg") ||
+           ext_eq(e, "bmp") || ext_eq(e, "gif");
 }
 
 static int ext_is_audio(const char *e) {   /* -> Medya oynatici */
@@ -438,7 +440,7 @@ static int ext_is_audio(const char *e) {   /* -> Medya oynatici */
            ext_eq(e, "ogg") || ext_eq(e, "flac");
 }
 
-/* PNG goruntuleyici: dosyayi okur, ekrana sigdirir, pencerede gosterir. */
+/* Coklu bicim goruntuleyici (PNG/JPEG/GIF/BMP): dosyayi okur, ekrana sigdirir, pencerede gosterir. */
 static void img_viewer_open(const char *path) {
     if (!g_asi || !g_asi->fs || !g_asi->fs->find || !g_asi->fs->read) {
         open_arcapp_file(path); return;
@@ -450,15 +452,15 @@ static void img_viewer_open(const char *path) {
         asi_stat_t st;
         if (g_asi->fs->stat_handle(h, &st) == 0) sz = st.size;
     }
-    if (sz == 0 || sz > 4u * 1024u * 1024u) { open_arcapp_file(path); return; }
+    if (sz == 0 || sz > 16u * 1024u * 1024u) { open_arcapp_file(path); return; }
     unsigned char *data = (unsigned char *)g_asi->mem->alloc(sz);
     if (!data) { open_arcapp_file(path); return; }
     uint32_t n = g_asi->fs->read(h, data, sz);
     uint32_t *px = 0; int w = 0, hh = 0;
-    if (png_decode_argb(data, n ? n : sz, g_asi->mem->alloc, g_asi->mem->free,
-                        &px, &w, &hh) != 0 || !px || w < 1 || hh < 1) {
+    if (imgdec_decode(data, n ? n : sz, g_asi->mem->alloc, g_asi->mem->free,
+                      &px, &w, &hh, 0) != 0 || !px || w < 1 || hh < 1) {
         g_asi->mem->free(data);
-        arctian_notify("Goruntu", "PNG cozulemedi");
+        arctian_notify("Görüntü", "Görsel çözülemedi");
         return;
     }
     g_asi->mem->free(data);

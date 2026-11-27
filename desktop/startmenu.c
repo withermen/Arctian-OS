@@ -7,6 +7,7 @@
 
 static lv_obj_t *s_sm_search;
 static lv_obj_t *s_sm_browse;
+static lv_obj_t *s_sm_rec_box;
 static lv_obj_t *s_sm_results;
 static lv_obj_t *s_sm_all;
 static lv_obj_t *s_sm_all_list;
@@ -15,6 +16,7 @@ static int       s_sm_cat = 0;
 static lv_group_t *s_sm_group;
 static lv_group_t *s_sm_prev_group;
 static int s_sm_first = -1;
+static char s_sm_rec_paths[2][128];
 
 /* "Tumu" satirlari ile uygulama indekslerinin eslesmesi (sag tik)     */
 #define SM_ALL_MAX 64
@@ -22,6 +24,7 @@ static int s_sm_all_idx[SM_ALL_MAX];
 static int s_sm_all_rown;
 
 static void sm_rebuild_results(const char *q);
+static void sm_refresh_recents(void);
 static int  sm_line_h(void);
 static int  sm_row_h(int base);
 
@@ -62,6 +65,7 @@ void toggle_start_menu(void) {
     }
 
     lv_obj_remove_flag(g_start_menu, LV_OBJ_FLAG_HIDDEN);
+    sm_refresh_recents();
     if (s_sm_search) {
         lv_textarea_set_text(s_sm_search, "");
         sm_rebuild_results("");
@@ -212,7 +216,7 @@ static void sm_rebuild_results(const char *q) {
     }
 
     if (rows == 0) {
-        lv_obj_t *l = label(s_sm_results, "Sonuc bulunamadi", ADL_TEXT_DIM);
+        lv_obj_t *l = label(s_sm_results, "Sonuç bulunamadı", ADL_TEXT_DIM);
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_width(l, LV_PCT(100));
     }
@@ -411,7 +415,7 @@ void sm_search_bar(lv_obj_t *parent, int mw) {
     lv_obj_remove_style_all(ta);
     lv_textarea_set_one_line(ta, true);
     lv_textarea_set_max_length(ta, 32);
-    lv_textarea_set_placeholder_text(ta, "Aramak icin yazin");
+    lv_textarea_set_placeholder_text(ta, "Aramak için yazın");
     lv_obj_set_style_bg_opa(ta, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(ta, 0, 0);
     lv_obj_set_style_text_color(ta, lv_color_hex(ADL_TEXT), 0);
@@ -427,6 +431,71 @@ void sm_search_bar(lv_obj_t *parent, int mw) {
     s_sm_search = ta;
 }
 
+
+static int sm_rec_skip_name(const char *nm) {
+    if (!nm || !nm[0] || nm[0] == '.') return 1;
+    if (has_suffix_ci(nm, ".cfg") || has_suffix_ci(nm, ".log") ||
+        has_suffix_ci(nm, ".dpk") || has_suffix_ci(nm, ".wp") ||
+        has_suffix_ci(nm, ".elf") || has_suffix_ci(nm, ".ttf") ||
+        has_suffix_ci(nm, ".pem") || has_suffix_ci(nm, ".wlf"))
+        return 1;
+    return 0;
+}
+
+static void sm_rec_click_cb(lv_event_t *e) {
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    if (slot < 0 || slot >= 2 || !s_sm_rec_paths[slot][0]) return;
+    if (g_start_menu) lv_obj_add_flag(g_start_menu, LV_OBJ_FLAG_HIDDEN);
+    arctian_shell_open_file(s_sm_rec_paths[slot]);
+}
+
+static void sm_refresh_recents(void) {
+    if (!s_sm_rec_box) return;
+    lv_obj_clean(s_sm_rec_box);
+    s_sm_rec_paths[0][0] = 0;
+    s_sm_rec_paths[1][0] = 0;
+
+    int box_w = lv_obj_get_width(s_sm_rec_box);
+    int box_h = lv_obj_get_height(s_sm_rec_box);
+    int rh = sm_row_h(50);
+    int max_rows = (box_h >= 2 * rh + ui_s(6)) ? 2 : 1;
+
+    static const char *const dirs[4] = {
+        "C:/belgeler", "C:/indirilenler", "C:/masaustu", "C:"
+    };
+    static const char *const dlabels[4] = {
+        "Belgeler", "İndirilenler", "Masaüstü", "C:/"
+    };
+
+    int found = 0;
+    if (g_asi && g_asi->fs && g_asi->fs->count_dir && g_asi->fs->list_dir) {
+        for (int d = 0; d < 4 && found < max_rows; d++) {
+            int n = g_asi->fs->count_dir(dirs[d]);
+            for (int i = 0; i < n && found < max_rows; i++) {
+                char nm[64];
+                int isd = 0;
+                if (g_asi->fs->list_dir(dirs[d], i, nm, sizeof(nm), &isd) != 0) continue;
+                if (isd || sm_rec_skip_name(nm)) continue;
+
+                int p = 0;
+                for (int k = 0; dirs[d][k] && p < 125; k++) s_sm_rec_paths[found][p++] = dirs[d][k];
+                if (p > 0 && s_sm_rec_paths[found][p - 1] != '/') s_sm_rec_paths[found][p++] = '/';
+                for (int k = 0; nm[k] && p < 127; k++) s_sm_rec_paths[found][p++] = nm[k];
+                s_sm_rec_paths[found][p] = 0;
+
+                int y = found * (rh + ui_s(6));
+                sm_rec(s_sm_rec_box, 0, y, box_w, SVG_FILE, nm, dlabels[d]);
+                lv_obj_t *card = lv_obj_get_child(s_sm_rec_box, lv_obj_get_child_count(s_sm_rec_box) - 1);
+                if (card) lv_obj_add_event_cb(card, sm_rec_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)found);
+                found++;
+            }
+        }
+    }
+
+    if (found == 0) {
+        sm_rec(s_sm_rec_box, 0, 0, box_w, SVG_FILE, "Henüz belge yok", "Belgeler veya İndirilenler boş");
+    }
+}
 
 /* ---------------- Windows 11 tarzi baslat menusu ---------------- */
 void build_start_menu(lv_obj_t *scr) {
@@ -476,7 +545,7 @@ void build_start_menu(lv_obj_t *scr) {
     lv_obj_set_pos(s_sm_all, 0, by);
     lv_obj_add_flag(s_sm_all, LV_OBJ_FLAG_HIDDEN);
 
-    static const char *tabn[5] = { "Tumu", "Araclar", "Ag", "Medya", "Sistem" };
+    static const char *tabn[5] = { "Tümü", "Araçlar", "Ağ", "Medya", "Sistem" };
     int tabw = (mw - ui_s(48) - ui_s(8) * 4) / 5;
     for (int i = 0; i < 5; i++) {
         lv_obj_t *b = lv_button_create(s_sm_all);
@@ -500,14 +569,14 @@ void build_start_menu(lv_obj_t *scr) {
     lv_obj_set_style_pad_row(s_sm_all_list, ui_s(8), 0);
     s_sm_cat = 0;
 
-    sm_header(s_sm_browse, ui_s(24), 0, "Sabitlenmis");
+    sm_header(s_sm_browse, ui_s(24), 0, "Sabitlenmiş");
 
     lv_obj_t *allb = lv_button_create(s_sm_browse);
     lv_obj_set_size(allb, ui_s(96), ui_s(26));
     lv_obj_set_pos(allb, mw - ui_s(120), 0);
     lv_obj_set_style_radius(allb, ui_s(8), 0);
     lv_obj_set_style_bg_color(allb, lv_color_hex(ADL_SURFACE_2), 0);
-    lv_obj_t *alll = label(allb, "Tumu >", ADL_TEXT);
+    lv_obj_t *alll = label(allb, "Tümü >", ADL_TEXT);
     lv_obj_center(alll);
     lv_obj_add_event_cb(allb, sm_all_open_cb, LV_EVENT_CLICKED, 0);
 
@@ -524,8 +593,8 @@ void build_start_menu(lv_obj_t *scr) {
         }
     } else {
         static const char *pinned_svg[6] = { SVG_TERMINAL, SVG_FOLDER, SVG_GLOBE, SVG_SETTINGS, SVG_MEDIA, SVG_NOTES };
-        static const char *pinned_label[6] = { "Terminal", "Dosya", "Tarayici", "Ayarlar", "Medya", "Notlar" };
-        static const char *pinned_full[6] = { "Terminal", "Dosya Yoneticisi", "Tarayici", "Ayarlar", "Medya Oynatici", "Not Defteri" };
+        static const char *pinned_label[6] = { "Terminal", "Dosya", "Tarayıcı", "Ayarlar", "Medya", "Notlar" };
+        static const char *pinned_full[6] = { "Terminal", "Dosya Yöneticisi", "Tarayici", "Ayarlar", "Medya Oynatıcı", "Not Defteri" };
         for (int i = 0; i < 6; i++) {
             int col = i % 3, row = i / 3;
             sm_pinned(s_sm_browse, tx0 + col * (tw + tgap), ui_s(28) + row * (th + tgap),
@@ -533,8 +602,13 @@ void build_start_menu(lv_obj_t *scr) {
         }
     }
 
-    sm_header(s_sm_browse, ui_s(24), ui_s(272), "Onerilen");
-    sm_rec(s_sm_browse, ui_s(24), ui_s(300), mw - ui_s(48), SVG_FILE, "main.js", "WolfEngine js dosyası");
+    sm_header(s_sm_browse, ui_s(24), ui_s(272), "Önerilen");
+    s_sm_rec_box = lv_obj_create(s_sm_browse);
+    lv_obj_remove_style_all(s_sm_rec_box);
+    lv_obj_remove_flag(s_sm_rec_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_sm_rec_box, mw - ui_s(48), bh - ui_s(302));
+    lv_obj_set_pos(s_sm_rec_box, ui_s(24), ui_s(300));
+    sm_refresh_recents();
 
     lv_obj_t *sep = lv_obj_create(g_start_menu);
     lv_obj_remove_style_all(sep);
@@ -561,7 +635,7 @@ void build_start_menu(lv_obj_t *scr) {
     char g_ini_s[2] = { g_ini, 0 };
     lv_obj_t *ai = label(av, g_ini_s, 0xFFFFFF);
     lv_obj_center(ai);
-    lv_obj_t *ul = label(g_start_menu, (g_un && g_un[0]) ? g_un : "Kullanici", ADL_TEXT);
+    lv_obj_t *ul = label(g_start_menu, (g_un && g_un[0]) ? g_un : "Kullanıcı", ADL_TEXT);
     int uy = mh - ui_s(58);
     lv_obj_set_pos(ul, ui_s(70), uy);
     lv_obj_t *us = label(g_start_menu, "Kullanıcı değiştir", ADL_TEXT_DIM);

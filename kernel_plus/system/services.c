@@ -80,12 +80,13 @@ void system_sleep(void) {
     bool lb = m ? m->buttons[MOUSE_BUTTON_LEFT] : false;
     bool rb = m ? m->buttons[MOUSE_BUTTON_RIGHT] : false;
 
-    if (acpi_enter_sleep()) {
+    int s3_rc = acpi_enter_sleep();
+    if (s3_rc > 0) {
         /* Buraya donduk: firmware istekle bir sey yapmadi ya da uyandik.
          * Asagidaki bos-bekleme ile uyanma yolu yine calisir. */
         serial_printf("[sleep] acpi s3 istendi, donuldu; bos beklemeyle surduruluyor\n");
     } else {
-        serial_printf("[sleep] acpi s3 yok; cpu bos beklemesi (tus/fare ile uyanir)\n");
+        serial_printf("[sleep] guvenli uyku (rc=%d): ekran kilit/bos bekleme (tus/fare ile uyanir)\n", s3_rc);
     }
 
     for (;;) {

@@ -3,6 +3,79 @@
 Sürüm numarasının tek kaynağı [`version.json`](version.json)'dur; Makefile derleme
 anında okuyup `ARCTIAN_VERSION` olarak gömer.
 
+## 1.1 — UEFI/Dual-Boot Kurulum, AFS v7, xHCI USB 3.0, Masaüstü UX & Günlük Uygulamalar
+
+Güncel 1.1 durum özeti: [docs/1.0-durum.md](docs/1.0-durum.md).
+
+**Tam UTF-8 Türkçe Klavye, Fare & I2C-HID (`kernel_plus/drivers/`)**
+
+- `keyboard.c`: `TR-Q` (TS 2118), `TR-F` (TS 2117) ve `EN-Q` için tam Unicode/UTF-8
+  karakter haritaları (`ğ, Ğ, ü, Ü, ş, Ş, ı, İ, ö, Ö, ç, Ç, €, ₺`).
+- `mouse.c` & `i2c_hid.h`: Synaptics mutlak koordinat + iki parmak kaydırma desteği
+  ve Intel LPSS I2C-HID sürücü başlığı.
+
+**Sınırsız AFS v7 & Güvenli Disk Şifreleme (`lib/afs.c`, `lib/storage.c`, `kernel_plus/system/diskcrypt.c`)**
+
+- **AFS v7:** 1.024 dosya sınırı kaldırıldı → **65.536 dosya** kapasiteli dinamik parçalı
+  inode blokları (256×256) ve **çoklu-extent** (`EXT7` = `0x37545845`) dosya depolama;
+  mevcut AFS v6 diskleriyle geriye dönük uyumlu.
+- Gerçek `uid`/`gid`/`mode` çoklu kullanıcı dosya yalıtımı (`caps.c`, `afs_set_subject`),
+  GPT/MBR dinamik bölüm keşfi (`storage.c`) ve `diskcrypt.c` içinde OTA Slot B
+  (`32768..65535`) koruma sınırı.
+
+**xHCI USB 3.0, FAT32 RW & exFAT (`kernel_plus/drivers/`, `lib/`, `kernel_plus/system/volfs.c`)**
+
+- Çalışan **xHCI USB 3.0** denetleyicisi (`usb_xhci.c`, `qemu-xhci` doğrulamalı),
+  USB HID klavye/fare (`usb_hid.c`) ve USB yığın depolama (`usb_msd.c`).
+- MBR/GPT bölümlü **FAT32 okuma & yazma** + UTF-8 Türkçe LFN (`lib/fat32.c`),
+  **exFAT okuma** (`lib/exfat.h`) ve `D:/` sıcak takma (*hot-plug*, `volfs.c`).
+
+**UEFI Disk Kurulumu, Dual-Boot ("Yanına Kur") & Temiz Önyükleme (`install/`, `boot/`)**
+
+- Temiz UEFI kurulumunda GPT + **64 MiB FAT32 ESP** (`BOOTX64.EFI` + `KERNEL.ELF`) ile
+  kurulum sonrası doğrudan UEFI SSD önyükleme (`install/installer.c`, `boot/uefi/`).
+- Mevcut GPT diskindeki Windows/Linux bölümlerini ve ESP'yi koruyup `>= 5.0 GiB` boş
+  alanda yeni Arctian bölümü açan **"Yanına Kur (Dual-Boot)"** modu.
+- Kurulum arayüzünde (`install/inst_ui.h`) Türkçe bitmap font ve PS/2 fare desteği;
+  `boot/stage1.asm` içinde tüm yapay bekleme/sahte boot mesajları kaldırıldı.
+
+**Gerçek PC Ağ, Ses (`/dev/dsp`) & Laptop Güç (`kernel_plus/drivers/`, `kernel_plus/posix/`)**
+
+- Gerçek donanım register/DMA **RTL8169** (`rtl8169.c`), Intel **I225/I219-V/I226-V**
+  PCI kimlikleri (`pci.c`) + 64-bit adresli **e1000** (`e1000.c`), dürüst DHCP hata
+  bildirimi (`net.c`), `iwl_ax201.c` UMAC tarama/WPA2 CCMP kod yolu ve `ath9k.c`
+  çoklu hız desteği.
+- Ring-3 POSIX OSS `/dev/dsp` ve `/dev/audio` PCM akış arayüzü (`posix_fd.c`), çok pinli
+  HDA jack-sense (`hda.c`), `virtio_snd.c` S16 PCM ses ölçekleme (`virtio_snd_scale_pcm_s16`),
+  Intel PWM ekran parlaklığı (`gpu_intel.c`: `BLC_PCH_SPLIT`/`BLC_PCH_PAIR`/`BLC_CPU_PAIR`/
+  `BLC_LEGACY`), SMBus BAR4 ve geçerli FACS waking vector denetimli güvenli S3 uyku
+  koruması (`acpi.c`).
+
+**Masaüstü UX 1.1 & VirtualBox Düzeltmesi (`desktop/`, `kernel_plus/`)**
+
+- 8 yönlü kenar/köşe pencere boyutlandırma (`desktop/windows.c`), 4 adımlı **OOBE İlk
+  Kurulum Sihirbazı** (`desktop/oobe.h`: klavye düzeni, saat dilimi, tema/vurgu,
+  masaüstü turu), VirtualBox `VBoxVGA`/`VMSVGA` ilk-kare `Y_OFFSET` düzeltmesi (`gpu_bga.c`,
+  `gpu.c`), PNG ekran görüntüsü (`desktop/quickctl.c`), %100 UTF-8 Türkçe arayüz, çoklu
+  kullanıcı kilit/oturum yalıtımı (`lock.c`, `caps.c`), UEFI ESP OTA güncellemesi (`update.c`)
+  ve gerçek süreç RAM/CPU metrikleri (`proc.c`).
+
+**Günlük Uygulamalar, ZIP, ISO'ya Hazır Ofis & WebKit 1.1 (`desktop/apps/*`, `lib/`, `sdk/`)**
+
+- **Yeni ve güncellenmiş yerleşik uygulamalar:** Kaydet/Geri Al/Bul-Değiştir destekli `metin`;
+  [`lib/imgdec.h`](lib/imgdec.h) ile PNG/JPEG/GIF/BMP + yakınlaştırma/döndürmeli `foto`;
+  WAV/MP3/OGG/FLAC + ses/sarma/duraklatmalı `medya`; yeni **Hesap Makinesi** (`hesap`) ve
+  **Saat/Kronometre/Zamanlayıcı** (`saat`); [`lib/miniz.h`](lib/miniz.h) PKZIP sıkıştır/çıkar
+  destekli responsive Dosya Yöneticisi ve Terminal; çalışan aramalı & kullanıcı hesaplı Ayarlar;
+  gerçek Performans sekmeli Görev Yöneticisi; `C:/etc/calendar.txt` kalıcı etkinlikli Takvim;
+  özgün yola geri yükleyen Çöp Kovası; birleşik HTTPS + çevrimdışı DuckStore.
+- **ISO'ya hazır Ofis paketi (`sdk/office/`):** `safak.wlf`, `murekkep.wlf`, `abakus.wlf`,
+  `sahne.wlf` ve `mercek.wlf` paketleri kurulum ISO'suna (`tools/arctianpack.py`) ve
+  kurulum akışına (`installer.c`) eklendi; ortak Aç/Farklı Kaydet dosya seçicisi (`office_picker.h`).
+- **Sistem içi WebKit 1.1 (`sdk/webkit/`, `desktop/posix_win.c`):** 8 sekmeye kadar çoklu sekme,
+  `Ctrl+C/V` sistem panosu köprüsü, canlı pencere boyutlandırma, Türkçe UTF-8 girdi, kalıcı
+  çerezler, yer imleri, geçmiş, `C:/indirilenler/` indirme yöneticisi, yakınlaştırma ve sayfada bul.
+
 ## 1.0 — Donanım Hızlandırma, Dinamik Ölçekleme, Ağ & OOM Kurtarma
 
 **Bellek Yönetimi, Dinamik Görev Ölçekleme & OOM Kurtarma**

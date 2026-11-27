@@ -72,11 +72,14 @@ void qc_unread_clear(void) { s_unread = 0; tb_refresh_bell_badge(); }
 /* ------------------------------------------------------------------ */
 /* Perdeler: parlaklik karartmasi + gece modu                          */
 /* ------------------------------------------------------------------ */
-void qc_apply_overlays(void) {
-    int bright = kv_get_int("bright", 100);
+static void qc_apply_overlays_bright(int bright) {
     int night = kv_get_int("night", 0);
     if (bright < 30) bright = 30;
     if (bright > 100) bright = 100;
+
+    int hw_ok = 0;
+    if (g_asi && g_asi->power && g_asi->power->brightness_set)
+        hw_ok = (g_asi->power->brightness_set(bright) == 0);
 
     int W = (g_asi && g_asi->gfx && g_asi->gfx->width) ? g_asi->gfx->width() : 1920;
     int H = (g_asi && g_asi->gfx && g_asi->gfx->height) ? g_asi->gfx->height() : 1080;
@@ -84,8 +87,8 @@ void qc_apply_overlays(void) {
     if (s_dim) {
         lv_obj_set_size(s_dim, W, H);
         lv_obj_set_pos(s_dim, 0, 0);
-        /* karartma: 100 = kapali, 30 = en koyu (%70 karartma) */
-        int opa = ((100 - bright) * 255) / 100;
+        /* karartma: donanim parlakligi desteklenmiyorsa yazilimsal perde */
+        int opa = hw_ok ? 0 : (((100 - bright) * 255) / 100);
         lv_obj_set_style_bg_opa(s_dim, opa, 0);
         if (opa > 0) lv_obj_clear_flag(s_dim, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(s_dim, LV_OBJ_FLAG_HIDDEN);
@@ -112,9 +115,13 @@ void qc_apply_overlays(void) {
      * Sira onemli: gece (amber) once, karartma (siyah) sonra — boylece
      * karartma ustte kalir. Gorunur OSD her zaman en ustte tutulur. */
     if (s_night && night) lv_obj_move_foreground(s_night);
-    if (s_dim && bright < 100) lv_obj_move_foreground(s_dim);
+    if (s_dim && !hw_ok && bright < 100) lv_obj_move_foreground(s_dim);
     if (s_osd && !lv_obj_has_flag(s_osd, LV_OBJ_FLAG_HIDDEN))
         lv_obj_move_foreground(s_osd);
+}
+
+void qc_apply_overlays(void) {
+    qc_apply_overlays_bright(kv_get_int("bright", 100));
 }
 
 
@@ -157,53 +164,126 @@ void qc_osd(const char *label, int pct) {
 
 
 /* ------------------------------------------------------------------ */
-/* Ekran goruntusu (BMP -> AFS koku, masaustunde gorunur)             */
+/* Ekran goruntusu (PNG -> C:/ekran_XX.png, foto ile uyumlu)          */
 /* ------------------------------------------------------------------ */
-/* Madde 45: 2-6 MB'lik BMP yazimi UI olayinin icinde yapiliyordu; AFS
- * yavas oldugunda masaustu saniyelerce donuyordu. Goruntu artik once
- * bellek anlik gorusune aliniyor (hizli kopya, ekran o an doner), dosya
- * yazimi arka plan gorevine devredilir. Yazim sirasinda ekranin
- * degismesi goruntuyu bozmaz cunku kopya uzerinden yazilir. */
 typedef struct {
     void     *fh;
     uint32_t *snap;          /* w*h piksellik framebuffer kopyasi */
     int       w, h;
+    int       ok;
     char      name[24];
 } qc_shot_t;
 static qc_shot_t s_shot;
 static int       s_shot_busy;
 
+static void png_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)(v);
+}
+
+static uint32_t png_crc32(const uint8_t *buf, uint32_t len) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < len; i++) {
+        c ^= buf[i];
+        for (int b = 0; b < 8; b++)
+            c = (c & 1u) ? ((c >> 1) ^ 0xEDB88320u) : (c >> 1);
+    }
+    return c ^ 0xFFFFFFFFu;
+}
+
 static void qc_shot_work(void *u) {
     qc_shot_t *s = (qc_shot_t *)u;
-    int w = s->w, h = s->h;
-    int stride = ((w * 3 + 3) / 4) * 4;
-    uint32_t fsz = 54 + (uint32_t)stride * (uint32_t)h;
-    unsigned char hdr[54];
-    for (int i = 0; i < 54; i++) hdr[i] = 0;
-    hdr[0] = 'B'; hdr[1] = 'M';
-    hdr[2] = (unsigned char)(fsz); hdr[3] = (unsigned char)(fsz >> 8);
-    hdr[4] = (unsigned char)(fsz >> 16); hdr[5] = (unsigned char)(fsz >> 24);
-    hdr[10] = 54;                       /* piksel verisi ofseti */
-    hdr[14] = 40;                       /* DIB baslik boyutu */
-    hdr[18] = (unsigned char)(w); hdr[19] = (unsigned char)(w >> 8);
-    hdr[22] = (unsigned char)(h); hdr[23] = (unsigned char)(h >> 8);
-    hdr[26] = 1;                        /* planlar */
-    hdr[28] = 24;                       /* bit/piksel */
-    if (g_asi->fs->write) g_asi->fs->write(s->fh, hdr, 54);
+    s->ok = 0;
+    if (!g_asi || !g_asi->mem || !g_asi->mem->alloc || !g_asi->fs || !g_asi->fs->write) return;
 
-    static unsigned char row[3 * 2560 + 4];
-    for (int y = h - 1; y >= 0; y--) {
-        const uint32_t *src = s->snap + (uint32_t)y * (uint32_t)w;
-        int k = 0;
-        for (int x = 0; x < w; x++) {
-            uint32_t p = src[x];
-            row[k++] = (unsigned char)(p & 0xFF);          /* B */
-            row[k++] = (unsigned char)((p >> 8) & 0xFF);   /* G */
-            row[k++] = (unsigned char)((p >> 16) & 0xFF);  /* R */
+    uint32_t w = (uint32_t)s->w;
+    uint32_t h = (uint32_t)s->h;
+    uint32_t row_bytes = 1u + w * 3u;
+    uint32_t raw_size = h * row_bytes;
+    uint32_t nblocks = (raw_size + 65534u) / 65535u;
+    if (nblocks == 0) nblocks = 1;
+    uint32_t zlib_size = 2u + nblocks * 5u + raw_size + 4u;
+    uint32_t total_size = 8u + 25u + (12u + zlib_size) + 12u;
+
+    uint8_t *png = (uint8_t *)g_asi->mem->alloc(total_size);
+    if (!png) return;
+
+    uint8_t *p = png;
+    /* PNG imza */
+    static const uint8_t sig[8] = { 137u, 80u, 78u, 71u, 13u, 10u, 26u, 10u };
+    for (int i = 0; i < 8; i++) *p++ = sig[i];
+
+    /* IHDR (13 bayt, 8-bit RGB non-interlaced) */
+    png_be32(p, 13u); p += 4;
+    uint8_t *ihdr_type = p;
+    *p++ = 'I'; *p++ = 'H'; *p++ = 'D'; *p++ = 'R';
+    png_be32(p, w); p += 4;
+    png_be32(p, h); p += 4;
+    *p++ = 8u; /* bit depth */
+    *p++ = 2u; /* color type: RGB */
+    *p++ = 0u; /* compression */
+    *p++ = 0u; /* filter */
+    *p++ = 0u; /* interlace */
+    png_be32(p, png_crc32(ihdr_type, 17u)); p += 4;
+
+    /* IDAT (zlib + DEFLATE stored bloklar) */
+    png_be32(p, zlib_size); p += 4;
+    uint8_t *idat_type = p;
+    *p++ = 'I'; *p++ = 'D'; *p++ = 'A'; *p++ = 'T';
+    *p++ = 0x78u; /* CMF: deflate, 32K pencere */
+    *p++ = 0x01u; /* FLG: 0x7801 % 31 == 0 */
+
+    uint32_t raw_rem = raw_size;
+    uint32_t blk_rem = 0;
+    uint32_t s1 = 1u, s2 = 0u;
+
+    for (uint32_t y = 0; y < h; y++) {
+        const uint32_t *src = s->snap + y * w;
+        for (uint32_t col = 0; col <= w; col++) {
+            uint8_t bytes[3];
+            uint32_t cnt;
+            if (col == 0) {
+                bytes[0] = 0u; /* filter: None */
+                cnt = 1u;
+            } else {
+                uint32_t px = src[col - 1u];
+                bytes[0] = (uint8_t)((px >> 16) & 0xFFu);
+                bytes[1] = (uint8_t)((px >> 8) & 0xFFu);
+                bytes[2] = (uint8_t)(px & 0xFFu);
+                cnt = 3u;
+            }
+            for (uint32_t bi = 0; bi < cnt; bi++) {
+                if (blk_rem == 0) {
+                    uint32_t chunk = (raw_rem > 65535u) ? 65535u : raw_rem;
+                    uint16_t nlen = (uint16_t)(chunk ^ 0xFFFFu);
+                    *p++ = (chunk == raw_rem) ? 0x01u : 0x00u;
+                    *p++ = (uint8_t)(chunk & 0xFFu);
+                    *p++ = (uint8_t)((chunk >> 8) & 0xFFu);
+                    *p++ = (uint8_t)(nlen & 0xFFu);
+                    *p++ = (uint8_t)((nlen >> 8) & 0xFFu);
+                    blk_rem = chunk;
+                }
+                uint8_t b = bytes[bi];
+                *p++ = b;
+                s1 += b; if (s1 >= 65521u) s1 -= 65521u;
+                s2 += s1; if (s2 >= 65521u) s2 -= 65521u;
+                blk_rem--;
+                raw_rem--;
+            }
         }
-        while (k % 4) row[k++] = 0;
-        if (g_asi->fs->write) g_asi->fs->write(s->fh, row, (uint32_t)k);
     }
+    png_be32(p, (s2 << 16) | s1); p += 4;
+    png_be32(p, png_crc32(idat_type, 4u + zlib_size)); p += 4;
+
+    /* IEND */
+    png_be32(p, 0u); p += 4;
+    *p++ = 'I'; *p++ = 'E'; *p++ = 'N'; *p++ = 'D';
+    png_be32(p, 0xAE426082u); p += 4;
+
+    if (g_asi->fs->write(s->fh, png, total_size) == 0) s->ok = 1;
+    if (g_asi->mem->free) g_asi->mem->free(png);
 }
 
 static void qc_shot_done(int status, void *u) {
@@ -212,51 +292,53 @@ static void qc_shot_done(int status, void *u) {
     if (s->snap && g_asi->mem && g_asi->mem->free) g_asi->mem->free(s->snap);
     s->snap = 0;
     s_shot_busy = 0;
-    qc_osd("Ekran goruntusu", 100);
-    arctian_notify("Ekran goruntusu", s->name);
+    if (s->ok) {
+        qc_osd("Ekran görüntüsü", 100);
+        arctian_notify("Ekran görüntüsü", s->name);
+    } else {
+        qc_osd("Ekran görüntüsü", 0);
+    }
 }
 
 static void qc_screenshot(void) {
     if (!g_asi || !g_asi->gfx || !g_asi->fs || !g_asi->fs->create) return;
-    if (s_shot_busy) { qc_osd("Goruntu hazirlaniyor", 0); return; }
+    if (s_shot_busy) { qc_osd("Görüntü hazırlanıyor", 0); return; }
     uint32_t *fb = g_asi->gfx->framebuffer();
     int w = g_asi->gfx->width(), h = g_asi->gfx->height();
-    if (!fb || w < 1 || h < 1 || w > 2560 || h > 2560) return;
+    if (!fb || w < 1 || h < 1 || w > 3840 || h > 2160) return;
 
     char name[24];
     void *fh = 0;
     for (int i = 1; i < 100 && !fh; i++) {
         int k = 0;
-        const char *pre = "ekran";
+        const char *pre = "C:/ekran_";
         while (*pre) name[k++] = *pre++;
-        if (i >= 10) name[k++] = (char)('0' + (i / 10));
+        name[k++] = (char)('0' + (i / 10));
         name[k++] = (char)('0' + (i % 10));
-        name[k++] = '.'; name[k++] = 'b'; name[k++] = 'm'; name[k++] = 'p';
+        name[k++] = '.'; name[k++] = 'p'; name[k++] = 'n'; name[k++] = 'g';
         name[k] = 0;
         int exists = 0;
-        if (g_asi->fs->count && g_asi->fs->name) {
-            int fc = g_asi->fs->count();
-            for (int j = 0; j < fc; j++) {
-                const char *fn = g_asi->fs->name(j);
-                if (fn && s_eq(fn, name)) { exists = 1; break; }
-            }
+        if (g_asi->fs->find && g_asi->fs->find(0, name) != 0) exists = 1;
+        else if (g_asi->fs->stat) {
+            asi_stat_t st;
+            if (g_asi->fs->stat(name, &st) == 0) exists = 1;
         }
         if (!exists) fh = g_asi->fs->create(0, name, 0);
     }
-    if (!fh) { qc_osd("Ekran goruntusu", 0); return; }
+    if (!fh) { qc_osd("Ekran görüntüsü", 0); return; }
 
-    /* framebuffer kopyasi: ~3 MB'lik düz aktarma, milisaniye sürer. */
     uint32_t npix = (uint32_t)w * (uint32_t)h;
     uint32_t *snap = 0;
     if (g_asi->mem && g_asi->mem->alloc)
         snap = (uint32_t *)g_asi->mem->alloc(npix * 4u);
-    if (!snap) { qc_osd("Ekran goruntusu", 0); return; }
+    if (!snap) { qc_osd("Ekran görüntüsü", 0); return; }
     for (uint32_t i = 0; i < npix; i++) snap[i] = fb[i];
 
     s_shot.fh = fh;
     s_shot.snap = snap;
     s_shot.w = w;
     s_shot.h = h;
+    s_shot.ok = 0;
     int l = 0;
     while (name[l] && l < (int)sizeof(s_shot.name) - 1) { s_shot.name[l] = name[l]; l++; }
     s_shot.name[l] = 0;
@@ -267,8 +349,6 @@ static void qc_screenshot(void) {
         s_shot_busy = 1;
         return;
     }
-    /* Arka plan parasi mesgul: eski davranisla senkron yaz (donar ama
-     * kaybetmez); kopya zaten alindigi icin goruntu tutarli kalir. */
     qc_shot_work(&s_shot);
     qc_shot_done(0, &s_shot);
 }
@@ -301,6 +381,7 @@ static void ses_end_cb(lv_event_t *e) {
     (void)e;
     /* surme bitince kaliciga yaz (her adimda yazma yapmamak icin) */
     int v = s_ses_sl ? lv_slider_get_value(s_ses_sl) : 50;
+    if (g_asi && g_asi->audio && g_asi->audio->set_volume) g_asi->audio->set_volume(v);
     char b[8]; itoa_buf(v, b, sizeof(b));
     kv_set("vol", b);
 }
@@ -319,8 +400,8 @@ static void parlak_cb(lv_event_t *e) {
         r[m] = 0;
         lv_label_set_text(s_par_lbl, r);
     }
-    qc_apply_overlays();       /* aninda karart */
-    qc_osd("Parlaklik", v);
+    qc_apply_overlays_bright(v);       /* aninda karart */
+    qc_osd("Parlaklık", v);
 }
 
 
@@ -341,7 +422,7 @@ static void parlak_end_cb(lv_event_t *e) {
 static void wifi_cb(lv_event_t *e) {
     (void)e;
     if (kv_get_int("airplane", 0)) {
-        qc_osd("Ucak modu acik", 0);
+        qc_osd("Uçak modu açık", 0);
         return;
     }
     int on = kv_get_int("wifi_on", 1) ? 0 : 1;      /* tersine cevir */
@@ -403,11 +484,11 @@ static void qc_qs_refresh(void) {
     if (air) wifi = 0;
 
     if (s_wifi_lbl)
-        lv_label_set_text(s_wifi_lbl, air ? "Ucak modu" : (wifi ? "Acik" : "Kapali"));
+        lv_label_set_text(s_wifi_lbl, air ? "Uçak modu" : (wifi ? "Açık" : "Kapalı"));
     if (s_air_lbl)
-        lv_label_set_text(s_air_lbl, air ? "Acik" : "Kapali");
+        lv_label_set_text(s_air_lbl, air ? "Açık" : "Kapalı");
     if (s_night_lbl)
-        lv_label_set_text(s_night_lbl, night ? "Acik" : "Kapali");
+        lv_label_set_text(s_night_lbl, night ? "Açık" : "Kapalı");
 
     if (s_ses_sl) {
         int v = (g_asi && g_asi->audio && g_asi->audio->volume)
@@ -462,7 +543,7 @@ static void qc_build_qs(void) {
     lv_obj_add_flag(s_qs, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *hd = lv_label_create(s_qs);
-    lv_label_set_text(hd, "Hizli Ayarlar");
+    lv_label_set_text(hd, "Hızlı Ayarlar");
     lv_obj_set_style_text_color(hd, lv_color_hex(ADL_ACCENT), 0);
 
     /* Ses */
@@ -479,7 +560,7 @@ static void qc_build_qs(void) {
     lv_obj_add_event_cb(s_ses_sl, ses_end_cb, LV_EVENT_RELEASED, 0);
 
     /* Parlaklik */
-    lv_obj_t *r2 = qc_row(s_qs, "Parlaklik", &s_par_lbl);
+    lv_obj_t *r2 = qc_row(s_qs, "Parlaklık", &s_par_lbl);
     (void)r2;
     s_par_sl = lv_slider_create(s_qs);
     lv_obj_set_size(s_par_sl, LV_PCT(100), 26);
@@ -493,7 +574,7 @@ static void qc_build_qs(void) {
     lv_obj_add_event_cb(rw, wifi_cb, LV_EVENT_CLICKED, 0);
 
     /* Ucak modu */
-    lv_obj_t *ra = qc_row(s_qs, "Ucak modu", &s_air_lbl);
+    lv_obj_t *ra = qc_row(s_qs, "Uçak modu", &s_air_lbl);
     lv_obj_add_flag(ra, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(ra, air_cb, LV_EVENT_CLICKED, 0);
 
@@ -510,7 +591,7 @@ static void qc_build_qs(void) {
     lv_obj_add_flag(rs, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(rs, shot_cb, LV_EVENT_CLICKED, 0);
     lv_obj_t *sl2 = lv_label_create(rs);
-    lv_label_set_text(sl2, "Ekran goruntusu al");
+    lv_label_set_text(sl2, "Ekran görüntüsü al");
     lv_obj_set_style_text_color(sl2, lv_color_hex(ADL_TEXT), 0);
     lv_obj_center(sl2);
 

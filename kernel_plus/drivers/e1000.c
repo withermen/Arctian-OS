@@ -146,6 +146,15 @@ void e1000_init(net_controller_t *nc) {
     e1000.rx_refill_pending = 0;
     e1000.tx_idx = 0;
 
+    /* Bus mastering + MMIO + IRQ açık olduğundan emin ol */
+    pci_enable_bus_mastering(nc->dev.bus, nc->dev.slot, nc->dev.func);
+    {
+        uint16_t cmd = pci_config_readw(nc->dev.bus, nc->dev.slot, nc->dev.func, PCI_CONFIG_COMMAND);
+        cmd &= (uint16_t)~PCI_CMD_INT_DISABLE;
+        cmd |= PCI_CMD_BUS_MASTER | PCI_CMD_MEM_SPACE;
+        pci_config_writew(nc->dev.bus, nc->dev.slot, nc->dev.func, PCI_CONFIG_COMMAND, cmd);
+    }
+
     uint32_t status = e1000_read_reg(E1000_REG_STATUS);
     kernel_debug("E1000: MMIO=0x%llX Status=0x%X IRQ=%d",
                  (unsigned long long)e1000.mmio_base, status, e1000.irq);
@@ -204,23 +213,29 @@ void e1000_init(net_controller_t *nc) {
         tx_descs[i].cmd = 0;
     }
 
-    e1000_write_reg(E1000_REG_RDBAL, (uint32_t)((uintptr_t)rx_descs & 0xFFFFFFFF));
-    e1000_write_reg(E1000_REG_RDBAH, 0);
+    uint64_t rdb_addr = (uint64_t)(uintptr_t)rx_descs;
+    e1000_write_reg(E1000_REG_RDBAL, (uint32_t)(rdb_addr & 0xFFFFFFFFu));
+    e1000_write_reg(E1000_REG_RDBAH, (uint32_t)(rdb_addr >> 32));
     e1000_write_reg(E1000_REG_RDLEN, E1000_NUM_RX_DESC * 16);
     e1000_write_reg(E1000_REG_RDH, 0);
     e1000_write_reg(E1000_REG_RDT, E1000_NUM_RX_DESC - 1);
-    e1000_write_reg(E1000_REG_RXDCTL, 0);
+
+    bool modern_intel = (nc->dev.device != PCI_DEV_E1000_82540EM &&
+                         nc->dev.device != PCI_DEV_E1000_82545EM &&
+                         nc->dev.device != PCI_DEV_E1000_82574L);
+    e1000_write_reg(E1000_REG_RXDCTL, modern_intel ? (1u << 25) : 0u);
 
     uint32_t rctl = RCTL_EN | RCTL_SBP | RCTL_UPE | RCTL_MPE |
                     RCTL_BAM | RCTL_BSIZE_2048 | RCTL_SECRC;
     e1000_write_reg(E1000_REG_RCTL, rctl);
 
-    e1000_write_reg(E1000_REG_TDBAL, (uint32_t)((uintptr_t)tx_descs & 0xFFFFFFFF));
-    e1000_write_reg(E1000_REG_TDBAH, 0);
+    uint64_t tdb_addr = (uint64_t)(uintptr_t)tx_descs;
+    e1000_write_reg(E1000_REG_TDBAL, (uint32_t)(tdb_addr & 0xFFFFFFFFu));
+    e1000_write_reg(E1000_REG_TDBAH, (uint32_t)(tdb_addr >> 32));
     e1000_write_reg(E1000_REG_TDLEN, E1000_NUM_TX_DESC * 16);
     e1000_write_reg(E1000_REG_TDH, 0);
     e1000_write_reg(E1000_REG_TDT, 0);
-    e1000_write_reg(E1000_REG_TXDCTL, 0);
+    e1000_write_reg(E1000_REG_TXDCTL, modern_intel ? ((1u << 25) | (1u << 24)) : 0u);
 
     uint32_t tctl = TCTL_EN | TCTL_PSP |
                     ((15 & 0xFF) << TCTL_CT_SHIFT) |
@@ -318,4 +333,13 @@ bool e1000_has_packet(void *ctx) {
 bool e1000_link_up(void) {
     if (!e1000.active || !e1000.mmio) return false;
     return (e1000_read_reg(E1000_REG_STATUS) & 0x02) != 0;  /* STATUS.LU */
+}
+
+int e1000_selftest_64bit(void) {
+    uint64_t rdb = (uint64_t)(uintptr_t)rx_descs;
+    uint64_t tdb = (uint64_t)(uintptr_t)tx_descs;
+    if (((rdb & 0xFFFFFFFFull) | ((rdb >> 32) << 32)) != rdb) return -1;
+    if (((tdb & 0xFFFFFFFFull) | ((tdb >> 32) << 32)) != tdb) return -2;
+    if (sizeof(e1000_rx_desc_t) != 16 || sizeof(e1000_tx_desc_t) != 16) return -3;
+    return 0;
 }

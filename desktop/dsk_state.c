@@ -294,11 +294,11 @@ int g_cal_y = 0, g_cal_m = 0;
 
 
 const char *const g_month_tr[12] = {
-    "Ocak", "Subat", "Mart", "Nisan", "Mayis", "Haziran",
-    "Temmuz", "Agustos", "Eylul", "Ekim", "Kasim", "Aralik"
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"
 };
 
-const char *const g_wday_tr[7] = { "Pt", "Sa", "Ca", "Pe", "Cu", "Ct", "Pz" };
+const char *const g_wday_tr[7] = { "Pt", "Sa", "Ça", "Pe", "Cu", "Ct", "Pz" };
 
 lv_font_t *s_f_time = 0;
 
@@ -420,15 +420,15 @@ uint8_t g_pkg_buf[DPK_MAX_PACKAGE];
 
 const accent_def_t g_accents[] = {
     { "Arctian Mavi", 0x3B82F6, 0x8B5CF6 },
-    { "Menekse",      0x8B5CF6, 0xEC4899 },
-    { "Zumrut",       0x22C55E, 0x14B8A6 },
+    { "Menekşe",      0x8B5CF6, 0xEC4899 },
+    { "Zümrüt",       0x22C55E, 0x14B8A6 },
     { "Turkuaz",      0x06B6D4, 0x3B82F6 },
     { "Turuncu",      0xF97316, 0xEF4444 },
     { "Pembe",        0xEC4899, 0x8B5CF6 },
-    { "Ates",         0xEF4444, 0xF97316 },
+    { "Ateş",         0xEF4444, 0xF97316 },
     { "Amber",        0xF59E0B, 0xF97316 },
-    { "Indigo",       0x6366F1, 0x8B5CF6 },
-    { "Celik",        0x64748B, 0x94A3B8 }
+    { "İndigo",       0x6366F1, 0x8B5CF6 },
+    { "Çelik",        0x64748B, 0x94A3B8 }
 };
 
 const int g_accent_n = (int)(sizeof(g_accents) / sizeof(g_accents[0]));

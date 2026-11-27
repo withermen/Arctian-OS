@@ -1,1 +1,1 @@
-{ "name": "foto", "title": "Fotoğraf Görüntüleyici", "category": "Medya", "icon": "icon.svg", "w": 880, "h": 560, "handles": "png" }
+{ "name": "foto", "title": "Fotoğraf Görüntüleyici", "category": "Medya", "icon": "icon.svg", "w": 880, "h": 560, "handles": "png,jpg,jpeg,bmp,gif" }

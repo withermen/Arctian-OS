@@ -2,6 +2,7 @@
 #include "net.h"
 #include "pci.h"
 #include "virtio_net.h"
+#include "wifi.h"
 #include "serial.h"
 
 net_if_t net_if;
@@ -33,6 +34,8 @@ extern void wifi_init(net_controller_t *nc);
 extern bool wifi_send_packet(void *ctx, const uint8_t *data, uint16_t length);
 extern bool wifi_has_packet(void *ctx);
 extern bool wifi_receive_packet(void *ctx, uint8_t *buf, uint16_t *length);
+
+int net_v11_selftest(void);
 
 void net_init(void) {
     net_if.valid = false;
@@ -124,6 +127,7 @@ void net_init(void) {
                 net_drv.has_packet = wifi_has_packet;
                 net_drv.receive_packet = wifi_receive_packet;
                 kernel_debug("NET: WiFi karti tespit edildi");
+                break;
             }
         }
     }
@@ -131,6 +135,7 @@ void net_init(void) {
     if (net_drv.type == -1) {
         kernel_debug("NET: Ag karti sürücüsü yüklenemedi!");
     }
+    net_v11_selftest();
 }
 
 bool net_send_packet(const uint8_t *data, uint16_t length) {
@@ -206,6 +211,12 @@ uint32_t net_rand32(void) {
 }
 
 extern bool e1000_link_up(void);
+extern bool rtl8169_link_up(void);
+extern int  rtl8169_selftest_layout(void);
+extern int  e1000_selftest_64bit(void);
+extern bool ipv4_is_virtual_nic_for_dev(int drv_type, uint16_t vendor, uint16_t device);
+extern int  iwl_ax201_selftest(void);
+extern int  ath9k_selftest(void);
 
 int net_driver_type(void) { return net_drv.type; }
 
@@ -213,6 +224,32 @@ bool net_link_up(void) {
     if (net_drv.type == NET_TYPE_VIRTIO) return virtio_net_link_up();
     if (net_drv.type == NET_TYPE_E1000) return e1000_link_up();
     if (net_drv.type == NET_TYPE_RTL8139) return true;  /* RTL: link varsayimi */
+    if (net_drv.type == NET_TYPE_RTL8169) return rtl8169_link_up();
     if (net_drv.type == NET_TYPE_PCNET) return pcnet_link_up();
+    if (net_drv.type == NET_TYPE_WIFI) return wifi_up();
     return false;
+}
+
+int net_v11_selftest(void) {
+    bool rtl_ok = (rtl8169_selftest_layout() == 0);
+    bool e1000_ok = (e1000_selftest_64bit() == 0);
+    bool dhcp_honesty_ok =
+        ipv4_is_virtual_nic_for_dev(NET_TYPE_VIRTIO, PCI_VENDOR_VIRTIO, 0x1041) &&
+        ipv4_is_virtual_nic_for_dev(NET_TYPE_E1000, PCI_VENDOR_INTEL, PCI_DEV_E1000_82540EM) &&
+        ipv4_is_virtual_nic_for_dev(NET_TYPE_RTL8139, PCI_VENDOR_REALTEK, PCI_DEV_RTL8139) &&
+        ipv4_is_virtual_nic_for_dev(NET_TYPE_PCNET, PCI_VENDOR_AMD, PCI_DEV_PCNET_II) &&
+        !ipv4_is_virtual_nic_for_dev(NET_TYPE_E1000, PCI_VENDOR_INTEL, 0x15F3) &&
+        !ipv4_is_virtual_nic_for_dev(NET_TYPE_E1000, PCI_VENDOR_INTEL, 0x156F) &&
+        !ipv4_is_virtual_nic_for_dev(NET_TYPE_RTL8169, PCI_VENDOR_REALTEK, 0x8168) &&
+        !ipv4_is_virtual_nic_for_dev(NET_TYPE_WIFI, PCI_VENDOR_INTEL, 0x51F0);
+    bool wifi_ok = (iwl_ax201_selftest() == 0) && (ath9k_selftest() == 0);
+    bool pass = rtl_ok && e1000_ok && dhcp_honesty_ok && wifi_ok;
+
+    serial_printf("[net11] selftest: rtl8169=%s e1000_64=%s dhcp_honesty=%s wifi=%s -> %s\n",
+                  rtl_ok ? "OK" : "FAIL",
+                  e1000_ok ? "OK" : "FAIL",
+                  dhcp_honesty_ok ? "OK" : "FAIL",
+                  wifi_ok ? "OK" : "FAIL",
+                  pass ? "PASS" : "FAIL");
+    return pass ? 0 : -1;
 }

@@ -18,6 +18,8 @@ extern "C" {
 #define ARCTIAN_SYS_GFX_RESIZE  503
 #define ARCTIAN_SYS_GFX_DESTROY 504
 #define ARCTIAN_SYS_SHM_CREATE  505
+#define ARCTIAN_SYS_CLIP_GET    506
+#define ARCTIAN_SYS_CLIP_SET    507
 
 static inline long arctian_syscall6(long n, long a1, long a2, long a3,
                                     long a4, long a5, long a6) {
@@ -64,6 +66,16 @@ static inline int arctian_gfx_destroy(int win_fd) {
 
 static inline int arctian_shm_create(size_t size) {
     return (int)arctian_syscall6(ARCTIAN_SYS_SHM_CREATE, (long)size, 0, 0, 0, 0, 0);
+}
+
+static inline int arctian_clip_get(char *buf, size_t cap) {
+    return (int)arctian_syscall6(ARCTIAN_SYS_CLIP_GET, (long)(uintptr_t)buf,
+                                 (long)cap, 0, 0, 0, 0);
+}
+
+static inline int arctian_clip_set(const char *str, size_t len) {
+    return (int)arctian_syscall6(ARCTIAN_SYS_CLIP_SET, (long)(uintptr_t)str,
+                                 (long)len, 0, 0, 0, 0);
 }
 
 #ifdef __cplusplus

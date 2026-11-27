@@ -71,6 +71,7 @@
 #include "wolf_bridge.h"
 #include "wolf.h"
 #include "posix.h"
+#include "ec.h"
 
 asi_t *g_asi = 0;
 
@@ -91,6 +92,69 @@ static void sys_writeback(void) {
     if (now - s_last_wb < 1000u) return;
     s_last_wb = now;
     storage_flush();
+}
+
+static int esp_find_bdev(void) {
+    int n = blockdev_count();
+    for (int b = 0; b < n; b++) {
+        blockdev_info_t info;
+        if (blockdev_info(b, &info) != 0 || info.sectors == 0 || info.removable)
+            continue;
+        if (fat32_mount(b) != 0)
+            continue;
+        uint32_t sz = 0;
+        int isd = 0;
+        int has_efi = (fat_stat("/EFI/ARCTIAN", &sz, &isd) == 0 && isd) ||
+                      (fat_stat("/EFI/BOOT", &sz, &isd) == 0 && isd);
+        if (has_efi) return b;
+        fat32_unmount();
+    }
+    return -1;
+}
+
+static int sys_esp_update_kernel(const void *elf_data, uint32_t elf_size) {
+    int prev_bdev = fat32_mounted() ? fat32_bdev() : -1;
+    int esp_bdev = esp_find_bdev();
+    if (esp_bdev < 0) {
+        if (prev_bdev >= 0) (void)fat32_mount(prev_bdev);
+        return 1; /* BIOS-only disk: ESP yok */
+    }
+    if (!elf_data || elf_size == 0) {
+        fat32_unmount();
+        if (prev_bdev >= 0 && prev_bdev != esp_bdev) (void)fat32_mount(prev_bdev);
+        return 0; /* ESP mevcut */
+    }
+    const uint8_t *eb = (const uint8_t *)elf_data;
+    if (elf_size < 64u || eb[0] != 0x7Fu || eb[1] != 'E' || eb[2] != 'L' ||
+        eb[3] != 'F' || eb[4] != 2u) {
+        fat32_unmount();
+        if (prev_bdev >= 0 && prev_bdev != esp_bdev) (void)fat32_mount(prev_bdev);
+        return -2;
+    }
+
+    int rc = -3;
+    if (fat32_mkdir("/EFI") == 0 && fat32_mkdir("/EFI/ARCTIAN") == 0) {
+        uint32_t vsz = 0;
+        int vdir = 0;
+        /* Once gecici dosya yazip dogrula, sonra KERNEL.ELF'i guncelle */
+        if (fat32_write_file("/EFI/ARCTIAN/KERNEL.NEW", elf_data, elf_size) == 0 &&
+            fat_stat("/EFI/ARCTIAN/KERNEL.NEW", &vsz, &vdir) == 0 &&
+            !vdir && vsz == elf_size &&
+            fat32_write_file("/EFI/ARCTIAN/KERNEL.ELF", elf_data, elf_size) == 0 &&
+            fat_stat("/EFI/ARCTIAN/KERNEL.ELF", &vsz, &vdir) == 0 &&
+            !vdir && vsz == elf_size) {
+            (void)fat32_delete_file("/EFI/ARCTIAN/KERNEL.NEW");
+            blockdev_flush(esp_bdev);
+            rc = 0;
+        } else {
+            (void)fat32_delete_file("/EFI/ARCTIAN/KERNEL.NEW");
+        }
+    }
+    fat32_unmount();
+    if (prev_bdev >= 0 && prev_bdev != esp_bdev) (void)fat32_mount(prev_bdev);
+    serial_printf("[ota-esp] KERNEL.ELF guncelleme bdev=%d size=%u rc=%d\n",
+                  esp_bdev, (unsigned)elf_size, rc);
+    return rc;
 }
 
 /* ---- Cokme koruma ----
@@ -133,10 +197,17 @@ static uint64_t time_unix_now(void) { return (uint64_t)clock_unix(); }
 static void     time_set_unix(uint32_t u) { clock_set_unix(u); }
 static void     time_set_tz(int minutes) { clock_set_tz_offset(minutes); }
 static int  net_present(void) { return net_get_mac() ? 1 : 0; }
-static int  net_send(const void *d, uint32_t n) { return net_send_packet((const uint8_t *)d, (uint16_t)n) ? 0 : -1; }
+static int  net_send(const void *d, uint32_t n) {
+    int r = net_send_packet((const uint8_t *)d, (uint16_t)n) ? 0 : -1;
+    if (r == 0 && n > 0) proc_add_net_bytes((uint64_t)n);
+    return r;
+}
 static int  net_recv(void *b, uint32_t n) {
     uint16_t len = (uint16_t)n;
-    if (net_receive_packet((uint8_t *)b, &len)) return (int)len;
+    if (net_receive_packet((uint8_t *)b, &len)) {
+        if (len > 0) proc_add_net_bytes((uint64_t)len);
+        return (int)len;
+    }
     return -1;
 }
 static int  net_has(void) { return 0; }
@@ -193,11 +264,15 @@ static int net_tcp_connect_fn(const uint8_t ip[4], uint16_t port) {
 }
 static int net_tcp_send_fn(int c, const void *d, uint32_t n) {
     if (net_perm()) return -1;
-    return tcp_send(c, (const uint8_t *)d, (uint16_t)n) ? 0 : -1;
+    int r = tcp_send(c, (const uint8_t *)d, (uint16_t)n) ? 0 : -1;
+    if (r == 0 && n > 0) proc_add_net_bytes((uint64_t)n);
+    return r;
 }
 static int net_tcp_recv_fn(int c, void *b, uint32_t n) {
     if (net_perm()) return -1;
-    return tcp_receive(c, (uint8_t *)b, (uint16_t)n);
+    int r = tcp_receive(c, (uint8_t *)b, (uint16_t)n);
+    if (r > 0) proc_add_net_bytes((uint64_t)r);
+    return r;
 }
 static int net_tcp_close_fn(int c) { if (net_perm()) return -1; return tcp_close(c) ? 0 : -1; }
 static int net_tcp_state_fn(int c) { return tcp_state(c); }
@@ -218,11 +293,15 @@ static int net_sock_connect_fn(int fd, const uint8_t ip[4], uint16_t port) {
 }
 static int net_sock_send_fn(int fd, const void *d, uint32_t n) {
     if (net_perm()) return -1;
-    return ksock_send(fd, d, n);
+    int r = ksock_send(fd, d, n);
+    if (r > 0) proc_add_net_bytes((uint64_t)r);
+    return r;
 }
 static int net_sock_recv_fn(int fd, void *b, uint32_t n) {
     if (net_perm()) return -1;
-    return ksock_recv(fd, b, n);
+    int r = ksock_recv(fd, b, n);
+    if (r > 0) proc_add_net_bytes((uint64_t)r);
+    return r;
 }
 static int net_sock_close_fn(int fd) { if (net_perm()) return -1; return ksock_close(fd); }
 static int net_sock_state_fn(int fd) { return ksock_state(fd); }
@@ -323,11 +402,19 @@ static const char *dev_status_fn(int i) {
 }
 static const char *net_http_get(const char *url, uint32_t *len_out) {
     if (net_perm()) { if (len_out) *len_out = 0; return 0; }
-    return https_fetch_body(url, len_out);
+    uint32_t tmp = 0;
+    const char *r = https_fetch_body(url, &tmp);
+    if (r && tmp > 0) proc_add_net_bytes((uint64_t)tmp);
+    if (len_out) *len_out = tmp;
+    return r;
 }
 static const char *net_https_get(const char *url, uint32_t *len_out) {
     if (net_perm()) { if (len_out) *len_out = 0; return 0; }
-    return https_fetch_body(url, len_out);
+    uint32_t tmp = 0;
+    const char *r = https_fetch_body(url, &tmp);
+    if (r && tmp > 0) proc_add_net_bytes((uint64_t)tmp);
+    if (len_out) *len_out = tmp;
+    return r;
 }
 static const char *net_http_request(const char *method, const char *url,
                                     const char *content_type, const char *extra_headers,
@@ -338,8 +425,13 @@ static const char *net_http_request(const char *method, const char *url,
         if (len_out) *len_out = 0;
         return 0;
     }
-    return https_request(method, url, content_type, extra_headers,
-                         body, body_len, status_out, len_out);
+    uint32_t rlen = 0;
+    const char *r = https_request(method, url, content_type, extra_headers,
+                                  body, body_len, status_out, &rlen);
+    if (body_len > 0) proc_add_net_bytes((uint64_t)body_len);
+    if (r && rlen > 0) proc_add_net_bytes((uint64_t)rlen);
+    if (len_out) *len_out = rlen;
+    return r;
 }
 static uint32_t net_cookie_export(char *out, uint32_t cap) {
     if (net_perm()) return 0;
@@ -351,11 +443,15 @@ static int net_ws_open(const char *url) {
 }
 static int net_ws_send(int id, const void *data, uint32_t len, int is_binary) {
     if (net_perm()) return -1;
-    return https_ws_send(id, data, len, is_binary);
+    int r = https_ws_send(id, data, len, is_binary);
+    if (r >= 0 && len > 0) proc_add_net_bytes((uint64_t)len);
+    return r;
 }
 static int net_ws_recv(int id, void *buf, uint32_t cap, int *is_binary_out) {
     if (net_perm()) return -1;
-    return https_ws_recv(id, buf, cap, is_binary_out);
+    int r = https_ws_recv(id, buf, cap, is_binary_out);
+    if (r > 0) proc_add_net_bytes((uint64_t)r);
+    return r;
 }
 static int net_ws_state(int id) {
     if (net_perm()) return 0;
@@ -387,10 +483,15 @@ static int net_download(const char *url, void *dst, uint32_t cap, uint32_t *len_
         if (!body || n == 0) return -1;
         if (n > cap) return -2;
         memcpy(dst, body, n);
+        proc_add_net_bytes((uint64_t)n);
         if (len_out) *len_out = n;
         return 0;
     }
-    return http_download(url, dst, cap, len_out);
+    uint32_t n = 0;
+    int rc = http_download(url, dst, cap, &n);
+    if (rc == 0 && n > 0) proc_add_net_bytes((uint64_t)n);
+    if (len_out) *len_out = n;
+    return rc;
 }
 
 /* Indirilecek dosyanin boyunu HEAD ile ogren; buyuk paketlerde tamponu
@@ -469,6 +570,7 @@ static int net_download_raw(const char *url, uint32_t lba,
         if (storage_write(c.lba, 1, c.part) != 0) return -3;
     }
     storage_flush();
+    if (c.total > 0) proc_add_net_bytes((uint64_t)c.total);
     *out_size = c.total;
     *out_crc = ~c.crc;
     return 0;
@@ -511,6 +613,8 @@ static int power_charging_fn(void) { power_refresh(); return s_pwr_cache.chargin
 static int power_minutes_fn(void) { power_refresh(); return s_pwr_cache.minutes; }
 static int power_acpi_fn(void) { return acpi_present(); }
 static void power_sleep_fn(void) { system_sleep(); }
+static int power_brightness_get_fn(void) { return ec_brightness_get(); }
+static int power_brightness_set_fn(int percent) { return ec_brightness_set(percent); }
 
 /* main_kernel zaten hazir bir ASI verir; biz gfx + input ekleriz. */
 static asi_gfx_t   s_gfx;
@@ -578,13 +682,25 @@ static uint32_t *gfx_fb(void) { return backbuffer_ptr(); }
 static uint32_t gfx_rgb(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
+static inline uint64_t kp_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 static void     gfx_present(void) { backbuffer_blit(); }
 static void     gfx_present_rect(int x, int y, int w, int h) {
+    uint64_t t0 = kp_rdtsc();
     backbuffer_blit_rect(x, y, w, h);
+    uint64_t t1 = kp_rdtsc();
+    if (t1 > t0) proc_desktop_blit_tsc(t1 - t0);
 }
 static void     gfx_flip(void) {
+    uint64_t t0 = kp_rdtsc();
     if (gpu_is_ready()) gpu_vsync_flip();
     else backbuffer_blit();
+    uint64_t t1 = kp_rdtsc();
+    if (t1 > t0) proc_desktop_blit_tsc(t1 - t0);
 }
 
 static int gfx_set_mode(int width, int height) {
@@ -606,7 +722,7 @@ static int gfx_set_mode(int width, int height) {
     return 0;
 }
 
-static int in_mx(void) { mouse_poll(); mouse_state_t *m = mouse_get_state(); return m ? m->x : 0; }
+static int in_mx(void) { proc_desktop_frame_begin(); mouse_poll(); mouse_state_t *m = mouse_get_state(); return m ? m->x : 0; }
 static int in_my(void) { mouse_state_t *m = mouse_get_state(); return m ? m->y : 0; }
 static int in_btns(void) {
     mouse_state_t *m = mouse_get_state();
@@ -622,8 +738,8 @@ static int in_scroll(void) {
     m->scroll = 0;
     return s;
 }
-static int in_key_avail(void) { return keyboard_event_avail() ? 1 : 0; }
-static int in_hotkey_pop(void) { return keyboard_pop_hotkey(); }
+static int in_key_avail(void) { keyboard_poll(); return keyboard_event_avail() ? 1 : 0; }
+static int in_hotkey_pop(void) { keyboard_poll(); return keyboard_pop_hotkey(); }
 static void in_kbd_layout(int id) { keyboard_set_layout(id); }
 static int in_ctrl_down(void) { return keyboard_ctrl_down(); }
 static int in_shift_down(void) { return keyboard_shift_down(); }
@@ -631,9 +747,16 @@ static int in_shift_down(void) { return keyboard_shift_down(); }
  * masaustu kabugunda bu sayac uzerinden telafi edilir. */
 static uint32_t in_press_seq(void) { return mouse_left_press_seq(); }
 static int in_key_pop(void) {
-    keyboard_event_t ev;
-    if (keyboard_pop_event(&ev) && ev.pressed) return (unsigned char)ev.ch;
-    return -1;
+    keyboard_poll();
+    return keyboard_pop();
+}
+static uint32_t in_key_pop_cp(void) {
+    keyboard_poll();
+    return keyboard_pop_cp();
+}
+static int in_key_pop_utf8(char out[5]) {
+    keyboard_poll();
+    return keyboard_pop_utf8(out);
 }
 
 /* Ekran cizimi tamamen acilis animasyonuna aittir (bootanim.c).
@@ -902,6 +1025,7 @@ void kernel_plus_main(void *arg) {
     if (gui) bootanim_advance(15);
     LOG("[kp] keyboard...");
     keyboard_init();
+    keyboard_v11_selftest();
     if (gui) bootanim_advance(15);
     LOG("[kp] usb...");
     usb_init();
@@ -1007,11 +1131,14 @@ void kernel_plus_main(void *arg) {
     s_input.ctrl_down = in_ctrl_down;
     s_input.shift_down = in_shift_down;
     s_input.mouse_press_seq = in_press_seq;
+    s_input.key_pop_cp = in_key_pop_cp;
+    s_input.key_pop_utf8 = in_key_pop_utf8;
     s_system.shutdown = sys_shutdown;
     s_system.reboot = sys_reboot;
     s_system.writeback = sys_writeback;
     s_system.recover_begin = sys_recover_begin;
     s_system.recover_end = sys_recover_end;
+    s_system.esp_update_kernel = sys_esp_update_kernel;
     s_net.present = net_present;
     s_net.send = net_send;
     s_net.recv = net_recv;
@@ -1131,6 +1258,8 @@ void kernel_plus_main(void *arg) {
     s_power.minutes = power_minutes_fn;
     s_power.acpi = power_acpi_fn;
     s_power.sleep = power_sleep_fn;
+    s_power.brightness_get = power_brightness_get_fn;
+    s_power.brightness_set = power_brightness_set_fn;
     s_spool.submit = spool_submit;
     s_spool.count = spool_count;
     s_spool.info = spool_info;
@@ -1171,6 +1300,16 @@ void kernel_plus_main(void *arg) {
     s_posix.gfx_copy_rect = posix_gfx_copy_rect;
     s_posix.gfx_push_event = posix_gfx_push_event;
     s_posix.gfx_drain = posix_gfx_desktop_drain;
+    {
+        extern int      posix_gfx_resize_win(int win_id, uint32_t w, uint32_t h);
+        extern uint32_t posix_gfx_clip_seq(void);
+        extern int      posix_gfx_clip_get(char *out, uint32_t cap);
+        extern void     posix_gfx_clip_set(const char *str, uint32_t len, uint32_t *seq_out);
+        s_posix.gfx_resize = posix_gfx_resize_win;
+        s_posix.clip_seq = posix_gfx_clip_seq;
+        s_posix.clip_get = posix_gfx_clip_get;
+        s_posix.clip_set = posix_gfx_clip_set;
+    }
     g_asi->posix = &s_posix;
 
     caps_init(g_asi);
@@ -1249,6 +1388,8 @@ void kernel_plus_main(void *arg) {
 #endif
     }
     lab_selftest();
+    caps_multiuser_selftest();
+    proc_v11_selftest();
 #else
     serial_puts("[kp] oz-testler atlandi (uretim acilisi)\n");
 #endif

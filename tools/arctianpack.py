@@ -102,7 +102,16 @@ def build_efi_esp_img(bootx64_path: str, kernel_elf_path: str, out_img: str) -> 
     _run(["mformat", "-i", out_img, "-F", "-v", "ARCTIAN_EFI", "::"])
     _run(["mmd", "-i", out_img, "::/EFI", "::/EFI/BOOT", "::/EFI/ARCTIAN"])
     _run(["mcopy", "-o", "-i", out_img, bootx64_path, "::/EFI/BOOT/BOOTX64.EFI"])
+    _run(["mcopy", "-o", "-i", out_img, bootx64_path, "::/EFI/ARCTIAN/BOOTX64.EFI"])
     _run(["mcopy", "-o", "-i", out_img, kernel_elf_path, "::/EFI/ARCTIAN/KERNEL.ELF"])
+    live_flag = out_img + ".livecd"
+    with open(live_flag, "wb") as lf:
+        lf.write(b"LIVE")
+    _run(["mcopy", "-o", "-i", out_img, live_flag, "::/EFI/ARCTIAN/LIVECD"])
+    try:
+        os.remove(live_flag)
+    except OSError:
+        pass
     return img_bytes
 
 
@@ -120,8 +129,8 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
     stage1_iso = bytearray(read(cfg["boot"]["stage1_iso"]))
 
     payload = bytes(stage2) + main_kernel
-    if len(payload) > 0xFFFFFFFF:
-        raise SystemExit("  HATA: ISO boot payload 4 GiB sinirini asiyor (%d)" % len(payload))
+    if len(payload) > 0x20000:
+        raise SystemExit("  HATA: ISO boot payload stage1_iso 0x30000 sinirini asiyor (%d > 131072)" % len(payload))
     mag = stage1_iso.find(b"PBYT")
     if mag < 4:
         print("  UYARI: stage1_iso 'PBYT' isareti bulunamadi; ISO payload yamalanmadi")
@@ -174,6 +183,15 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
         shutil.copyfile(cacert_src, os.path.join(iso_root, "CACERT.PEM"))
         bundled.append(("CACERT.PEM", os.path.getsize(cacert_src)))
 
+    # On-yuklu Ofis .wlf paketleri (build/wlf/ veya ARCTIAN_OFFICE_DIR)
+    office_dir = os.environ.get("ARCTIAN_OFFICE_DIR", "").strip() or os.path.join("build", "wlf")
+    for wlf_name in ("safak", "murekkep", "abakus", "sahne", "mercek"):
+        wlf_src = os.path.join(office_dir, f"{wlf_name}.wlf")
+        if os.path.isfile(wlf_src):
+            iso_wlf = f"{wlf_name.upper()}.WLF"
+            shutil.copyfile(wlf_src, os.path.join(iso_root, iso_wlf))
+            bundled.append((iso_wlf, os.path.getsize(wlf_src)))
+
     # Hibrit BIOS + UEFI (Cift El Torito + ISOHybrid MBR/GPT)
     bootx64_src = _find_optional_file("ARCTIAN_UEFI_EFI", ["build/uefi/BOOTX64.EFI"])
     default_kelf = os.path.splitext(cfg["boot"]["main_kernel"])[0] + ".elf"
@@ -193,7 +211,15 @@ def build_iso(cfg, stage2, main_kernel, module_payloads, img_bytes=b"", hd_boot=
         os.makedirs(os.path.join(iso_root, "EFI", "BOOT"), exist_ok=True)
         os.makedirs(os.path.join(iso_root, "EFI", "ARCTIAN"), exist_ok=True)
         shutil.copyfile(bootx64_src, os.path.join(iso_root, "EFI", "BOOT", "BOOTX64.EFI"))
+        shutil.copyfile(bootx64_src, os.path.join(iso_root, "EFI", "ARCTIAN", "BOOTX64.EFI"))
         shutil.copyfile(kelf_src, os.path.join(iso_root, "EFI", "ARCTIAN", "KERNEL.ELF"))
+        with open(os.path.join(iso_root, "EFI", "ARCTIAN", "LIVECD"), "wb") as lf:
+            lf.write(b"LIVE")
+        # Kok ISO9660 dizinine de kopyala ki installer.c (iso9660_find) ESP'ye kurabilsin
+        shutil.copyfile(bootx64_src, os.path.join(iso_root, "BOOTX64.EFI"))
+        shutil.copyfile(kelf_src, os.path.join(iso_root, "KERNEL.ELF"))
+        bundled.append(("BOOTX64.EFI", os.path.getsize(bootx64_src)))
+        bundled.append(("KERNEL.ELF", os.path.getsize(kelf_src)))
         cmd = [
             "xorriso", "-as", "mkisofs", "-R", "-r", "-J", "-iso-level", "3",
             "-V", "ARCTIAN_OS",

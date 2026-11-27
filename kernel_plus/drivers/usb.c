@@ -2,78 +2,180 @@
 #include "usb.h"
 #include "pci.h"
 #include "usb_hid.h"
+#include "serial.h"
 
 usb_device_t usb_devices[USB_MAX_DEVICES];
 int usb_device_count = 0;
 
-static uint8_t usb_keyboard_buf[USB_MAX_DEVICES][8];
-static int8_t usb_keyboard_state[USB_MAX_DEVICES];
+static uint8_t usb_prev_mod[USB_MAX_DEVICES];
+static uint8_t usb_prev_keys[USB_MAX_DEVICES][6];
 static uint8_t usb_mouse_buf[USB_MAX_DEVICES][4];
 
-/* USB HID keyboard scancode set 1 → ASCII (US QWERTY base) */
+/* Complete USB HID Usage Page 0x07 -> PS/2 Set-1 scancode mapping table.
+ * Extended (0xE0-prefixed) usages are flagged separately via usb_hid_is_extended(). */
 static const uint8_t usb_hid_to_scancode[256] = {
-    0,0,0,0, 0x1E,0x1F,0x20,0x21, 0x22,0x23,0x24,0x25, 0x26,0x27,0x28,0x29,
-    0x2A,0x2B,0x2C,0x2D, 0x2E,0x2F,0x30,0x31, 0x32,0x33,0x34,0x35, 0x36,0x37,0x38,0x39,
-    0x3A,0x3B,0x3C,0x3D, 0x3E,0x3F,0x40,0x41, 0x42,0x43,0x44,0x45, 0x46,0x47,0x48,0x49,
-    0x4A,0x4B,0x4C,0x4D, 0x4E,0x4F,0x50,0x51, 0x52,0x53,0x54,0x55, 0x56,0x57,0x58,0x59,
-    0x5A,0x5B,0x5C,0x5D, 0x5E,0x5F,0x60,0x61, 0x62,0x63,0x64,0x65, 0x66,0x67,0x68,0x69,
-    0x6A,0x6B,0x6C,0x6D, 0x6E,0x6F,0x70,0x71, 0x72,0x73,0x74,0x75, 0x76,0x77,0x78,0x79,
-    0x7A,0x7B,0x7C,0x7D, 0x7E,0x7F,0x80,0x81, 0x82,0x83,0x84,0x85, 0x86,0x87,0x88,0x89,
-    0x8A,0x8B,0x8C,0x8D, 0x8E,0x8F,0x90,0x91, 0x92,0x93,0x94,0x95, 0x96,0x97,0x98,0x99,
-    0x9A,0x9B,0x9C,0x9D, 0x9E,0x9F,0xA0,0xA1, 0xA2,0xA3,0xA4,0xA5, 0xA6,0xA7,0xA8,0xA9,
-    0xAA,0xAB,0xAC,0xAD, 0xAE,0xAF,0xB0,0xB1, 0xB2,0xB3,0xB4,0xB5, 0xB6,0xB7,0xB8,0xB9,
-    0xBA,0xBB,0xBC,0xBD, 0xBE,0xBF,0xC0,0xC1, 0xC2,0xC3,0xC4,0xC5, 0xC6,0xC7,0xC8,0xC9,
-    0xCA,0xCB,0xCC,0xCD, 0xCE,0xCF,0xD0,0xD1, 0xD2,0xD3,0xD4,0xD5, 0xD6,0xD7,0xD8,0xD9,
-    0xDA,0xDB,0xDC,0xDD, 0xDE,0xDF,0xE0,0xE1, 0xE2,0xE3,0xE4,0xE5, 0xE6,0xE7,0xE8,0xE9,
-    0xEA,0xEB,0xEC,0xED, 0xEE,0xEF,0xF0,0xF1, 0xF2,0xF3,0xF4,0xF5, 0xF6,0xF7,0xF8,0xF9,
-    0xFA,0xFB,0xFC,0xFD, 0xFE,0xFF,0x00,0x01, 0x02,0x03,0x04,0x05, 0x06,0x07,0x08,0x09,
-    0x0A,0x0B,0x0C,0x0D, 0x0E,0x0F,0x10,0x11, 0x12,0x13,0x14,0x15, 0x16,0x17,0x18,0x19,
+    /* 0x00..0x03: reserved / rollover / POST fail / undefined */
+    0x00, 0x00, 0x00, 0x00,
+    /* 0x04..0x1D: A..Z */
+    0x1E, /* 0x04 A */  0x30, /* 0x05 B */  0x2E, /* 0x06 C */  0x20, /* 0x07 D */
+    0x12, /* 0x08 E */  0x21, /* 0x09 F */  0x22, /* 0x0A G */  0x23, /* 0x0B H */
+    0x17, /* 0x0C I */  0x24, /* 0x0D J */  0x25, /* 0x0E K */  0x26, /* 0x0F L */
+    0x32, /* 0x10 M */  0x31, /* 0x11 N */  0x18, /* 0x12 O */  0x19, /* 0x13 P */
+    0x10, /* 0x14 Q */  0x13, /* 0x15 R */  0x1F, /* 0x16 S */  0x14, /* 0x17 T */
+    0x16, /* 0x18 U */  0x2F, /* 0x19 V */  0x11, /* 0x1A W */  0x2D, /* 0x1B X */
+    0x15, /* 0x1C Y */  0x2C, /* 0x1D Z */
+    /* 0x1E..0x27: 1..9, 0 */
+    0x02, /* 0x1E 1 */  0x03, /* 0x1F 2 */  0x04, /* 0x20 3 */  0x05, /* 0x21 4 */
+    0x06, /* 0x22 5 */  0x07, /* 0x23 6 */  0x08, /* 0x24 7 */  0x09, /* 0x25 8 */
+    0x0A, /* 0x26 9 */  0x0B, /* 0x27 0 */
+    /* 0x28..0x2C: Enter, Esc, Backspace, Tab, Space */
+    0x1C, /* 0x28 Enter */
+    0x01, /* 0x29 Esc */
+    0x0E, /* 0x2A Backspace */
+    0x0F, /* 0x2B Tab */
+    0x39, /* 0x2C Space */
+    /* 0x2D..0x38: punctuation (also TR-Q extra keys: [, ], ;, ', `, ,, ., /, \) */
+    0x0C, /* 0x2D - / _ */
+    0x0D, /* 0x2E = / + */
+    0x1A, /* 0x2F [ / { (TR g) */
+    0x1B, /* 0x30 ] / } (TR u) */
+    0x2B, /* 0x31 \ / | */
+    0x2B, /* 0x32 Non-US # / ~ */
+    0x27, /* 0x33 ; / : (TR s) */
+    0x28, /* 0x34 ' / " (TR i) */
+    0x29, /* 0x35 ` / ~ */
+    0x33, /* 0x36 , / < (TR o) */
+    0x34, /* 0x37 . / > (TR c) */
+    0x35, /* 0x38 / / ? */
+    /* 0x39: Caps Lock */
+    0x3A,
+    /* 0x3A..0x45: F1..F12 */
+    0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x44, 0x57, 0x58,
+    /* 0x46..0x48: PrintScreen, ScrollLock, Pause */
+    0x37, 0x46, 0x45,
+    /* 0x49..0x52: Insert, Home, PgUp, Delete, End, PgDn, Right, Left, Down, Up (0xE0) */
+    0x52, /* 0x49 Insert */
+    0x47, /* 0x4A Home */
+    0x49, /* 0x4B PageUp */
+    0x53, /* 0x4C Delete */
+    0x4F, /* 0x4D End */
+    0x51, /* 0x4E PageDown */
+    0x4D, /* 0x4F Right */
+    0x4B, /* 0x50 Left */
+    0x50, /* 0x51 Down */
+    0x48, /* 0x52 Up */
+    /* 0x53..0x63: Keypad */
+    0x45, /* 0x53 NumLock */
+    0x35, /* 0x54 KP / (0xE0) */
+    0x37, /* 0x55 KP * */
+    0x4A, /* 0x56 KP - */
+    0x4E, /* 0x57 KP + */
+    0x1C, /* 0x58 KP Enter (0xE0) */
+    0x4F, /* 0x59 KP 1 */
+    0x50, /* 0x5A KP 2 */
+    0x51, /* 0x5B KP 3 */
+    0x4B, /* 0x5C KP 4 */
+    0x4C, /* 0x5D KP 5 */
+    0x4D, /* 0x5E KP 6 */
+    0x47, /* 0x5F KP 7 */
+    0x48, /* 0x60 KP 8 */
+    0x49, /* 0x61 KP 9 */
+    0x52, /* 0x62 KP 0 */
+    0x53, /* 0x63 KP . */
+    /* 0x64..0x65: OEM102 (< > |) & Application */
+    0x56, /* 0x64 Non-US \ / | (OEM102 < > |) */
+    0x5D  /* 0x65 Application (0xE0) */
 };
+
+static bool usb_hid_is_extended(uint8_t key) {
+    if (key >= 0x49 && key <= 0x52) return true;
+    if (key == 0x54 || key == 0x58 || key == 0x65) return true;
+    return false;
+}
 
 void keyboard_usb_push_scancode(uint8_t scancode);
 void mouse_usb_move(int dx, int dy, uint8_t buttons, int scroll);
 
-static uint8_t usb_get_endpoint_type(usb_controller_t *ctrl) {
-    if (!ctrl) return 0xFF;
-    switch (ctrl->usb_type) {
-        case 0: return 1;
-        case 1: return 1;
-        case 2: return 2;
-        case 3: return 3;
-        default: return 0xFF;
+static void usb_push_ps2(uint8_t sc, bool ext, bool release) {
+    if (sc == 0) return;
+    if (ext) keyboard_usb_push_scancode(0xE0);
+    keyboard_usb_push_scancode(release ? (uint8_t)(sc | 0x80u) : sc);
+}
+
+static bool key_in_array(uint8_t key, const uint8_t arr[6]) {
+    for (int i = 0; i < 6; i++) {
+        if (arr[i] == key) return true;
     }
+    return false;
 }
 
 static void usb_process_keyboard(usb_device_t *dev, uint8_t *buf) {
-    int idx = dev - usb_devices;
+    int idx = (int)(dev - usb_devices);
     if (idx < 0 || idx >= USB_MAX_DEVICES) return;
 
-    uint8_t modifier = buf[0];
-    uint8_t sc_ps2 = 0;
+    /* Phantom / rollover state (0x01 in byte 2): ignore */
+    if (buf[2] == 0x01) return;
 
-    (void)modifier;
+    uint8_t mod = buf[0];
+    uint8_t prev_m = usb_prev_mod[idx];
 
-    for (int i = 2; i < 8; i++) {
-        uint8_t key = buf[i];
-        if (key == 0) continue;
-        if (key < 256) {
-            sc_ps2 = usb_hid_to_scancode[key];
-            if (sc_ps2) break;
+    static const struct {
+        uint8_t bit;
+        uint8_t sc;
+        bool    ext;
+    } mod_map[8] = {
+        { 0x01, 0x1D, false }, /* Left Ctrl */
+        { 0x02, 0x2A, false }, /* Left Shift */
+        { 0x04, 0x38, false }, /* Left Alt */
+        { 0x08, 0x5B, true  }, /* Left GUI */
+        { 0x10, 0x1D, true  }, /* Right Ctrl */
+        { 0x20, 0x36, false }, /* Right Shift */
+        { 0x40, 0x38, true  }, /* Right Alt (AltGr) */
+        { 0x80, 0x5C, true  }, /* Right GUI */
+    };
+
+    /* 1) Modifier changes (Make / Break) */
+    uint8_t diff_m = mod ^ prev_m;
+    if (diff_m) {
+        for (int m = 0; m < 8; m++) {
+            if (diff_m & mod_map[m].bit) {
+                bool pressed = (mod & mod_map[m].bit) != 0;
+                usb_push_ps2(mod_map[m].sc, mod_map[m].ext, !pressed);
+            }
+        }
+        usb_prev_mod[idx] = mod;
+    }
+
+    /* 2) Key releases (present in prev_keys, absent in current buf[2..7]) */
+    for (int i = 0; i < 6; i++) {
+        uint8_t pk = usb_prev_keys[idx][i];
+        if (pk < 4) continue;
+        if (!key_in_array(pk, buf + 2)) {
+            uint8_t sc = usb_hid_to_scancode[pk];
+            usb_push_ps2(sc, usb_hid_is_extended(pk), true);
         }
     }
 
-    if (sc_ps2 && sc_ps2 != usb_keyboard_state[idx]) {
-        usb_keyboard_state[idx] = (int8_t)sc_ps2;
-        keyboard_usb_push_scancode(sc_ps2);
+    /* 3) Key presses (present in current buf[2..7], absent in prev_keys) */
+    for (int i = 2; i < 8; i++) {
+        uint8_t nk = buf[i];
+        if (nk < 4) continue;
+        if (!key_in_array(nk, usb_prev_keys[idx])) {
+            uint8_t sc = usb_hid_to_scancode[nk];
+            usb_push_ps2(sc, usb_hid_is_extended(nk), false);
+        }
     }
+
+    for (int i = 0; i < 6; i++)
+        usb_prev_keys[idx][i] = buf[2 + i];
 }
 
 static void usb_process_mouse(usb_device_t *dev, uint8_t *buf) {
-    int idx = dev - usb_devices;
+    int idx = (int)(dev - usb_devices);
     if (idx < 0 || idx >= USB_MAX_DEVICES) return;
 
     int dx = (int)(int8_t)buf[1];
-    int dy = (int)(int8_t)buf[2];
+    int dy = -(int)(int8_t)buf[2]; /* USB HID +Y is down; mouse_usb_move subtracts dy */
     int scroll = (int)(int8_t)buf[3];
     uint8_t buttons = buf[0] & 0x07;
 
@@ -84,6 +186,10 @@ static void usb_process_mouse(usb_device_t *dev, uint8_t *buf) {
         usb_mouse_buf[idx][3] = buf[3];
         mouse_usb_move(dx, dy, buttons, scroll);
     }
+}
+
+uint8_t usb_hid_scancode_lookup(uint8_t hid_usage) {
+    return usb_hid_to_scancode[hid_usage];
 }
 
 static int usb_init_controller(usb_controller_t *ctrl) {
@@ -122,6 +228,9 @@ static int usb_init_controller(usb_controller_t *ctrl) {
 
 void usb_init(void) {
     kernel_debug("USB: Sürücü başlatılıyor...");
+    memset(usb_prev_mod, 0, sizeof(usb_prev_mod));
+    memset(usb_prev_keys, 0, sizeof(usb_prev_keys));
+    memset(usb_mouse_buf, 0, sizeof(usb_mouse_buf));
 
     pci_init();
 
@@ -155,49 +264,50 @@ void usb_init(void) {
             else if (dev->is_mouse)
                 kernel_debug("USB: Cihaz #%d = HID Fare", i);
         }
-        usb_hid_init();
     }
+    /* Always call usb_hid_init() so scancode selftest + hotplug/polling task start */
+    usb_hid_init();
 }
 
 void usb_poll_all(void) {
-    for (int i = 0; i < USB_MAX_DEVICES; i++) {
+    static int s_hp_div = 0;
+    if (++s_hp_div >= 10) {
+        s_hp_div = 0;
+        xhci_poll_hotplug();
+    }
+
+    for (int i = 0; i < usb_device_count; i++) {
         usb_device_t *dev = &usb_devices[i];
         if (dev->state != USB_DEVSTATE_CONFIGURED) continue;
 
         uint8_t buf[8];
-        int ret;
+        int ret = -1;
 
         if (dev->is_keyboard) {
-            ret = -1;
-            for (int c = 0; c < usb_controller_count; c++) {
-                usb_controller_t *ctrl = &usb_controllers[c];
-                if (!ctrl->initialized) continue;
-                switch (ctrl->usb_type) {
-                    case 2:
-                        ret = ehci_poll_keyboard(dev, buf);
-                        break;
-                    case 3:
-                        ret = xhci_poll_keyboard(dev, buf);
-                        break;
+            if (dev->xhci_slot_id > 0) {
+                ret = xhci_poll_keyboard(dev, buf);
+            } else {
+                for (int c = 0; c < usb_controller_count; c++) {
+                    usb_controller_t *ctrl = &usb_controllers[c];
+                    if (!ctrl->initialized) continue;
+                    if (ctrl->usb_type == 0) ret = uhci_poll_keyboard(dev, buf);
+                    else if (ctrl->usb_type == 2) ret = ehci_poll_keyboard(dev, buf);
+                    if (ret == 0) break;
                 }
-                if (ret == 0) break;
             }
             if (ret == 0)
                 usb_process_keyboard(dev, buf);
         } else if (dev->is_mouse) {
-            ret = -1;
-            for (int c = 0; c < usb_controller_count; c++) {
-                usb_controller_t *ctrl = &usb_controllers[c];
-                if (!ctrl->initialized) continue;
-                switch (ctrl->usb_type) {
-                    case 2:
-                        ret = ehci_poll_mouse(dev, buf);
-                        break;
-                    case 3:
-                        ret = xhci_poll_mouse(dev, buf);
-                        break;
+            if (dev->xhci_slot_id > 0) {
+                ret = xhci_poll_mouse(dev, buf);
+            } else {
+                for (int c = 0; c < usb_controller_count; c++) {
+                    usb_controller_t *ctrl = &usb_controllers[c];
+                    if (!ctrl->initialized) continue;
+                    if (ctrl->usb_type == 0) ret = uhci_poll_mouse(dev, buf);
+                    else if (ctrl->usb_type == 2) ret = ehci_poll_mouse(dev, buf);
+                    if (ret == 0) break;
                 }
-                if (ret == 0) break;
             }
             if (ret == 0)
                 usb_process_mouse(dev, buf);
@@ -209,6 +319,9 @@ int usb_control_transfer(usb_device_t *dev, usb_setup_packet_t *setup,
                          uint8_t *data, int dir) {
     if (!dev) return -1;
 
+    if (dev->xhci_slot_id > 0)
+        return xhci_control_transfer(dev, setup, data, dir);
+
     for (int c = 0; c < usb_controller_count; c++) {
         usb_controller_t *ctrl = &usb_controllers[c];
         if (!ctrl->initialized) continue;
@@ -217,8 +330,6 @@ int usb_control_transfer(usb_device_t *dev, usb_setup_packet_t *setup,
                 return uhci_control_transfer(dev, setup, data, dir);
             case 2:
                 return ehci_control_transfer(dev, setup, data, dir);
-            case 3:
-                return xhci_control_transfer(dev, setup, data, dir);
         }
     }
     return -1;
@@ -226,6 +337,9 @@ int usb_control_transfer(usb_device_t *dev, usb_setup_packet_t *setup,
 
 int usb_bulk_transfer(usb_device_t *dev, int ep_addr, void *data, int len, int dir) {
     if (!dev) return -1;
+
+    if (dev->xhci_slot_id > 0)
+        return xhci_bulk_transfer(dev, ep_addr, data, len, dir);
 
     for (int c = 0; c < usb_controller_count; c++) {
         usb_controller_t *ctrl = &usb_controllers[c];

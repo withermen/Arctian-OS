@@ -38,6 +38,15 @@ uint32_t proc_gid_of(int pid);
 int  proc_owner_ids(uint32_t *uid, uint32_t *gid);
 int  proc_selftest(void);
 int  proc_fault_selftest(void);
+int  proc_v11_selftest(void);
+
+/* v1.1 gercek per-process I/O, Ag ve bosta CPU ayristirma kancalari */
+void proc_add_io_bytes(uint64_t bytes);
+void proc_add_net_bytes(uint64_t bytes);
+void proc_desktop_frame_begin(void);
+void proc_desktop_mark_reap(void);
+void proc_desktop_frame_end_if_armed(void);
+void proc_desktop_blit_tsc(uint64_t tsc_delta);
 
 /* E1: OOM Basinc & Dondurma/Cozme/Sonlandirma API'si */
 int  proc_oom_state(void);

@@ -267,7 +267,7 @@ static void hud_update(uint64_t now) {
         lv_obj_t *l = lv_label_create(s_hud);
         lv_label_set_text(l, "fps --");
         lv_obj_set_style_text_color(l, lv_color_hex(0x53E68A), 0);
-        lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(l, adl_font(), 0);
         lv_obj_center(l);
     }
     lv_obj_remove_flag(s_hud, LV_OBJ_FLAG_HIDDEN);
@@ -293,7 +293,7 @@ static void hud_update(uint64_t now) {
             b[n++] = ' '; b[n++] = '|'; b[n++] = ' ';
             p = "kare ";
             while (*p) b[n++] = *p++;
-            p = "cizim";
+            p = "çizim";
             while (*p) b[n++] = *p++;
             b[n] = 0;
             lv_label_set_text(l, b);
@@ -302,6 +302,83 @@ static void hud_update(uint64_t now) {
 }
 
 void fps_hud_toggle(void) { s_hud_on = !s_hud_on; }
+
+/* v1.1 UTF-8 Turkce klavye girisi: odakli LVGL lv_textarea icin Unicode
+ * kod noktalarini (cp >= 0x80) dogrudan UTF-8 metin olarak ekler; ozel
+ * LV_KEY_* ve ASCII tuslari ise normal KEYPAD yoluyla iletilir. */
+static void dsk_cp_to_utf8(uint32_t cp, char out[5]) {
+    if (cp == 0) {
+        out[0] = '\0';
+    } else if (cp < 0x80u) {
+        out[0] = (char)cp;
+        out[1] = '\0';
+    } else if (cp < 0x800u) {
+        out[0] = (char)(0xC0u | (cp >> 6));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        out[2] = '\0';
+    } else if (cp < 0x10000u) {
+        out[0] = (char)(0xE0u | (cp >> 12));
+        out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        out[3] = '\0';
+    } else if (cp <= 0x10FFFFu) {
+        out[0] = (char)(0xF0u | (cp >> 18));
+        out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+        out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[3] = (char)(0x80u | (cp & 0x3Fu));
+        out[4] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+}
+
+static void dsk_keypad_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+    static int s_held = 0;
+    if (s_held) {
+        s_held = 0;
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+    if (!g_asi || !g_asi->input) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    uint32_t cp = 0;
+    if (g_asi->input->key_pop_cp) {
+        cp = g_asi->input->key_pop_cp();
+    } else if (g_asi->input->key_pop) {
+        int c = g_asi->input->key_pop();
+        if (c >= 0) cp = (uint32_t)c;
+    }
+
+    if (cp == 0) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    if (cp >= 0x80u) {
+        lv_group_t *g = lv_indev_get_group(indev);
+        lv_obj_t *focused = g ? lv_group_get_focused(g) : NULL;
+        if (focused && lv_obj_check_type(focused, &lv_textarea_class)) {
+            char utf8_buf[5];
+            dsk_cp_to_utf8(cp, utf8_buf);
+            if (utf8_buf[0]) lv_textarea_add_text(focused, utf8_buf);
+        }
+        data->state = LV_INDEV_STATE_RELEASED;
+        if (g_asi->input->key_avail && g_asi->input->key_avail())
+            data->continue_reading = true;
+        return;
+    }
+
+    s_held = 1;
+    if (cp == '\n' || cp == '\r')      data->key = LV_KEY_ENTER;
+    else if (cp == '\b')               data->key = LV_KEY_BACKSPACE;
+    else if (cp == '\t')               data->key = LV_KEY_NEXT;
+    else if (cp == 0x1Bu)              data->key = LV_KEY_ESC;
+    else                               data->key = cp;
+    data->state = LV_INDEV_STATE_PRESSED;
+}
 
 void desktop_main(void *arg) __attribute__((section(".text.entry")));
 
@@ -333,10 +410,19 @@ lv_result_t __wrap_lv_obj_send_event(lv_obj_t *obj,
     return r;
 }
 
+static lv_indev_read_cb_t s_orig_ptr_read = 0;
+
+static void dsk_ptr_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
+    if (s_orig_ptr_read) s_orig_ptr_read(indev, data);
+    if (win_resize_is_active()) {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
 void desktop_main(void *arg) {
     if (s_desktop_started) {
         if (g_recover.active) {
-            recover_set_reason("Uygulama gecersiz bir adres cagirdi");
+            recover_set_reason("Uygulama geçersiz bir adres çağırdı");
             arctian_longjmp(&g_recover, 3);
         }
         return;
@@ -345,6 +431,15 @@ void desktop_main(void *arg) {
     g_asi = (asi_t *)arg;
 
     lv_port_init(g_asi);
+    {
+        lv_indev_t *ptr = lv_port_get_indev();
+        if (ptr) {
+            s_orig_ptr_read = lv_indev_get_read_cb(ptr);
+            lv_indev_set_read_cb(ptr, dsk_ptr_read_cb);
+        }
+        lv_indev_t *kp = lv_port_get_keypad();
+        if (kp) lv_indev_set_read_cb(kp, dsk_keypad_read_cb);
+    }
     disk_unlock_run(g_asi);   /* disk kilitliyse ac; ayarlar disktan okunur */
     dpi_init();               /* kv yuklenmeden once varsayilan 100 */
     settings_load();          /* fontscale/contrast/focusring tercihleri */
@@ -561,7 +656,8 @@ void desktop_main(void *arg) {
             }
         }
         switcher_tick();
-        poll_icons();
+        win_resize_poll();
+        if (!win_resize_is_active()) poll_icons();
         clock_tick();
         power_tick();
         tb_poll();

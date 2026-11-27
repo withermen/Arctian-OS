@@ -40,6 +40,8 @@ typedef struct {
     uint64_t mcfg_ecam_base;/* MCFG PCIe ECAM taban adresi (yoksa 0) */
     int      dts_supported; /* CPUID.06H:EAX[0] dijital termal sensor */
     int      tjmax_c;       /* TjMax (C), varsayilan 100 */
+    uint64_t facs_addr;     /* FACS tablosu fiziksel adresi (yoksa 0) */
+    uint32_t s3_waking_vector; /* FACS 16-bit S3 waking vector (0 = hazir degil) */
     char     oem_id[7];
 } acpi_info_t;
 
@@ -48,7 +50,7 @@ extern acpi_info_t g_acpi;
 void acpi_init(void);
 int  acpi_present(void);
 void acpi_shutdown(void);        /* S5: gercekten gucu keser (ACPI varsa) */
-int  acpi_enter_sleep(void);     /* S3 dener; basarisizsa 0 doner */
+int  acpi_enter_sleep(void);     /* S3 dener; waking vector yoksa -1 doner */
 int  acpi_sleep_supported(void); /* 1 = bu makine S3'e uyutabilir */
 
 /* CPU termal sensoru (C) ve guvenli bosta bekleme */

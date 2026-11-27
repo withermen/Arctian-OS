@@ -131,6 +131,22 @@ static int         s_count;
 static int         s_loaded;
 static char        s_current[32];
 
+static void auth_get_kernel_user(uint16_t *uid, uint16_t *gid) {
+    if (g_asi && g_asi->sandbox && g_asi->sandbox->uid && g_asi->sandbox->gid) {
+        *uid = (uint16_t)g_asi->sandbox->uid();
+        *gid = (uint16_t)g_asi->sandbox->gid();
+    } else {
+        *uid = 0;
+        *gid = 0;
+    }
+}
+
+static void auth_set_kernel_user(uint16_t uid, uint16_t gid) {
+    if (!g_asi || !g_asi->sandbox) return;
+    if (g_asi->sandbox->set_user) g_asi->sandbox->set_user(uid, gid);
+    else if (g_asi->sandbox->set_uid) g_asi->sandbox->set_uid((int)uid, (int)gid);
+}
+
 static void derive(const uint8_t salt[8], const char *pw, uint8_t out[32]) {
     uint8_t buf[56];
     uint32_t pl = slen(pw);
@@ -179,8 +195,12 @@ static void auth_load(void) {
     if (disk_locked()) return;
     s_loaded = 1;
     s_count = 0;
+    uint16_t prev_u = 0, prev_g = 0;
+    auth_get_kernel_user(&prev_u, &prev_g);
+    auth_set_kernel_user(0, 0);
     char buf[1024];
     int n = fs_read(AUTH_PATH, buf, sizeof(buf));
+    auth_set_kernel_user(prev_u, prev_g);
     if (n <= 0) return;
     char *p = buf;
     while (*p && s_count < AUTH_MAX) {
@@ -243,7 +263,15 @@ static void auth_store(void) {
         }
         out[o++] = '\n';
     }
+    uint16_t prev_u = 0, prev_g = 0;
+    auth_get_kernel_user(&prev_u, &prev_g);
+    auth_set_kernel_user(0, 0);
     fs_write(AUTH_PATH, out, (uint32_t)o);
+    if (g_asi && g_asi->fs) {
+        if (g_asi->fs->chown) g_asi->fs->chown(AUTH_PATH, 0, 0);
+        if (g_asi->fs->chmod) g_asi->fs->chmod(AUTH_PATH, 0600u);
+    }
+    auth_set_kernel_user(prev_u, prev_g);
 }
 
 /* Salt eskiden yalniz saat degerinden uretiliyordu; hesap olusturma anini
@@ -311,26 +339,61 @@ static void home_path(const char *name, char *out, int cap) {
     out[o] = 0;
 }
 
-static void ensure_home(const char *name) {
+static void set_dir_private(const char *path_no_slash, uint32_t uid) {
+    if (!g_asi || !g_asi->fs) return;
+    char ds[96];
+    int n = 0;
+    for (; path_no_slash[n] && n < (int)sizeof(ds) - 2; n++) ds[n] = path_no_slash[n];
+    if (n > 0 && ds[n - 1] != '/') ds[n++] = '/';
+    ds[n] = 0;
+    if (g_asi->fs->chown) g_asi->fs->chown(ds, (int)uid, (int)uid);
+    if (g_asi->fs->chmod) g_asi->fs->chmod(ds, 0700u);
+}
+
+static void ensure_home(const char *name, uint32_t uid) {
     if (!g_asi || !g_asi->fs || !g_asi->fs->mkdir) return;
+    uint16_t prev_u = 0, prev_g = 0;
+    auth_get_kernel_user(&prev_u, &prev_g);
+    auth_set_kernel_user(0, 0);
+
     char p[80];
     home_path(name, p, sizeof(p));
     g_asi->fs->mkdir("C:/Users");
+    if (g_asi->fs->chown) g_asi->fs->chown("C:/Users/", 0, 0);
+    if (g_asi->fs->chmod) g_asi->fs->chmod("C:/Users/", 0755u);
+
     g_asi->fs->mkdir(p);
+    set_dir_private(p, uid);
+
     char sub[96];
     const char *bel = "/Belgeler", *mas = "/Masaustu";
     int o = 0; for (int i = 0; p[i] && o < (int)sizeof(sub) - 12; i++) sub[o++] = p[i];
     for (int i = 0; bel[i] && o < (int)sizeof(sub) - 1; i++) sub[o++] = bel[i];
     sub[o] = 0; g_asi->fs->mkdir(sub);
+    set_dir_private(sub, uid);
+
     o = 0; for (int i = 0; p[i] && o < (int)sizeof(sub) - 12; i++) sub[o++] = p[i];
     for (int i = 0; mas[i] && o < (int)sizeof(sub) - 1; i++) sub[o++] = mas[i];
     sub[o] = 0; g_asi->fs->mkdir(sub);
+    set_dir_private(sub, uid);
+
+    auth_set_kernel_user(prev_u, prev_g);
 }
 
 void arctian_auth_set_current(const char *name) {
     int i = 0;
     if (name) for (; name[i] && i < 31; i++) s_current[i] = name[i];
     s_current[i] = 0;
+    if (s_current[0]) {
+        int idx = user_find(s_current);
+        if (idx >= 0) {
+            uint32_t uid = s_users[idx].uid;
+            ensure_home(s_users[idx].name, uid);
+            auth_set_kernel_user((uint16_t)uid, (uint16_t)uid);
+            return;
+        }
+    }
+    auth_set_kernel_user(0, 0);
 }
 
 int arctian_auth_user_count(void) { auth_load(); return s_count; }
@@ -373,7 +436,11 @@ int arctian_auth_create_user(const char *name, const char *pw_or_null) {
     auth_user_t *u = &s_users[s_count];
     int n = 0; while (name[n] && n < 31) { u->name[n] = name[n]; n++; }
     u->name[n] = 0;
-    u->uid = 1000 + (uint32_t)s_count;
+    uint32_t next_uid = 1000u;
+    for (int i = 0; i < s_count; i++) {
+        if (s_users[i].uid >= next_uid) next_uid = s_users[i].uid + 1u;
+    }
+    u->uid = next_uid;
     u->has_pw = 0;
     if (pw_or_null && pw_or_null[0]) {
         new_salt(u->salt);
@@ -382,7 +449,7 @@ int arctian_auth_create_user(const char *name, const char *pw_or_null) {
     }
     s_count++;
     auth_store();
-    ensure_home(u->name);
+    ensure_home(u->name, u->uid);
     return 0;
 }
 

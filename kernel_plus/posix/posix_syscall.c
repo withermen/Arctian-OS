@@ -457,7 +457,7 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
         ret = (int64_t)sz;
         break;
     }
-    /* ---- Arctian Grafik & Girdi Koprusu (500..505) ---- */
+    /* ---- Arctian Grafik, Girdi & Pano Koprusu (500..507) ---- */
     case NR_arctian_gfx_create:  ret = posix_sys_gfx_create(p, a1, (uint32_t)a2, (uint32_t)a3, (uint32_t)a4); break;
     case NR_arctian_gfx_present: ret = posix_sys_gfx_present(p, (int)a1, (int32_t)a2, (int32_t)a3, (int32_t)a4, (int32_t)a5); break;
     case NR_arctian_gfx_poll:    ret = posix_sys_gfx_poll(p, (int)a1, a2, (int)a3); break;
@@ -473,6 +473,16 @@ void posix_syscall_dispatch(posix_regs_t *regs) {
         int fd = posix_fd_install(p, sf, 0);
         if (fd < 0) posix_file_unref(sf);
         ret = fd;
+        break;
+    }
+    case 506 /* NR_arctian_clip_get */: {
+        extern int64_t posix_sys_clip_get(uint64_t buf_va, uint64_t cap);
+        ret = posix_sys_clip_get(a1, a2);
+        break;
+    }
+    case 507 /* NR_arctian_clip_set */: {
+        extern int64_t posix_sys_clip_set(uint64_t str_va, uint64_t len);
+        ret = posix_sys_clip_set(a1, a2);
         break;
     }
     default:

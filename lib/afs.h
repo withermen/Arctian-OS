@@ -4,19 +4,21 @@
 #include <stdint.h>
 #include "asi.h"
 
-/* Yeni duzen (0.8.2): taban 65536. Modul bolgesi 27836'da biterken eski
+/* Yeni duzen (0.8.2+): taban 65536. Modul bolgesi 27836'da biterken eski
  * taban 20000 AFS'yi modullerin uzerine yaziyordu; yeni kurulumlar 65536'dan
  * formatlanir, eski diskler legacy tabandan okunmaya devam eder. */
 #define AFS_BASE_LBA        65536u
 #define AFS_BASE_LEGACY_LBA 20000u
-#define AFS_VERSION    6u      /* header surumu; uymayan disk yeniden formatlanir
-                                * (5: kapasite 64 bit; 6: taban 65536 - surum
-                                *  5 diskler mount sirasinda yeni surume tasinar) */
-#define AFS_NAME_MAX   64u     /* disk uzerindeki kisa girdi adi (+ sonlandirici) */
-#define AFS_PATH_MAX   256u    /* uzun yol destegi (en fazla 255 bayt + sonlandirici) */
+#define AFS_VERSION_V6      6u
+#define AFS_VERSION         7u      /* v7: 65536 dosya + coklu extent + gercek uid/gid/mode */
+#define AFS_V7_MAX_FILES    65536u
+#define AFS_NAME_MAX        64u     /* disk uzerindeki kisa girdi adi (+ sonlandirici) */
+#define AFS_PATH_MAX        256u    /* uzun yol destegi (en fazla 255 bayt + sonlandirici) */
 
 /* Mount sirasinda saptanan etkin taban LBA (legacy 20000 veya yeni 65536). */
 uint32_t    afs_base(void);
+uint32_t    afs_get_base_lba(void);
+uint32_t    afs_version(void);
 
 /* Kullanici diski (C:/) kok yolu. Sistem dosyalari (ayar, .dpk) ham kokte
  * tutulur; bunlar masaustunde gizlidir. C: diski kullaniciya aittir. */
@@ -39,6 +41,7 @@ uint32_t    afs_read_at(void *h, void *buf, uint32_t size, uint32_t off);
 int         afs_remove(const char *name);
 const char *afs_name(int idx);
 uint32_t    afs_size(int idx);
+uint32_t    afs_file_extent_count(void *h);
 
 /* ---- Klasor (yol tabanli) API ----
  * path ornegi: "C:/apps". Adlar '/' ile ayrilir; klasor adi '/' ile biter. */
@@ -52,6 +55,7 @@ int         afs_count_dir(const char *path);
 int         afs_list_dir(const char *path, int idx, char *out, int cap, int *is_dir);
 
 void        afs_set_subject(int uid, int gid);
+void        afs_set_current_uid(uint16_t uid, uint16_t gid);
 void        afs_get_subject(int *uid, int *gid);
 int         afs_chmod(const char *path, uint32_t mode);
 int         afs_chown(const char *path, int uid, int gid);

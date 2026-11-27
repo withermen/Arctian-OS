@@ -11,6 +11,7 @@ static void clip_persist(void) {
     if (g_asi->fs->mkdir) g_asi->fs->mkdir("C:/etc");
     void *h = g_asi->fs->create_in("C:/etc", "clip.txt", 0);
     if (!h) return;
+    if (g_asi->fs->chmod) g_asi->fs->chmod(CLIP_FILE, 0666u);
     uint32_t n = 0;
     while (s_clip[n]) n++;
     if (n) g_asi->fs->write(h, s_clip, n);

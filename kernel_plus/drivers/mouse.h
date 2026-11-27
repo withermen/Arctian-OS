@@ -76,4 +76,7 @@ int mouse_scroll_delta(void);
  */
 int mouse_tap_count(void);
 
+/** I2C-HID touchpad hazirsa true doner. */
+bool mouse_i2c_hid_present(void);
+
 #endif /* MOUSE_H */

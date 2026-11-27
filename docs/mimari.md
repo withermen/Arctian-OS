@@ -63,18 +63,16 @@ LBA 2048    : superblock  (sihir "ARCT", sürüm 1)
 LBA 2049    : modul tablosu
 LBA 2050    : durum sektoru (kapanis/açilis kurulumu için)
 LBA 4096..  : modul imajlari  (512B AMOD başlığı + binary, 512B'ye yastalanmış)
-LBA 65536.. : AFS v6 (kullanıcı diski C:/; 0.8.2 öncesi eski v5 diskler 20000'den mount edilir)
+LBA 65536.. : AFS v7 (kullanıcı diski C:/; eski v5/v6 diskler geriye uyumlu mount edilir)
 ```
 
 ### ISO (`build/arctian.iso`)
 
 **Hibrit BIOS + UEFI** (Çift El Torito, no-emulation + ISOHybrid MBR/GPT):
 - BIOS yolu: `boot_iso.img` (`stage1_iso + stage2 + main_kernel`, 2048 bayt hizalı).
-- UEFI yolu: `efi.img` FAT32 EFI System Partition (`\EFI\BOOT\BOOTX64.EFI` + `\EFI\ARCTIAN\KERNEL.ELF`).
-- Modüller (`install.bin`, `kplus.bin`, `desktop.bin`), `hdimg.bin` ve varsa isteğe bağlı kurulum
-  varlıkları (`WEBKIT.ELF`, `DEJAVU.TTF`, `CACERT.PEM`) ISO9660 dosyaları olarak yer alır.
-- Paketleyici (`tools/arctianpack.py`) `xorriso` ve `mtools` ile üretir; hata olursa derlemeyi
-  durdurur ve çıktı `.part` üzerinden atomik taşınır.
+- UEFI yolu: `efi.img` FAT32 EFI System Partition (`\EFI\BOOT\BOOTX64.EFI` + `\EFI\ARCTIAN\BOOTX64.EFI` + `\EFI\ARCTIAN\KERNEL.ELF`).
+- Modüller (`install.bin`, `kplus.bin`, `desktop.bin`), `hdimg.bin`, ön-yüklü Ofis `.wlf` paketleri (`SAFAK.WLF`, `MUREKKEP.WLF`, `ABAKUS.WLF`, `SAHNE.WLF`, `MERCEK.WLF`) ve varsa isteğe bağlı kurulum varlıkları (`WEBKIT.ELF`, `DEJAVU.TTF`, `CACERT.PEM`) ISO9660 dosyaları olarak yer alır.
+- Paketleyici (`tools/arctianpack.py`) `xorriso` ve `mtools` ile üretir; hata olursa derlemeyi durdurur ve çıktı `.part` üzerinden atomik taşınır. Temiz UEFI disk kurulumunda `install/installer.c` GPT + 64 MiB FAT32 ESP oluşturur; **"Yanına Kur (Dual-Boot)"** modunda ise mevcut GPT bölümlerini ve ESP'yi koruyarak `\EFI\ARCTIAN\` altına önyükleme dosyalarını ekler.
 
 ### AMOD başlığı
 
@@ -87,12 +85,12 @@ tarafından sıfırlanır; `entry_off` adrese eklenip atılır.
 
 | Modül | İçerik |
 |---|---|
-| `boot/` | NASM ile yazılmış BIOS/El Torito üç aşaması (`stage1`, `stage1_iso`, `stage2`) ve `boot/uefi/` (`BOOTX64.EFI`: 64-bit `>4 GB` GOP, ACPI RSDP, ESP'den `KERNEL.ELF` + `ExitBootServices`) |
+| `boot/` | Yapay bekleme/sahte mesaj içermeyen `stage1`, `stage1_iso`, `stage2` (NASM) ve `boot/uefi/` (`BOOTX64.EFI`: 64-bit `>4 GB` GOP, ACPI RSDP, ESP'den `KERNEL.ELF` + `ExitBootServices`) |
 | `main_kernel/` | GDT/IDT, ISR'ler, PIC, sayfalama ve dinamik `>4 GB`/per-CPU magazin refcount'lu VMM (`PAT WC` destekli), modül yükleyici, `int 0x80` syscall, ring 3 geçişi (`ring3_user.asm`); `wlf_user.c` + `vmm_space.c` **yalnız `kernel_plus`a bağlanır** |
-| `install/` | Grafiksel kurulum sihirbazı: disk seçimi (**min 5 GiB**), AFS v6 biçimlendirme, modül + isteğe bağlı `webkit.elf` kopyalama, kurulum doğrulama |
-| `kernel_plus/` | Modüler GPU (`gpu*.c`: VirtIO-GPU 2D, Intel, NVIDIA, BGA, GOP/VBE + SSE2/AVX2 blitter), ses (`hda.c`, `virtio_snd.c`, `ac97.c`, `pcspk`), ağ (`net/`, `virtio_net.c`, `ipv6.c`), dinamik SMP zamanlayıcı (16.384'e kadar) / süreç tablosu (8.192'ye kadar) / OOM freeze-thaw (`sched.c`, `proc.c`), yetenek kapıları (`system/caps.c`), disk şifreleme, sanal FS, TLS/WebSocket, açılış animasyonu (`system/bootanim.c`), **Ring-3 POSIX/ELF64 alt sistemi (`posix/`)** |
-| `desktop/` | LVGL kabuğu (dock, `MAX_WINS = 256` pencere yöneticisi, hızlı ayarlar, iki ekran giriş), **"RAM Doldu!" OOM kurtarma arayüzü (`oom_ui.c`)**, gömülü uygulamalar, `.wlf` yükleyici/VM/broker (`wlf*.c`), Ring-3 POSIX pencere köprüsü (`posix_win.c`), tema (ADL-Wolf). (`wolf_engine` yalnızca geriye dönük yer tutucu stub'dır; QuickJS kaldırılmıştır.) |
-| `lib/` | AFS v6 (free-extent geri kazanımı + 255B uzun yol + 1024 dosya), FAT32, ISO9660, blok katmanı (AHCI 64-PRDT / NVMe PRP-List / ATA), PNG/SVG, `malloc`, `printf`, IRQ-güvenli seri port/klog |
+| `install/` | Grafiksel kurulum sihirbazı (`inst_ui.h`): Türkçe bitmap font + PS/2 fare, disk seçimi (**min 5 GiB**), temiz **UEFI/GPT + 64 MiB FAT32 ESP** veya **"Yanına Kur (Dual-Boot)"**, AFS v7 biçimlendirme, modül + Ofis `.wlf` + isteğe bağlı `webkit.elf` kopyalama ve doğrulama |
+| `kernel_plus/` | Modüler GPU (`VirtIO-GPU 2D`, `Intel` PWM parlaklık, `NVIDIA`, `BGA` VBoxVGA/VMSVGA fix), ses (`hda.c` jack-sense, `virtio_snd.c` PCM ölçekleme, `ac97.c`, `pcspk`), girdi (`TR-Q`/`TR-F`/`EN-Q` UTF-8, Synaptics, `i2c_hid.h`), USB 3.0 (`usb_xhci.c`, `usb_hid.c`, `usb_msd.c`), ağ (`rtl8169.c`, `e1000.c` I219/I225/I226, `ath9k.c`, `iwl_ax201.c`, `ipv6.c`), SMP zamanlayıcı / `proc.c` gerçek RAM-CPU metrikleri, `caps.c` `uid/gid` yalıtımı, `diskcrypt.c` Slot B koruması, `volfs.c` (`D:/` sıcak takma), **Ring-3 POSIX/ELF64 (`posix/`, `/dev/dsp`)** |
+| `desktop/` | LVGL kabuğu (`oobe.h` 4 adımlı OOBE, `windows.c` 8 yönlü boyutlandırma, `quickctl.c` PNG ekran görüntüsü, `lock.c` çoklu kullanıcı, `update.c` UEFI ESP OTA), **"RAM Doldu!" OOM kurtarma (`oom_ui.c`)**, gömülü uygulamalar (`hesap`, `saat`, `metin`, `foto`, `medya`, ZIP'li `filemanager`, ...), `.wlf` VM, `posix_win.c` (pano + canlı boyutlandırma) |
+| `lib/` | **AFS v7** (65.536 dosya, `EXT7` çoklu-extent, `uid/gid/mode`), **FAT32 RW** (UTF-8 LFN), **exFAT RO**, **miniz ZIP** (`miniz.h`), **imgdec** (`imgdec.h`: PNG/JPEG/GIF/BMP), ISO9660, blok katmanı (`storage.c` GPT/MBR, AHCI 64-PRDT / NVMe PRP-List / ATA), `malloc`, `printf`, IRQ-güvenli seri port/klog |
 | `include/arctian/` | Kamu başlıkları: `asi.h`, `app.h`, `wlf.h`, `posix_gfx.h`, `amod.h`, `dpk.h`, `update.h`, `sig.h`, `slot.h`, `memory_map.h`, ... |
 | `third_party/` | Vendored kütüphaneler: LVGL (arayüz), mbedTLS (TLS). bkz. `third_party/README.md` |
 
@@ -163,67 +161,74 @@ altında Linux x86-64 System V ABI uyumlu kullanıcı alanı alt sistemi bulunur
 - **İş Parçacığı ve Senkronizasyon (`posix_proc.c`):** `clone` (`CLONE_VM | CLONE_THREAD | CLONE_SETTLS`),
   `arch_prctl(ARCH_SET_FS)` ile TLS, `futex` (`FUTEX_WAIT`/`FUTEX_WAKE`), `nanosleep`,
   `sched_yield`; `libstdc++` `std::thread`, `std::mutex`, `std::condition_variable` ve POSIX `sem_t` çalışır.
-- **Dosya, Zaman ve Olay Çoğullama (`posix_fd.c`):** Süreç başına FD tablosu (`openat`, `read`, `write`,
-  `pread64`/`pwrite64`, `readv`/`writev`, `lseek`, `stat`/`fstat`, `getdents64`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
+- **Dosya, Zaman, Ses ve Olay Çoğullama (`posix_fd.c`):** Süreç başına FD tablosu (`openat`, `read`,
+  `write`, `pread64`/`pwrite64`, `readv`/`writev`, `lseek`, `stat`/`fstat`, `getdents64`, `pipe`/`pipe2`, `dup`/`dup2`/`dup3`,
   `fcntl(O_NONBLOCK)`, `memfd_create`), `poll`/`ppoll`, `epoll_create1`/`epoll_ctl`/`epoll_wait`,
-  `clock_gettime`, `getrandom`.
+  `clock_gettime`, `getrandom` ve OSS `/dev/dsp` / `/dev/audio` (`SNDCTL_DSP_*`) PCM ses akışı.
 - **Soket & IPC (`posix_sock.c`):** `AF_UNIX` (`socketpair`, `SCM_RIGHTS` FD aktarımı, `bind`/`listen`/`accept`/`connect`)
   ve `AF_INET` (TCP soketleri, non-blocking + `epoll` entegrasyonu, `getaddrinfo`).
-- **Paylaşımlı Grafik & Girdi Köprüsü (`posix_gfx.c`, `desktop/posix_win.c`):** `NR_arctian_gfx_*`
-  (`500..505`) sistem çağrıları ile Ring-3 süreci paylaşımlı ARGB8888 tamponunu (`mmap`) masaüstü
-  penceresine kirli dikdörtgen (`present_rect`) olarak basar ve fare/klavye/tekerlek/kapanma olaylarını
-  `poll` üzerinden alır.
+- **Paylaşımlı Grafik, Pano & Girdi Köprüsü (`posix_gfx.c`, `desktop/posix_win.c`):** `NR_arctian_gfx_*`
+  sistem çağrıları ile Ring-3 süreci paylaşımlı ARGB8888 tamponunu (`mmap`) masaüstü penceresine
+  kirli dikdörtgen (`present_rect`) olarak basar; canlı yeniden boyutlandırma, sistem panosu (`Ctrl+C/V`)
+  senkronizasyonu ve fare/klavye/tekerlek/kapanma olaylarını `poll` üzerinden alır.
 
 ## 7. Güncelleme ve A/B yuva
 
 - Güncelleme kaynağı varsayılan olarak GitHub sürümleridir: `update.txt` imzalı manifestosu
   her modül için boyut + CRC32 bildirir; `update url` ile kaynak değiştirilebilir.
   Yayın: `tools/publish_os_update.sh`.
-- Kurulum **kapanışta** başlar, bitmezse **açılışta** tamamlanır (`slot` durum sektörü).
+- Kurulum **kapanışta** başlar, bitmezse **açılışta** tamamlanır (`slot` durum sektörü);
+  UEFI kurulu sistemlerde `desktop/update.c` doğrudan ESP üzerindeki `KERNEL.ELF` dosyasını da
+  doğrulayarak günceller.
 - Sistem iki yuvada (A/B) durur; yarıda kesilmiş güncellemede açılış önceki yuvaya döner.
-  Kullanıcı diski (AFS) yuvalardan bağımsızdır.
+  Kullanıcı diski (AFS) yuvalardan bağımsızdır (`diskcrypt` şifrelemesi OTA Slot B
+  alanı `32768..65535`'i korur).
 
 ## 8. Dosya sistemi
 
-- **AFS v6** kullanıcı diskidir (`C:/`), yeni kurulumlarda LBA `65536`'dan başlar; disk üzerinde
-  64 bayt kısa ad (`AFS_NAME_MAX`), `.afs_longnames` tablosu üzerinden **255 bayta kadar uzun yol
-  desteği (`AFS_PATH_MAX = 256`)**, 1024 dosyaya kadar dinamik `kmalloc` dosya tablosu, bellek içi
-  sıralı **boş-alan (`free-extent`) geri kazanımı** (bitişik blok birleştirme + `data_next` geri
-  çekme), 64-bit kapasite, nesil sayaçlı tutamaklar, 256 sektör yazma günlüğü (journal) ve
-  bütünlük denetimi (`fsck`) içerir. Eski v5/legacy diskler (`LBA 20000`) açılışta uyumlu biçimde
-  bağlanır.
+- **AFS v7** (`lib/afs.c`, `lib/afs.h`) kullanıcı diskidir (`C:/`), yeni kurulumlarda LBA `65536`'dan
+  başlar; **65.536 dosya** kapasiteli dinamik parçalı inode blokları (`256 × 256`), **çoklu-extent**
+  (`EXT7`) dosya depolama, `.afs_longnames` üzerinden **255 bayta kadar uzun yol** (`AFS_PATH_MAX = 256`),
+  `uid`/`gid`/`mode` çoklu kullanıcı yalıtımı, bellek içi sıralı boş-alan (`free-extent`) geri kazanımı,
+  256 sektör yazma günlüğü (journal) ve bütünlük denetimi (`fsck`) içerir. Eski v5/v6 diskler açılışta
+  geriye uyumlu biçimde bağlanır.
 - Sistem dosyaları (ayarlar, kurulu paketler) kullanıcı arayüzünden ayrı tutulur; `C:/` altında
   `C:/apps`, `C:/belgeler`, `C:/indirilenler`, `C:/masaustu`, `C:/logs` yer alır.
-- Ayrıca **FAT32** (USB/taşınabilir), **ISO9660** (CD) ve **USB MSD** desteklenir.
-- İsteğe bağlı **AES-XTS disk şifreleme** (`kernel_plus/system/diskcrypt.c`).
+- Taşınabilir depolama (`kernel_plus/system/volfs.c`, `lib/storage.c`): GPT/MBR dinamik bölüm keşfi,
+  **xHCI USB 3.0** (`usb_xhci.c`) üzerinden `D:/` sıcak takma (*hot-plug*), **FAT32 okuma & yazma**
+  (UTF-8 Türkçe LFN destekli, `lib/fat32.c`), **exFAT okuma** (`lib/exfat.h`) ve **ISO9660**.
+- İsteğe bağlı **AES-XTS disk şifreleme** (`kernel_plus/system/diskcrypt.c`; OTA Slot B korumalı).
 
 ## 9. Ağ
 
 `kernel_plus/net/` sıfırdan yazılmış bir dual-stack TCP/IP yığınıdır: ARP, IPv4, **IPv6**
-(`ipv6.c`: EUI-64 link-local, ICMPv6 Echo, NDP NS/NA/RS/RA + SLAAC), TCP, UDP, DHCP, DNS, NTP,
-HTTP/HTTPS (mbedTLS ile TLS 1.3, `http_request` + `gzip`/`deflate`), WebSocket (`ws_*`) ve
-uygulama seviyesi güvenlik duvarı. Performans iyileştirmeleriyle:
-- e1000: 128 RX / 32 TX halka, toplu RDT (16'lı) ve ITR=256µs kesme birleştirme, `netbg` 16 ms yield.
+(`ipv6.c`: EUI-64 link-local, ICMPv6 Echo, NDP NS/NA/RS/RA + SLAAC), TCP, UDP, DHCP (dürüst
+hata bildirimi ile, `net.c`), DNS, NTP, HTTP/HTTPS (mbedTLS ile TLS 1.3, `http_request` +
+`gzip`/`deflate`), WebSocket (`ws_*`) ve uygulama seviyesi güvenlik duvarı. Performans iyileştirmeleriyle:
+- e1000: 128 RX / 32 TX halka, 64-bit DMA tanımlayıcıları (`e1000.c`), Intel I219-V / I225 / I226-V
+  PCI kimlikleri (`pci.c`), toplu RDT (16'lı) ve ITR=256µs kesme birleştirme, `netbg` 16 ms yield.
+- RTL8169 (`rtl8169.c`): gerçek donanım register + 256-bayt hizalı `TNPDS`/`RDSAR` DMA halkaları.
 - TCP: `kmalloc` ile **128 KB** dairesel alıcı tamponu (`TCP_RXBUF_SIZE`, sıfır `memmove`),
   SYN `MSS=1460` + RFC 7323 pencere ölçekleme (`shift=3`), 32-bit `peer_window`, birleştirilmiş ACK,
   RFC 6582 NewReno tıkanıklık denetimi, dinamik sıra dışı (OOO) yeniden birleştirme
   (`TCP_OOO_SLOTS = 8`), entropi tabanlı ISN ve **64 eşzamanlı bağlantı** (`TCP_MAX_CONNECTIONS`).
 - TLS: çalışma zamanı CPUID `AES-NI` tespiti ile TCG/eski CPU'da ChaCha20, donanım AES'li CPU'da AES-GCM önceliği.
 
-Sürücüler: **VirtIO-Net** (`virtio_net.c`: Modern 1.0 + Transitional), e1000, PCnet, RTL8139,
-RTL8169, Atheros ath9k (uçtan uca WPA2/CCMP: `kernel_plus/drivers/wpa2.c`), Intel AX201 (gen3 ürün
-yazılımı yükleme; tarama/bağlantı iskelet).
+Sürücüler: **VirtIO-Net** (`virtio_net.c`: Modern 1.0 + Transitional), e1000 (I219/I225/I226 dahil),
+PCnet, RTL8139, RTL8169, Atheros `ath9k` (çoklu hız + uçtan uca WPA2/CCMP: `kernel_plus/drivers/wpa2.c`),
+Intel `iwl_ax201` (gen3 firmware + UMAC tarama + host CCMP/WPA2 kod yolu; gerçek bare-metal RF donanımında
+doğrulanmayı bekler).
 
 ## 10. Masaüstü kabuğu
 
 - `desktop/main.c` + `dsk_state.c` + `taskbar.c`: kabuk kurulumu ve dock (`dk_s()` ölçek birimi).
-- `desktop/windows.c`: pencere yöneticisi (`MAX_WINS = 256` + kapalı kayıt geri dönüşümü, taşıma,
-  yakınlaştırma, snap, boyut hatırlama, çalışma alanı).
+- `desktop/oobe.h`: 4 adımlı birleşik OOBE ilk kurulum sihirbazı (klavye düzeni, saat dilimi, tema/vurgu, masaüstü turu).
+- `desktop/windows.c`: pencere yöneticisi (`MAX_WINS = 256` + kapalı kayıt geri dönüşümü, 8 yönlü kenar/köşe boyutlandırma, taşıma, snap, boyut hatırlama, çalışma alanı).
 - `desktop/oom_ui.c`: **"RAM Doldu!"** OOM dondurma/kurtarma arayüzü (`Ctrl+Shift+M` veya `VMM_OOM_CRITICAL`).
-- `desktop/quickctl.c`: hızlı ayarlar, OSD, bildirim merkezi, parlaklık/gece modu perdeleri.
+- `desktop/quickctl.c`: hızlı ayarlar, OSD, bildirim merkezi, parlaklık/gece modu perdeleri, PNG ekran görüntüsü (`C:/ekran_XX.png`).
 - `desktop/wlf*.c`: `.wlf` yükleme, rol yönlendirme, terminal köprüsü, B3 broker kuyruğu.
-- `desktop/posix_win.c`: Ring-3 POSIX süreçlerinin ARGB8888 pencere/girdi köprüsü.
-- `desktop/perm.c` + `consent.c`: özne/karar deposu ve onay penceresi.
+- `desktop/posix_win.c`: Ring-3 POSIX süreçlerinin ARGB8888 pencere/pano/boyutlandırma/girdi köprüsü.
+- `desktop/lock.c` + `desktop/perm.c` + `desktop/consent.c`: çoklu kullanıcı oturum kilidi, özne/karar deposu ve onay penceresi.
 - `desktop/theme/adl_wolf.c`: ADL-Wolf tema motoru ve fontlar (Inter, IBM Plex Sans, Manrope).
 
 ## 11. Öz-testler

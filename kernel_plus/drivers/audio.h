@@ -26,4 +26,13 @@ uint32_t audio_sample_rate(void);
 audio_backend_t audio_backend(void);
 const char     *audio_backend_name(void);
 
+/* Streaming PCM API (for /dev/dsp, WPE WebKit, games/players) */
+int      audio_stream_open(uint32_t rate, int channels, int bits);
+int      audio_stream_write(const void *data, uint32_t bytes);
+void     audio_stream_close(void);
+uint32_t audio_stream_free(void);
+uint32_t audio_stream_buffered(void);
+int      audio_stream_active(void);
+int      audio_power_v11_selftest(void);
+
 #endif /* AUDIO_H */

@@ -159,6 +159,14 @@ static void classify_pci_gpu(gpu_pci_info_t *g) {
         g->vendor_kind = GPU_VENDOR_AMD;
         str_copy(g->vendor_name, sizeof(g->vendor_name), "AMD");
         str_copy(g->gen_name, sizeof(g->gen_name), "Radeon Display");
+    } else if (v == 0x80EEu && d == 0xBEEFu) {
+        g->vendor_kind = GPU_VENDOR_GENERIC;
+        str_copy(g->vendor_name, sizeof(g->vendor_name), "VirtualBox");
+        str_copy(g->gen_name, sizeof(g->gen_name), "VBoxVGA BGA");
+    } else if (v == 0x15ADu && d == 0x0405u) {
+        g->vendor_kind = GPU_VENDOR_GENERIC;
+        str_copy(g->vendor_name, sizeof(g->vendor_name), "VMware/VBox");
+        str_copy(g->gen_name, sizeof(g->gen_name), "VMSVGA / SVGA II");
     } else {
         g->vendor_kind = GPU_VENDOR_GENERIC;
         str_copy(g->vendor_name, sizeof(g->vendor_name), "Generic");
@@ -413,10 +421,24 @@ int gpu_init(int req_width, int req_height, int req_bpp) {
         }
     }
 
-    /* 3e) Direct DISPI I/O fallback (if BGA present without standard PCI ID) */
+    /* 3e) VirtualBox (0x80EE:0xBEEF) / VMware VMSVGA (0x15AD:0x0405) / Direct DISPI I/O fallback */
     if (!s_gpu_ready) {
-        if (gpu_bga_probe(0, &s_active_gpu, req_width, req_height, req_bpp) == 0) {
+        const gpu_pci_info_t *bga_hint = 0;
+        int bga_hint_idx = -1;
+        for (int i = 0; i < s_pci_gpu_count; i++) {
+            uint16_t v = s_pci_gpus[i].pci.vendor;
+            uint16_t d = s_pci_gpus[i].pci.device;
+            if ((v == 0x80EEu && d == 0xBEEFu) ||
+                (v == 0x15ADu && d == 0x0405u) ||
+                v == PCI_VENDOR_BOCHS) {
+                bga_hint = &s_pci_gpus[i];
+                bga_hint_idx = i;
+                break;
+            }
+        }
+        if (gpu_bga_probe(bga_hint, &s_active_gpu, req_width, req_height, req_bpp) == 0) {
             s_gpu_ready = true;
+            if (bga_hint_idx >= 0) bound_idx = bga_hint_idx;
         }
     }
 

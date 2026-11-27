@@ -6,6 +6,7 @@
 #include "adl_wolf.h"
 #include "wolf_engine.h"
 #include "version.h"        /* surum: version.json -> ARCTIAN_VERSION */
+#include "miniz.h"
 #include <stdint.h>
 
 #define TERM_LOG_MAX 20000
@@ -20,10 +21,13 @@
 static char  g_log[TERM_LOG_MAX];
 static int   g_log_len;
 
+static lv_obj_t   *g_win;
 static lv_obj_t   *g_scroll;
 static lv_obj_t   *g_out_label;
 static lv_obj_t   *g_input;
 static lv_obj_t   *g_menu;
+static lv_obj_t   *g_plus_btn;
+static lv_obj_t   *g_chev_btn;
 static lv_group_t *g_group;
 
 #define SH_ENV_MAX   16
@@ -1496,7 +1500,6 @@ static void cmd_pkg(const char *arg) {
         if (starts_with(id, "http://") || starts_with(id, "https://") ||
             starts_with(id, "C:/") || starts_with(id, "D:/") ||
             starts_with(id, "/") || slen(id) > 4) {
-            const char *dot = id;
             int has_dpk = 0;
             for (int i = 0; id[i]; i++)
                 if (id[i] == '.' && id[i + 1] == 'd' && id[i + 2] == 'p' &&
@@ -3274,6 +3277,8 @@ static void term_exec(asi_t *asi, const char *cmd) {
         term_puts("  du [klasor]          boyut ozeti\n");
         term_puts("  tree [derinlik]      klasor agaci\n");
         term_puts("  stat <dosya>         boyut/tur/izin bilgisi\n");
+        term_puts("  zip <arsiv.zip> <yol> dosya veya klasor sikistir\n");
+        term_puts("  unzip [-l] <arsiv.zip> [hedef]  ZIP arsivini cikar/listele\n");
         term_puts("  wf ...               Wolf uygulama platformu (.wlf) — wf help\n");
         term_puts("  elfrun <elf> [arg]   Ring-3 POSIX ELF64 ikilisi calistir\n");
         term_puts("  touch <dosya>        bos dosya olustur\n");
@@ -3391,6 +3396,91 @@ static void term_exec(asi_t *asi, const char *cmd) {
         cmd_tree(arg);
     } else if (str_eq(name, "stat")) {
         cmd_stat(arg);
+    } else if (str_eq(name, "zip")) {
+        char outz[176];
+        const char *p = arg;
+        while (*p == ' ') p++;
+        int n = 0;
+        while (*p && *p != ' ' && n < (int)sizeof(outz) - 1) outz[n++] = *p++;
+        outz[n] = 0;
+        while (*p == ' ') p++;
+        if (!outz[0] || !*p) {
+            term_puts("Kullanim: zip <cikti.zip> <dosya_veya_klasor...>\n");
+        } else {
+            char oz[176];
+            path_resolve(oz, sizeof(oz), outz);
+            char srcs[8][176];
+            const char *ptrs[8];
+            int sc = 0;
+            while (*p && sc < 8) {
+                char tok[176];
+                int tn = 0;
+                while (*p && *p != ' ' && tn < (int)sizeof(tok) - 1) tok[tn++] = *p++;
+                tok[tn] = 0;
+                while (*p == ' ') p++;
+                if (tok[0]) {
+                    path_resolve(srcs[sc], sizeof(srcs[sc]), tok);
+                    ptrs[sc] = srcs[sc];
+                    sc++;
+                }
+            }
+            int added = 0;
+            if (sc > 0 && mz_zip_create(asi, oz, ptrs, sc, 1, &added) == 0) {
+                term_puts("ZIP olusturuldu: "); term_puts(oz);
+                term_puts(" ("); term_put_uint((uint32_t)added); term_puts(" oge)\n");
+            } else {
+                term_puts("ZIP olusturulamadi\n");
+            }
+        }
+    } else if (str_eq(name, "unzip")) {
+        const char *p = arg;
+        while (*p == ' ') p++;
+        int list_only = 0;
+        if (starts_with(p, "-l ") || str_eq(p, "-l")) {
+            list_only = 1;
+            p += 2;
+            while (*p == ' ') p++;
+        }
+        char inz[176], dest[176];
+        int n = 0;
+        while (*p && *p != ' ' && n < (int)sizeof(inz) - 1) inz[n++] = *p++;
+        inz[n] = 0;
+        while (*p == ' ') p++;
+        n = 0;
+        while (*p && *p != ' ' && n < (int)sizeof(dest) - 1) dest[n++] = *p++;
+        dest[n] = 0;
+        if (!inz[0]) {
+            term_puts("Kullanim: unzip [-l] <arsiv.zip> [hedef_klasor]\n");
+        } else {
+            char iz[176];
+            path_resolve(iz, sizeof(iz), inz);
+            if (list_only) {
+                mz_zip_info_t info[32];
+                int tot = 0;
+                if (mz_zip_list(asi, iz, info, 32, &tot) == 0) {
+                    term_puts("Arsiv: "); term_puts(iz);
+                    term_puts(" ("); term_put_uint((uint32_t)tot); term_puts(" oge)\n");
+                    int lim = tot < 32 ? tot : 32;
+                    for (int k = 0; k < lim; k++) {
+                        term_puts("  "); term_put_uint(info[k].uncomp_size);
+                        term_puts(" B  "); term_puts(info[k].name); term_putc('\n');
+                    }
+                } else {
+                    term_puts("ZIP okunamadi: "); term_puts(iz); term_putc('\n');
+                }
+            } else {
+                char dp[176];
+                if (dest[0]) path_resolve(dp, sizeof(dp), dest);
+                else cstr_copy(dp, sizeof(dp), g_cwd);
+                int cnt = 0;
+                if (mz_zip_extract(asi, iz, dp, &cnt) == 0) {
+                    term_puts("ZIP cikarildi: "); term_puts(dp);
+                    term_puts(" ("); term_put_uint((uint32_t)cnt); term_puts(" oge)\n");
+                } else {
+                    term_puts("ZIP cikarilamadi\n");
+                }
+            }
+        }
     } else if (str_eq(name, "touch")) {
         cmd_touch(arg);
     } else if (str_eq(name, "trash") || str_eq(name, "cop")) {
@@ -3628,7 +3718,7 @@ static const char *const k_cmds[] = {
     "help","clear","apps","run","close","ps","proc","proctest","wait","reap",
     "labtest","capstest","permtest","socktest","shelltest","grep","wc","head",
     "sort","tee","env","set","unset","history","fsck","threads","wallpaper",
-    "ls","cat","rm","mv","cp","find","du","tree","stat","touch","trash","cd","pwd","mkdir","editor","wolf","wf","wolfdok","theme","pkg",
+    "ls","cat","rm","mv","cp","find","du","tree","stat","zip","unzip","touch","trash","cd","pwd","mkdir","editor","wolf","wf","wolfdok","theme","pkg",
     "date","sysinfo","mem","whoami","users","adduser","passwd","kilit","ip",
     "dns","curl","bgfetch","update","ntp","print","jobs","lp","dmesg","syslog",
     "copy","paste","clip","notify","safemode","reboot","shutdown", 0
@@ -3700,10 +3790,13 @@ static void term_del_cb(lv_event_t *e) {
     if (g_pend_timer) { lv_timer_delete(g_pend_timer); g_pend_timer = 0; }
     lv_indev_t *kp = lv_port_get_keypad();
     if (kp) lv_indev_set_group(kp, NULL);
+    g_win = 0;
     g_input = 0;
     g_out_label = 0;
     g_scroll = 0;
     g_menu = 0;
+    g_plus_btn = 0;
+    g_chev_btn = 0;
     g_tabbar = 0;
     for (int i = 0; i < TERM_TABS; i++) { g_tabbox[i] = 0; g_tabtitle[i] = 0; }
 }
@@ -3719,7 +3812,7 @@ static lv_obj_t *mk_btn(lv_obj_t *parent, const char *sym, lv_event_cb_t cb, voi
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, sym);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(l, adl_font(), 0);
     lv_obj_set_style_text_color(l, lv_color_hex(0xB4B4B4), 0);
     lv_obj_center(l);
     if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
@@ -3755,7 +3848,7 @@ static void tabs_redraw(void) {
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, 8, 0);
         lv_obj_t *ig = lv_label_create(icon);
         lv_label_set_text(ig, ">_");
-        lv_obj_set_style_text_font(ig, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(ig, adl_font(), 0);
         lv_obj_set_style_text_color(ig, lv_color_hex(0xFFFFFF), 0);
         lv_obj_center(ig);
 
@@ -3771,7 +3864,7 @@ static void tabs_redraw(void) {
         lv_obj_align(title, LV_ALIGN_LEFT_MID, 32, 0);
         g_tabtitle[i] = title;
 
-        lv_obj_t *cls = mk_btn(tab, LV_SYMBOL_CLOSE, tab_close_cb, 0);
+        lv_obj_t *cls = mk_btn(tab, "x", tab_close_cb, 0);
         lv_obj_align(cls, LV_ALIGN_RIGHT_MID, -6, 0);
         g_tabbox[i] = tab;
         x += 216;
@@ -3839,10 +3932,10 @@ static void build_tabbar(lv_obj_t *win, int w) {
     lv_obj_set_style_border_color(bar, lv_color_hex(0x262626), 0);
     g_tabbar = bar;
 
-    lv_obj_t *plus = mk_btn(bar, LV_SYMBOL_PLUS, tab_new_cb, 0);
-    lv_obj_align(plus, LV_ALIGN_RIGHT_MID, -70, 0);
-    lv_obj_t *chev = mk_btn(bar, LV_SYMBOL_DOWN, chev_cb, 0);
-    lv_obj_align(chev, LV_ALIGN_RIGHT_MID, -36, 0);
+    g_plus_btn = mk_btn(bar, "+", tab_new_cb, 0);
+    lv_obj_align(g_plus_btn, LV_ALIGN_RIGHT_MID, -70, 0);
+    g_chev_btn = mk_btn(bar, "v", chev_cb, 0);
+    lv_obj_align(g_chev_btn, LV_ALIGN_RIGHT_MID, -36, 0);
 
     g_menu = lv_obj_create(win);
     lv_obj_remove_style_all(g_menu);
@@ -3923,8 +4016,26 @@ static void build_term(lv_obj_t *win, int w, int h) {
     lv_obj_add_event_cb(g_input, input_key_cb, LV_EVENT_KEY, 0);
 }
 
+static void term_relayout(lv_obj_t *win) {
+    if (!win) return;
+    int w = lv_obj_get_width(win);
+    int h = lv_obj_get_height(win);
+    if (w < 260 || h < 160) return;
+    if (g_tabbar) lv_obj_set_size(g_tabbar, w, TERM_TAB_H);
+    if (g_plus_btn) lv_obj_align(g_plus_btn, LV_ALIGN_RIGHT_MID, -70, 0);
+    if (g_chev_btn) lv_obj_align(g_chev_btn, LV_ALIGN_RIGHT_MID, -36, 0);
+    if (g_menu) lv_obj_set_pos(g_menu, w - 190, TERM_TAB_H + 4);
+    if (g_scroll) {
+        lv_obj_set_size(g_scroll, w, h - TERM_TAB_H);
+        lv_obj_set_pos(g_scroll, 0, TERM_TAB_H);
+        lv_obj_update_layout(g_scroll);
+        lv_obj_scroll_to_y(g_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+    }
+}
+
 void app_entry(lv_obj_t *win, asi_t *asi) {
     g_asi = asi;
+    g_win = win;
     g_log_len = 0;
     g_log[0] = 0;
     g_menu = 0;
@@ -3970,6 +4081,7 @@ void app_entry(lv_obj_t *win, asi_t *asi) {
     cstr_copy(g_cwd, sizeof(g_cwd), "C:/");
     tabs_redraw();
 
+    arctian_shell_set_relayout(win, term_relayout);
     lv_obj_add_event_cb(win, term_del_cb, LV_EVENT_DELETE, 0);
     lv_obj_add_event_cb(win, term_focus_cb, LV_EVENT_CLICKED, 0);
 

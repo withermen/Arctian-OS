@@ -49,6 +49,12 @@ static volatile uint32_t s_win_num_chunks = 0;
 static volatile int      s_win_cap = 0;
 static spinlock_t        s_win_tab_lock;
 
+#define PGFX_CLIP_CAP 4096u
+static char              s_kclip[PGFX_CLIP_CAP];
+static uint32_t          s_kclip_len = 0;
+static uint32_t          s_kclip_seq = 0;
+static spinlock_t        s_kclip_lock;
+
 static inline pgfx_win_t *pgfx_slot(int id) {
     int cap = __atomic_load_n(&s_win_cap, __ATOMIC_ACQUIRE);
     if (id < 0 || id >= cap) return 0;
@@ -74,6 +80,7 @@ void posix_gfx_register_desktop(pgfx_open_cb_t on_open, pgfx_blit_cb_t on_blit,
 
 void posix_gfx_init(void) {
     spin_init(&s_win_tab_lock);
+    spin_init(&s_kclip_lock);
     int cap = __atomic_load_n(&s_win_cap, __ATOMIC_ACQUIRE);
     for (int i = 0; i < cap; i++) {
         pgfx_win_t *gw = pgfx_slot(i);
@@ -242,10 +249,10 @@ void posix_gfx_desktop_drain(void) {
     }
 }
 
-/* ---- Syscall'lar (500..504) ---- */
+/* ---- Syscall'lar (500..507) ---- */
 int64_t posix_sys_gfx_create(posix_proc_t *p, uint64_t title_va, uint32_t w, uint32_t h, uint32_t flags) {
     (void)flags;
-    if (w == 0 || h == 0 || w > 1920 || h > 1080) return -EINVAL;
+    if (w == 0 || h == 0 || w > 2560 || h > 1440) return -EINVAL;
     char title[64];
     if (title_va && posix_ucstr_in(title, sizeof(title), title_va) == 0) {
         /* ok */
@@ -374,19 +381,151 @@ int64_t posix_sys_gfx_poll(posix_proc_t *p, int fd, uint64_t ev_va, int timeout_
     }
 }
 
+static int pgfx_resize_slot(pgfx_win_t *gw, uint32_t w, uint32_t h) {
+    if (!gw) return -EBADF;
+    if (w == 0 || h == 0 || w > 2560 || h > 1440) return -EINVAL;
+
+    uint64_t fl = sched_irq_save();
+    spin_lock(&gw->lock);
+    int sid = (gw->used && !gw->want_close) ? gw->shm_id : -1;
+    if (sid >= 0 && posix_shm_ref(sid) != 0) sid = -1;
+    spin_unlock(&gw->lock);
+    sched_irq_restore(fl);
+
+    if (sid < 0) return -EBADF;
+
+    int rc = posix_shm_resize(sid, (uint64_t)w * (uint64_t)h * 4ull);
+    if (rc == 0) {
+        fl = sched_irq_save();
+        spin_lock(&gw->lock);
+        if (gw->used && !gw->want_close && gw->shm_id == sid) {
+            gw->width = w;
+            gw->height = h;
+        }
+        spin_unlock(&gw->lock);
+        sched_irq_restore(fl);
+    }
+    posix_shm_unref(sid);
+    return rc;
+}
+
+int posix_gfx_resize_win(int win_id, uint32_t w, uint32_t h) {
+    pgfx_win_t *gw = pgfx_slot(win_id);
+    if (!gw || !gw->used) return -EBADF;
+    return pgfx_resize_slot(gw, w, h);
+}
+
 int64_t posix_sys_gfx_resize(posix_proc_t *p, int fd, uint32_t w, uint32_t h) {
     posix_file_t *f = posix_fd_get(p, fd);
     if (!f || f->kind != PFD_GFX) return -EBADF;
-    if (w == 0 || h == 0 || w > 1920 || h > 1080) return -EINVAL;
     pgfx_win_t *gw = pgfx_slot(f->obj_id);
     if (!gw || !gw->used) return -EBADF;
-    int rc = posix_shm_resize(gw->shm_id, (uint64_t)w * (uint64_t)h * 4ull);
-    if (rc < 0) return rc;
-    gw->width = w;
-    gw->height = h;
-    return 0;
+    return pgfx_resize_slot(gw, w, h);
 }
 
 int64_t posix_sys_gfx_destroy(posix_proc_t *p, int fd) {
     return posix_sys_close(p, fd);
+}
+
+/* ---- Sistem Geneli Pano Koprusu (Desktop <-> Ring-3 POSIX) ---- */
+uint32_t posix_gfx_clip_seq(void) {
+    return __atomic_load_n(&s_kclip_seq, __ATOMIC_ACQUIRE);
+}
+
+int posix_gfx_clip_get(char *out, uint32_t cap) {
+    if (!out && cap > 0) return -EINVAL;
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_kclip_lock);
+    uint32_t n = s_kclip_len;
+    if (cap == 0) {
+        spin_unlock(&s_kclip_lock);
+        sched_irq_restore(fl);
+        return (int)n;
+    }
+    if (n > cap - 1u) n = cap - 1u;
+    if (n > 0) memcpy(out, s_kclip, n);
+    out[n] = 0;
+    spin_unlock(&s_kclip_lock);
+    sched_irq_restore(fl);
+    return (int)n;
+}
+
+void posix_gfx_clip_set(const char *str, uint32_t len, uint32_t *seq_out) {
+    uint32_t n = 0;
+    if (str) {
+        uint32_t max_n = (len < PGFX_CLIP_CAP - 1u) ? len : (PGFX_CLIP_CAP - 1u);
+        while (n < max_n && str[n] != '\0') n++;
+    }
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_kclip_lock);
+    if (n > 0) memcpy(s_kclip, str, n);
+    s_kclip[n] = 0;
+    s_kclip_len = n;
+    uint32_t seq = s_kclip_seq + 1u;
+    if (seq == 0) seq = 1u;
+    __atomic_store_n(&s_kclip_seq, seq, __ATOMIC_RELEASE);
+    spin_unlock(&s_kclip_lock);
+    sched_irq_restore(fl);
+    if (seq_out) *seq_out = seq;
+}
+
+int64_t posix_sys_clip_get(uint64_t buf_va, uint64_t cap) {
+    if (cap == 0) {
+        uint64_t fl = sched_irq_save();
+        spin_lock(&s_kclip_lock);
+        uint32_t n = s_kclip_len;
+        spin_unlock(&s_kclip_lock);
+        sched_irq_restore(fl);
+        return (int64_t)n;
+    }
+    if (!buf_va) return -EFAULT;
+
+    char *tmp = (char *)kmalloc(PGFX_CLIP_CAP);
+    if (!tmp) return -ENOMEM;
+
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_kclip_lock);
+    uint32_t n = s_kclip_len;
+    if (n > cap - 1ull) n = (uint32_t)(cap - 1ull);
+    if (n >= PGFX_CLIP_CAP) n = PGFX_CLIP_CAP - 1u;
+    if (n > 0) memcpy(tmp, s_kclip, n);
+    tmp[n] = 0;
+    spin_unlock(&s_kclip_lock);
+    sched_irq_restore(fl);
+
+    int rc = posix_ucopy_out(buf_va, tmp, (uint64_t)n + 1ull);
+    kfree(tmp);
+    return (rc < 0) ? rc : (int64_t)n;
+}
+
+int64_t posix_sys_clip_set(uint64_t str_va, uint64_t len) {
+    if (len > 0 && !str_va) return -EFAULT;
+    uint32_t req = (len >= PGFX_CLIP_CAP) ? (PGFX_CLIP_CAP - 1u) : (uint32_t)len;
+    char *tmp = (char *)kmalloc(PGFX_CLIP_CAP);
+    if (!tmp) return -ENOMEM;
+
+    if (req > 0) {
+        int rc = posix_ucopy_in(tmp, str_va, req);
+        if (rc < 0) {
+            kfree(tmp);
+            return rc;
+        }
+    }
+    tmp[req] = 0;
+    uint32_t actual = 0;
+    while (actual < req && tmp[actual] != '\0') actual++;
+
+    uint64_t fl = sched_irq_save();
+    spin_lock(&s_kclip_lock);
+    if (actual > 0) memcpy(s_kclip, tmp, actual);
+    s_kclip[actual] = 0;
+    s_kclip_len = actual;
+    uint32_t seq = s_kclip_seq + 1u;
+    if (seq == 0) seq = 1u;
+    __atomic_store_n(&s_kclip_seq, seq, __ATOMIC_RELEASE);
+    spin_unlock(&s_kclip_lock);
+    sched_irq_restore(fl);
+
+    kfree(tmp);
+    return 0;
 }

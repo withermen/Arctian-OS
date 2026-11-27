@@ -21,61 +21,17 @@ start:
     mov byte [0x7100], 1
 .src_ok:
 
+    ; Temiz gercek acilis basligi (sahte adim / sahte bekleme yok)
     mov ax, 0x0003
     int 0x10
     mov ah, 0x01
     mov cx, 0x2607
     int 0x10
 
-    ; Baslik
-    mov si, msg_t
+    mov si, msg_boot
     call print
-    call nl
 
-    ; Boot stages
-    mov si, msg_b
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_m
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_d
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_a
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_v
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_p
-    call print
-    call delay
-    call poke
-    call nl
-
-    mov si, msg_k
-    call print
-    call dot
-    call dot
-    call dot
-
-    ; Stage2 + kernel oku
+    ; Stage2 + main_kernel gercek disk okumasi (0x1000:0x0000)
     cmp byte [boot_drive], 0x80
     jae .lba
 
@@ -129,25 +85,16 @@ start:
     jnz .lba_l
 
 .done:
-    call poke
-    call nl
-    mov si, msg_s
-    call print
-    call nl
-    call nl
-    call delay
-    call delay
-
-    ; Stage2'ye atla
+    ; Aninda Stage2'ye atla (yapay bekleme yok)
     mov ax, 0x1000
     mov ds, ax
     mov es, ax
     jmp 0x1000:0x0000
 
 .fail:
-    call nl
-    mov si, msg_f
+    mov si, msg_fail
     call print
+    cli
     hlt
     jmp $
 
@@ -165,55 +112,8 @@ print:
     popa
     ret
 
-nl:
-    pusha
-    mov ah, 0x0E
-    mov al, 0x0D
-    int 0x10
-    mov al, 0x0A
-    int 0x10
-    popa
-    ret
-
-poke:
-    pusha
-    mov si, msg_ok
-    call print
-    popa
-    ret
-
-dot:
-    pusha
-    mov ah, 0x0E
-    mov al, '.'
-    int 0x10
-    popa
-    ret
-
-delay:
-    pusha
-    mov cx, 0x0100
-.ol:
-    mov dx, 0xFFFF
-.il:
-    dec dx
-    jnz .il
-    loop .ol
-    popa
-    ret
-
-; --- Mesajlar (kisa) ---
-msg_t:  db "Arctian x64", 0
-msg_b:  db " [Boot]", 0
-msg_m:  db " [Mem]", 0
-msg_d:  db " [Disk]", 0
-msg_a:  db " [A20]", 0
-msg_v:  db " [VESA]", 0
-msg_p:  db " [Paging]", 0
-msg_k:  db " [Kernel]", 0
-msg_ok: db "OK", 0
-msg_f:  db " HATA", 0x0D, 0x0A, 0
-msg_s:  db " -> Yuklendi!", 0
+msg_boot: db "Arctian OS yukleniyor...", 0x0D, 0x0A, 0
+msg_fail: db "Disk okuma hatasi.", 0x0D, 0x0A, 0
 
 boot_drive: db 0
 dap:

@@ -344,7 +344,7 @@ void workspace_notify(void) {
     char b[8];
     b[0] = (char)('1' + g_ws);
     b[1] = 0;
-    arctian_notify("Calisma alani", b);
+    arctian_notify("Çalışma alanı", b);
 
     lv_obj_t *box = lv_obj_create(lv_screen_active());
     lv_obj_remove_style_all(box);
@@ -359,10 +359,10 @@ void workspace_notify(void) {
     lv_obj_set_style_border_color(box, lv_color_hex(ADL_BORDER), 0);
 
     lv_obj_t *l = lv_label_create(box);
-    char t[24];
+    char t[32];
     int k = 0;
-    const char *pre = "Calisma alani ";
-    for (int i = 0; pre[i] && k < (int)sizeof(t) - 4; i++) t[k++] = pre[i];
+    const char *pre = "Çalışma alanı ";
+    for (int i = 0; pre[i] && k < (int)sizeof(t) - 6; i++) t[k++] = pre[i];
     t[k++] = (char)('1' + g_ws);
     t[k++] = ' ';
     t[k++] = '/';
@@ -407,7 +407,7 @@ void workspace_move_top(int delta) {
     char b[8];
     b[0] = (char)('1' + nw);
     b[1] = 0;
-    arctian_notify("Pencere tasindi", b);
+    arctian_notify("Pencere taşındı", b);
 }
 
 void workspace_switch(int delta) {
@@ -622,8 +622,163 @@ void win_snap_hotkey(int hk) {
 }
 
 
+/* ---------------------------------------------------------------- */
+/* 8-yonlu pencere boyutlandirma (kenar 6px, kose 10px)               */
+/* ---------------------------------------------------------------- */
+enum {
+    RESIZE_NONE = 0,
+    RESIZE_L = 1 << 0,
+    RESIZE_R = 1 << 1,
+    RESIZE_T = 1 << 2,
+    RESIZE_B = 1 << 3
+};
+
+static winrec_t *s_rs_rec = 0;
+static lv_obj_t *s_rs_win = 0;
+static int       s_rs_dir = RESIZE_NONE;
+static int       s_rs_sx = 0, s_rs_sy = 0;
+static int       s_rs_ox = 0, s_rs_oy = 0, s_rs_ow = 0, s_rs_oh = 0;
+static int       s_rs_pl = 0;
+
+int win_resize_is_active(void) {
+    return s_rs_win != 0;
+}
+
+static int win_resize_hit(lv_obj_t *win, int mx, int my) {
+    if (!win || lv_obj_has_flag(win, LV_OBJ_FLAG_HIDDEN)) return RESIZE_NONE;
+    if (lv_obj_has_flag(win, LV_OBJ_FLAG_USER_3)) return RESIZE_NONE; /* tam ekran */
+    if (lv_obj_has_flag(win, LV_OBJ_FLAG_USER_1)) return RESIZE_NONE; /* maksimize */
+    int wx = lv_obj_get_x(win), wy = lv_obj_get_y(win);
+    int ww = lv_obj_get_width(win), hh = lv_obj_get_height(win);
+    if (mx < wx || mx >= wx + ww || my < wy || my >= wy + hh) return RESIZE_NONE;
+
+    const int edge = 6;
+    const int corner = 10;
+    int lx = mx - wx;
+    int rx = (wx + ww - 1) - mx;
+    int ty = my - wy;
+    int by = (wy + hh - 1) - my;
+
+    if (lx < corner && ty < corner) return RESIZE_L | RESIZE_T;
+    if (rx < corner && ty < corner) return RESIZE_R | RESIZE_T;
+    if (lx < corner && by < corner) return RESIZE_L | RESIZE_B;
+    if (rx < corner && by < corner) return RESIZE_R | RESIZE_B;
+
+    int mask = RESIZE_NONE;
+    if (lx < edge) mask |= RESIZE_L;
+    if (rx < edge) mask |= RESIZE_R;
+    if (ty < edge) mask |= RESIZE_T;
+    if (by < edge) mask |= RESIZE_B;
+    return mask;
+}
+
+static winrec_t *win_top_unobscured_at(int mx, int my) {
+    lv_obj_t *scr = lv_screen_active();
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (int i = (int)n - 1; i >= 0; i--) {
+        lv_obj_t *ch = lv_obj_get_child(scr, i);
+        if (!ch || lv_obj_has_flag(ch, LV_OBJ_FLAG_HIDDEN)) continue;
+        if (ch == g_wallpaper || ch == g_icon_layer) continue;
+        if (!lv_obj_has_flag(ch, LV_OBJ_FLAG_CLICKABLE)) continue;
+        if (!rect_at(ch, mx, my)) continue;
+        for (int j = 0; j < MAX_WINS; j++) {
+            if (g_recs[j] && g_recs[j]->win == ch) return g_recs[j];
+        }
+        return 0; /* ustte panel/menu/dock var */
+    }
+    return 0;
+}
+
+void win_resize_poll(void) {
+    if (!g_asi || !g_asi->input || !g_asi->gfx) return;
+    int mx = g_asi->input->mouse_x();
+    int my = g_asi->input->mouse_y();
+    int left = (g_asi->input->mouse_buttons() & 1) ? 1 : 0;
+
+    if (s_rs_win) {
+        if (!left || !winrec_alive(s_rs_rec) || s_rs_rec->win != s_rs_win) {
+            s_rs_win = 0;
+            s_rs_rec = 0;
+            s_rs_dir = RESIZE_NONE;
+            if (s_rel_timer) lv_timer_ready(s_rel_timer);
+            s_rs_pl = left;
+            return;
+        }
+        int sw = g_asi->gfx->width();
+        int sh = g_asi->gfx->height();
+        int min_w = 260;
+        int min_h = 180;
+        if (min_w > sw) min_w = sw;
+        if (min_h > sh) min_h = sh;
+
+        int dx = mx - s_rs_sx;
+        int dy = my - s_rs_sy;
+        int left_x = s_rs_ox;
+        int right_x = s_rs_ox + s_rs_ow;
+        int top_y = s_rs_oy;
+        int bot_y = s_rs_oy + s_rs_oh;
+
+        if (s_rs_dir & RESIZE_L) {
+            left_x = s_rs_ox + dx;
+            if (left_x < 0) left_x = 0;
+            if (right_x - left_x < min_w) left_x = right_x - min_w;
+        }
+        if (s_rs_dir & RESIZE_R) {
+            right_x = s_rs_ox + s_rs_ow + dx;
+            if (right_x > sw) right_x = sw;
+            if (right_x - left_x < min_w) right_x = left_x + min_w;
+        }
+        if (s_rs_dir & RESIZE_T) {
+            top_y = s_rs_oy + dy;
+            if (top_y < 0) top_y = 0;
+            if (bot_y - top_y < min_h) top_y = bot_y - min_h;
+        }
+        if (s_rs_dir & RESIZE_B) {
+            bot_y = s_rs_oy + s_rs_oh + dy;
+            if (bot_y > sh) bot_y = sh;
+            if (bot_y - top_y < min_h) bot_y = top_y + min_h;
+        }
+
+        int nx = left_x;
+        int ny = top_y;
+        int nw = right_x - left_x;
+        int nh = bot_y - top_y;
+
+        if (nx != lv_obj_get_x(s_rs_win) || ny != lv_obj_get_y(s_rs_win))
+            lv_obj_set_pos(s_rs_win, nx, ny);
+        if (nw != lv_obj_get_width(s_rs_win) || nh != lv_obj_get_height(s_rs_win))
+            lv_obj_set_size(s_rs_win, nw, nh);
+
+        s_rs_pl = left;
+        return;
+    }
+
+    if (left && !s_rs_pl && !g_modal) {
+        winrec_t *r = win_top_unobscured_at(mx, my);
+        if (r && r->win) {
+            int dir = win_resize_hit(r->win, mx, my);
+            if (dir != RESIZE_NONE) {
+                s_rs_rec = r;
+                s_rs_win = r->win;
+                s_rs_dir = dir;
+                s_rs_sx = mx;
+                s_rs_sy = my;
+                s_rs_ox = lv_obj_get_x(r->win);
+                s_rs_oy = lv_obj_get_y(r->win);
+                s_rs_ow = lv_obj_get_width(r->win);
+                s_rs_oh = lv_obj_get_height(r->win);
+                lv_obj_set_style_align(r->win, LV_ALIGN_DEFAULT, 0);
+                lv_obj_move_foreground(r->win);
+            }
+        }
+    }
+    s_rs_pl = left;
+}
+
+
 /* baslik cubugundan surukleme (delta tabanli, guvenli) */
 void title_drag_cb(lv_event_t *e) {
+    if (win_resize_is_active()) return;
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *win = (lv_obj_t *)lv_event_get_user_data(e);
     if (!win) return;

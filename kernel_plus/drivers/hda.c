@@ -71,6 +71,8 @@
 #define HDA_VERB_SET_CHAN_STREAM    0x706u
 #define HDA_VERB_GET_PIN_CTL        0xF07u
 #define HDA_VERB_SET_PIN_CTL        0x707u
+#define HDA_VERB_GET_PIN_SENSE      0xF09u
+#define HDA_VERB_SET_PIN_SENSE      0x709u
 #define HDA_VERB_SET_EAPD           0x70Cu
 #define HDA_VERB_GET_CFG_DEF        0xF1Cu
 #define HDA_VERB_SET_CONV_FMT       0x2u   /* 4-bit verb */
@@ -96,12 +98,31 @@
 #define HDA_PAGE_BYTES              4096u
 #define HDA_RING_BYTES              (HDA_RING_PAGES * HDA_PAGE_BYTES)
 #define HDA_STREAM_ID               1u
+#define HDA_MAX_OUT_PINS            4u
 
 typedef struct __attribute__((packed)) {
     uint64_t addr;
     uint32_t len;
     uint32_t ioc;
 } hda_bdl_entry_t;
+
+typedef struct {
+    uint8_t  pin_nid;
+    uint8_t  dac_nid;
+    uint8_t  def_dev;       /* 0=LineOut, 1=Speaker, 2=Headphone */
+    uint8_t  port_conn;     /* 0=Jack, 1=None, 2=Fixed, 3=Both */
+    uint32_t pin_caps;
+    uint32_t pin_wcaps;
+    uint8_t  dac_amp_steps;
+    uint8_t  pin_amp_steps;
+    bool     dac_has_amp;
+    bool     pin_has_amp;
+    bool     pres_det_cap;
+    bool     eapd_cap;
+    bool     hp_cap;
+    bool     active;
+    bool     plugged;
+} hda_out_pin_t;
 
 typedef struct {
     bool     present;
@@ -123,16 +144,16 @@ typedef struct {
     uint16_t           rirb_rp;
     bool               corb_active;
 
-    /* Codec & Output Path */
-    uint8_t  cad;
-    uint32_t codec_vendor;
-    uint8_t  afg_nid;
-    uint8_t  dac_nid;
-    uint8_t  pin_nid;
-    uint8_t  dac_amp_steps;
-    uint8_t  pin_amp_steps;
-    bool     dac_has_amp;
-    bool     pin_has_amp;
+    /* Codec & Multi-Pin Output Routing */
+    uint8_t       cad;
+    uint32_t      codec_vendor;
+    uint8_t       afg_nid;
+    uint8_t       dac_nid;
+    uint8_t       pin_nid;
+    hda_out_pin_t out_pins[HDA_MAX_OUT_PINS];
+    uint8_t       out_pin_count;
+    bool          hp_plugged;
+    uint64_t      last_jack_poll_ms;
 
     /* Output BDL + DMA Ring Pages */
     uint64_t         bdl_pa;
@@ -141,18 +162,21 @@ typedef struct {
     uint8_t         *ring_va[HDA_RING_PAGES];
 
     /* Playback state */
-    bool           playing;
-    int            volume;
-    uint32_t       rate;
-    const uint8_t *src;
-    uint32_t       src_len;
-    uint32_t       src_pos;
-    uint32_t       active_cbl;
-    uint32_t       last_lpib;
-    uint64_t       played_bytes;
-    uint64_t       total_target_bytes;
-    uint32_t       fill_page;
-    uint32_t       pages_queued;
+    bool               playing;
+    bool               stream_mode;
+    hda_stream_pull_fn pull_fn;
+    void              *pull_ctx;
+    int                volume;
+    uint32_t           rate;
+    const uint8_t     *src;
+    uint32_t           src_len;
+    uint32_t           src_pos;
+    uint32_t           active_cbl;
+    uint32_t           last_lpib;
+    uint64_t           played_bytes;
+    uint64_t           total_target_bytes;
+    uint32_t           fill_page;
+    uint32_t           pages_queued;
 } hda_state_t;
 
 static hda_state_t s_hda;
@@ -373,21 +397,124 @@ static uint16_t hda_encode_fmt(uint32_t hz) {
     return (uint16_t)((base << 14) | (mult << 11) | (div << 8) | (1u << 4) | 1u);
 }
 
-static void hda_enable_pin_and_dac(uint8_t cad, uint8_t w_start, uint8_t w_count,
-                                   uint8_t pin, uint8_t dac) {
+static void hda_apply_pin_amp(const hda_out_pin_t *p, int percent) {
+    if (!p) return;
+    if (percent <= 0 || !p->active) {
+        hda_verb4(s_hda.cad, p->pin_nid, HDA_VERB_SET_AMP_GAIN, 0xB080u);
+        return;
+    }
+    uint8_t max_g = p->pin_amp_steps ? p->pin_amp_steps : 0x3Fu;
+    uint8_t g = (uint8_t)(((uint32_t)percent * max_g) / 100u);
+    hda_unmute_amp(s_hda.cad, p->pin_nid, true, false, 0, g);
+}
+
+static void hda_apply_dac_amp(const hda_out_pin_t *p, int percent) {
+    if (!p) return;
+    if (percent <= 0) {
+        hda_verb4(s_hda.cad, p->dac_nid, HDA_VERB_SET_AMP_GAIN, 0xB080u);
+        return;
+    }
+    uint8_t max_g = p->dac_amp_steps ? p->dac_amp_steps : 0x3Fu;
+    uint8_t g = (uint8_t)(((uint32_t)percent * max_g) / 100u);
+    hda_unmute_amp(s_hda.cad, p->dac_nid, true, false, 0, g);
+}
+
+static void hda_configure_pin_output(hda_out_pin_t *p, bool enable) {
+    if (!p) return;
+    p->active = enable;
+    if (enable) {
+        uint8_t pctl = 0x40u; /* OUT_EN */
+        if (p->hp_cap || p->def_dev == 2u) pctl |= 0x80u; /* HP_EN */
+        hda_verb12(s_hda.cad, p->pin_nid, HDA_VERB_SET_PIN_CTL, pctl);
+        if (p->eapd_cap)
+            hda_verb12(s_hda.cad, p->pin_nid, HDA_VERB_SET_EAPD, 0x02u);
+        hda_apply_dac_amp(p, s_hda.volume);
+        hda_apply_pin_amp(p, s_hda.volume);
+    } else {
+        hda_verb4(s_hda.cad, p->pin_nid, HDA_VERB_SET_AMP_GAIN, 0xB080u);
+        hda_verb12(s_hda.cad, p->pin_nid, HDA_VERB_SET_PIN_CTL, 0x00u);
+        if (p->eapd_cap)
+            hda_verb12(s_hda.cad, p->pin_nid, HDA_VERB_SET_EAPD, 0x00u);
+    }
+}
+
+static void hda_update_jack_routing(bool force) {
+    if (s_hda.out_pin_count == 0u) return;
+
+    bool has_speaker = false;
+    bool any_jack_plugged = false;
+    for (uint8_t i = 0; i < s_hda.out_pin_count; i++) {
+        hda_out_pin_t *p = &s_hda.out_pins[i];
+        if (p->def_dev == 1u) has_speaker = true;
+        if (p->pres_det_cap || p->def_dev == 2u) {
+            uint32_t ps = hda_verb12(s_hda.cad, p->pin_nid, HDA_VERB_GET_PIN_SENSE, 0u);
+            if (ps != 0xFFFFFFFFu) {
+                p->plugged = ((ps & (1u << 31)) != 0u);
+            }
+        }
+        if ((p->def_dev == 2u || (has_speaker && p->def_dev == 0u && p->port_conn == 0u)) &&
+            p->plugged) {
+            any_jack_plugged = true;
+        }
+    }
+    /* Re-check in case Speaker appeared after a LineOut jack in out_pins */
+    if (!any_jack_plugged && has_speaker) {
+        for (uint8_t i = 0; i < s_hda.out_pin_count; i++) {
+            hda_out_pin_t *p = &s_hda.out_pins[i];
+            if ((p->def_dev == 2u || (p->def_dev == 0u && p->port_conn == 0u)) && p->plugged) {
+                any_jack_plugged = true;
+                break;
+            }
+        }
+    }
+
+    bool changed = false;
+    for (uint8_t i = 0; i < s_hda.out_pin_count; i++) {
+        hda_out_pin_t *p = &s_hda.out_pins[i];
+        bool want_active;
+        if (any_jack_plugged) {
+            want_active = (p->def_dev == 2u) || (p->def_dev == 0u && p->plugged);
+        } else if (has_speaker) {
+            want_active = (p->def_dev == 1u) || (p->def_dev == 0u && p->port_conn != 0u);
+        } else {
+            want_active = true;
+        }
+
+        if (force || want_active != p->active) {
+            hda_configure_pin_output(p, want_active);
+            if (want_active) {
+                s_hda.pin_nid = p->pin_nid;
+                s_hda.dac_nid = p->dac_nid;
+            }
+            changed = true;
+        }
+    }
+
+    if (force || any_jack_plugged != s_hda.hp_plugged || changed) {
+        bool prev = s_hda.hp_plugged;
+        s_hda.hp_plugged = any_jack_plugged;
+        if (force || prev != any_jack_plugged) {
+            serial_printf("[hda] jack route: hp_plugged=%d pins=%u active_pin=%u\n",
+                          s_hda.hp_plugged ? 1 : 0, (unsigned)s_hda.out_pin_count,
+                          (unsigned)s_hda.pin_nid);
+        }
+    }
+}
+
+static void hda_enable_pin_and_dac_entry(uint8_t cad, uint8_t w_start, uint8_t w_count,
+                                         hda_out_pin_t *entry) {
+    uint8_t pin = entry->pin_nid;
+    uint8_t dac = entry->dac_nid;
+
     /* Power up DAC and Pin to D0 */
     hda_verb12(cad, dac, HDA_VERB_SET_POWER, 0x00u);
     hda_verb12(cad, pin, HDA_VERB_SET_POWER, 0x00u);
 
-    uint32_t pin_wcaps = hda_get_param(cad, pin, HDA_PARAM_WCAPS);
-    uint32_t pin_caps  = hda_get_param(cad, pin, HDA_PARAM_PIN_CAPS);
-
-    uint8_t pctl = 0x40u; /* OUT_EN */
-    if (pin_caps & (1u << 3)) pctl |= 0x80u; /* HP_EN if supported */
-    hda_verb12(cad, pin, HDA_VERB_SET_PIN_CTL, pctl);
-
-    if (pin_caps & (1u << 16)) /* EAPD capable */
-        hda_verb12(cad, pin, HDA_VERB_SET_EAPD, 0x02u);
+    entry->pin_wcaps = hda_get_param(cad, pin, HDA_PARAM_WCAPS);
+    entry->pin_caps  = hda_get_param(cad, pin, HDA_PARAM_PIN_CAPS);
+    entry->pres_det_cap = (entry->pin_caps & (1u << 2)) != 0u;
+    entry->hp_cap       = (entry->pin_caps & (1u << 3)) != 0u;
+    entry->eapd_cap     = (entry->pin_caps & (1u << 16)) != 0u;
 
     /* Unmute any intermediate mixer/selector on the pin's connection list */
     uint32_t clen_raw = hda_get_param(cad, pin, HDA_PARAM_CONN_LEN);
@@ -416,13 +543,13 @@ static void hda_enable_pin_and_dac(uint8_t cad, uint8_t w_start, uint8_t w_count
     uint32_t dac_wcaps = hda_get_param(cad, dac, HDA_PARAM_WCAPS);
     if (dac_wcaps & (1u << 2)) { /* Out Amp Present */
         uint32_t acap = hda_get_param(cad, dac, HDA_PARAM_OUT_AMP_CAPS);
-        s_hda.dac_has_amp = true;
-        s_hda.dac_amp_steps = (uint8_t)((acap >> 8) & 0x7Fu);
+        entry->dac_has_amp = true;
+        entry->dac_amp_steps = (uint8_t)((acap >> 8) & 0x7Fu);
     }
-    if (pin_wcaps & (1u << 2)) {
+    if (entry->pin_wcaps & (1u << 2)) {
         uint32_t acap = hda_get_param(cad, pin, HDA_PARAM_OUT_AMP_CAPS);
-        s_hda.pin_has_amp = true;
-        s_hda.pin_amp_steps = (uint8_t)((acap >> 8) & 0x7Fu);
+        entry->pin_has_amp = true;
+        entry->pin_amp_steps = (uint8_t)((acap >> 8) & 0x7Fu);
     }
 
     hda_verb12(cad, dac, HDA_VERB_SET_CHAN_STREAM, (uint8_t)(HDA_STREAM_ID << 4));
@@ -474,9 +601,9 @@ static int hda_probe_codec(uint8_t cad) {
     uint8_t w_count = (uint8_t)(wsub & 0xFFu);
 
     uint8_t first_dac = 0;
-    uint8_t best_pin = 0;
-    uint8_t best_dac = 0;
-    int     best_prio = -1;
+    hda_out_pin_t cand[HDA_MAX_OUT_PINS];
+    uint8_t cand_cnt = 0;
+    memset(cand, 0, sizeof(cand));
 
     for (uint8_t i = 0; i < w_count; i++) {
         uint8_t nid = (uint8_t)(w_start + i);
@@ -493,31 +620,44 @@ static int hda_probe_codec(uint8_t cad) {
         uint8_t port_conn = (uint8_t)((cfg >> 30) & 0x03u);
         uint8_t def_dev   = (uint8_t)((cfg >> 20) & 0x0Fu);
         if (port_conn == 1u) continue; /* No physical connection */
-
-        int prio = 0;
-        if (def_dev == 0u) prio = 3;      /* Line Out */
-        else if (def_dev == 1u) prio = 2; /* Speaker */
-        else if (def_dev == 2u) prio = 1; /* Headphone */
-        else continue;
+        if (def_dev != 0u && def_dev != 1u && def_dev != 2u) continue;
 
         uint8_t traced = hda_trace_dac(cad, nid, w_start, w_count, 0);
-        if (prio > best_prio) {
-            best_prio = prio;
-            best_pin = nid;
-            best_dac = traced;
+        if (cand_cnt < HDA_MAX_OUT_PINS) {
+            cand[cand_cnt].pin_nid   = nid;
+            cand[cand_cnt].dac_nid   = traced;
+            cand[cand_cnt].def_dev   = def_dev;
+            cand[cand_cnt].port_conn = port_conn;
+            cand_cnt++;
         }
     }
 
-    if (!best_pin || (!best_dac && !first_dac)) return -3;
-    if (!best_dac) best_dac = first_dac;
+    if (cand_cnt == 0u || !first_dac) {
+        bool has_any_dac = false;
+        for (uint8_t i = 0; i < cand_cnt; i++) {
+            if (cand[i].dac_nid) { has_any_dac = true; break; }
+        }
+        if (cand_cnt == 0u || !has_any_dac) return -3;
+    }
 
     s_hda.cad = cad;
     s_hda.codec_vendor = vid;
     s_hda.afg_nid = afg;
-    s_hda.dac_nid = best_dac;
-    s_hda.pin_nid = best_pin;
+    s_hda.out_pin_count = 0;
 
-    hda_enable_pin_and_dac(cad, w_start, w_count, best_pin, best_dac);
+    for (uint8_t i = 0; i < cand_cnt; i++) {
+        if (!cand[i].dac_nid) cand[i].dac_nid = first_dac;
+        if (!cand[i].dac_nid) continue;
+        s_hda.out_pins[s_hda.out_pin_count] = cand[i];
+        hda_enable_pin_and_dac_entry(cad, w_start, w_count,
+                                     &s_hda.out_pins[s_hda.out_pin_count]);
+        s_hda.out_pin_count++;
+    }
+    if (s_hda.out_pin_count == 0u) return -3;
+
+    s_hda.dac_nid = s_hda.out_pins[0].dac_nid;
+    s_hda.pin_nid = s_hda.out_pins[0].pin_nid;
+    hda_update_jack_routing(true);
     return 0;
 }
 
@@ -539,7 +679,10 @@ static void hda_reset_stream(void) {
 static void hda_fill_ring_page(uint32_t page_idx) {
     uint8_t *dst = s_hda.ring_va[page_idx];
     uint32_t copied = 0;
-    if (s_hda.src && s_hda.src_pos < s_hda.src_len) {
+    if (s_hda.stream_mode && s_hda.pull_fn) {
+        copied = s_hda.pull_fn(dst, HDA_PAGE_BYTES, s_hda.pull_ctx);
+        if (copied > HDA_PAGE_BYTES) copied = HDA_PAGE_BYTES;
+    } else if (s_hda.src && s_hda.src_pos < s_hda.src_len) {
         uint32_t rem = s_hda.src_len - s_hda.src_pos;
         copied = (rem > HDA_PAGE_BYTES) ? HDA_PAGE_BYTES : rem;
         memcpy(dst, s_hda.src + s_hda.src_pos, copied);
@@ -547,6 +690,17 @@ static void hda_fill_ring_page(uint32_t page_idx) {
     }
     if (copied < HDA_PAGE_BYTES) {
         memset(dst + copied, 0, HDA_PAGE_BYTES - copied);
+    }
+}
+
+static void hda_set_all_dac_fmt(uint16_t fmt) {
+    for (uint8_t i = 0; i < s_hda.out_pin_count; i++) {
+        uint8_t dac = s_hda.out_pins[i].dac_nid;
+        bool seen = false;
+        for (uint8_t j = 0; j < i; j++) {
+            if (s_hda.out_pins[j].dac_nid == dac) { seen = true; break; }
+        }
+        if (!seen) hda_verb4(s_hda.cad, dac, HDA_VERB_SET_CONV_FMT, fmt);
     }
 }
 
@@ -636,17 +790,27 @@ int hda_init(void) {
     }
 
     s_hda.present = true;
+    s_hda.last_jack_poll_ms = clock_ms();
     hda_set_volume(s_hda.volume);
 
-    serial_printf("[hda] pci=%04X:%04X mmio=0x%llX codec=%08X afg=%u dac=%u pin=%u oss=%u\n",
+    serial_printf("[hda] pci=%04X:%04X mmio=0x%llX codec=%08X afg=%u dac=%u pin=%u pins=%u oss=%u\n",
                   s_hda.vendor, s_hda.device, (unsigned long long)s_hda.mmio_base,
-                  s_hda.codec_vendor, s_hda.afg_nid, s_hda.dac_nid, s_hda.pin_nid, s_hda.oss);
+                  s_hda.codec_vendor, s_hda.afg_nid, s_hda.dac_nid, s_hda.pin_nid,
+                  (unsigned)s_hda.out_pin_count, s_hda.oss);
     return 0;
 }
 
 bool     hda_present(void) { return s_hda.present; }
 uint32_t hda_rate(void)    { return s_hda.rate; }
 bool     hda_playing(void) { return s_hda.playing; }
+int      hda_out_pin_count(void)     { return (int)s_hda.out_pin_count; }
+bool     hda_headphone_plugged(void) { return s_hda.hp_plugged; }
+
+void hda_poll_jacks(void) {
+    if (!s_hda.present) return;
+    s_hda.last_jack_poll_ms = clock_ms();
+    hda_update_jack_routing(false);
+}
 
 void hda_set_volume(int percent) {
     if (percent < 0) percent = 0;
@@ -654,26 +818,9 @@ void hda_set_volume(int percent) {
     s_hda.volume = percent;
     if (!s_hda.present) return;
 
-    if (percent == 0) {
-        hda_verb4(s_hda.cad, s_hda.dac_nid, HDA_VERB_SET_AMP_GAIN, 0xB080u);
-        hda_verb4(s_hda.cad, s_hda.pin_nid, HDA_VERB_SET_AMP_GAIN, 0xB080u);
-        return;
-    }
-
-    if (s_hda.dac_has_amp) {
-        uint8_t max_g = s_hda.dac_amp_steps ? s_hda.dac_amp_steps : 0x3Fu;
-        uint8_t g = (uint8_t)(((uint32_t)percent * max_g) / 100u);
-        hda_unmute_amp(s_hda.cad, s_hda.dac_nid, true, false, 0, g);
-    } else {
-        hda_unmute_amp(s_hda.cad, s_hda.dac_nid, true, false, 0, 0x3Fu);
-    }
-
-    if (s_hda.pin_has_amp) {
-        uint8_t max_g = s_hda.pin_amp_steps ? s_hda.pin_amp_steps : 0x3Fu;
-        uint8_t g = (uint8_t)(((uint32_t)percent * max_g) / 100u);
-        hda_unmute_amp(s_hda.cad, s_hda.pin_nid, true, false, 0, g);
-    } else {
-        hda_unmute_amp(s_hda.cad, s_hda.pin_nid, true, false, 0, 0x3Fu);
+    for (uint8_t i = 0; i < s_hda.out_pin_count; i++) {
+        hda_apply_dac_amp(&s_hda.out_pins[i], percent);
+        hda_apply_pin_amp(&s_hda.out_pins[i], percent);
     }
 }
 
@@ -681,27 +828,21 @@ void hda_stop(void) {
     if (!s_hda.present) return;
     hda_reset_stream();
     s_hda.playing = false;
+    s_hda.stream_mode = false;
+    s_hda.pull_fn = 0;
+    s_hda.pull_ctx = 0;
     s_hda.src = 0;
     s_hda.src_len = 0;
     s_hda.src_pos = 0;
 }
 
-int hda_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sample_rate) {
-    if (!s_hda.present || !pcm_s16_stereo || bytes == 0) return -1;
-    if (sample_rate == 0) sample_rate = 48000u;
-
-    hda_stop();
-
-    s_hda.src = (const uint8_t *)pcm_s16_stereo;
-    s_hda.src_len = bytes;
-    s_hda.src_pos = 0;
+static int hda_start_ring(uint32_t sample_rate) {
     s_hda.rate = sample_rate;
     s_hda.played_bytes = 0;
     s_hda.last_lpib = 0;
-    s_hda.total_target_bytes = (uint64_t)bytes + HDA_PAGE_BYTES;
 
     uint16_t fmt = hda_encode_fmt(sample_rate);
-    hda_verb4(s_hda.cad, s_hda.dac_nid, HDA_VERB_SET_CONV_FMT, fmt);
+    hda_set_all_dac_fmt(fmt);
 
     for (uint32_t i = 0; i < HDA_RING_PAGES; i++) {
         hda_fill_ring_page(i);
@@ -725,14 +866,52 @@ int hda_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sample_rat
     uint32_t ctl = ((uint32_t)HDA_STREAM_ID << 20) | HDA_SD_CTL_RUN | HDA_SD_CTL_IOCE;
     hda_w32(sd + HDA_SD_CTL, ctl);
     s_hda.playing = true;
+    return (int)fmt;
+}
 
+int hda_play_pcm(const void *pcm_s16_stereo, uint32_t bytes, uint32_t sample_rate) {
+    if (!s_hda.present || !pcm_s16_stereo || bytes == 0) return -1;
+    if (sample_rate == 0) sample_rate = 48000u;
+
+    hda_stop();
+
+    s_hda.stream_mode = false;
+    s_hda.src = (const uint8_t *)pcm_s16_stereo;
+    s_hda.src_len = bytes;
+    s_hda.src_pos = 0;
+    s_hda.total_target_bytes = (uint64_t)bytes + HDA_PAGE_BYTES;
+
+    uint16_t fmt = (uint16_t)hda_start_ring(sample_rate);
     serial_printf("[hda] stream start rate=%u bytes=%u fmt=0x%04X\n",
                   sample_rate, bytes, fmt);
     return 0;
 }
 
+int hda_stream_start(uint32_t sample_rate, hda_stream_pull_fn pull, void *ctx) {
+    if (!s_hda.present || !pull) return -1;
+    if (sample_rate == 0) sample_rate = 48000u;
+
+    hda_stop();
+    s_hda.stream_mode = true;
+    s_hda.pull_fn = pull;
+    s_hda.pull_ctx = ctx;
+    s_hda.total_target_bytes = 0;
+
+    uint16_t fmt = (uint16_t)hda_start_ring(sample_rate);
+    serial_printf("[hda] live stream start rate=%u fmt=0x%04X\n", sample_rate, fmt);
+    return 0;
+}
+
 void hda_poll(void) {
-    if (!s_hda.present || !s_hda.playing) return;
+    if (!s_hda.present) return;
+
+    uint64_t now = clock_ms();
+    if (now - s_hda.last_jack_poll_ms >= 250ull) {
+        s_hda.last_jack_poll_ms = now;
+        hda_update_jack_routing(false);
+    }
+
+    if (!s_hda.playing) return;
 
     uint32_t sd = s_hda.osd_off;
     uint8_t sts = hda_r8(sd + HDA_SD_STS);
@@ -754,7 +933,8 @@ void hda_poll(void) {
         s_hda.fill_page = (s_hda.fill_page + 1u) % HDA_RING_PAGES;
     }
 
-    if (s_hda.src_pos >= s_hda.src_len &&
+    if (!s_hda.stream_mode &&
+        s_hda.src_pos >= s_hda.src_len &&
         s_hda.played_bytes >= s_hda.total_target_bytes) {
         hda_stop();
     }

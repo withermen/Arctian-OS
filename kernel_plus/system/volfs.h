@@ -3,8 +3,9 @@
 
 #include "asi.h"
 
-/* AFS tabanli birim yonlendiricisi kurar (C: -> AFS, D: -> FAT32/USB).
+/* AFS tabanli birim yonlendiricisi kurar (C: -> AFS, D: -> FAT32/exFAT USB).
  * base: mevcut (AFS) asi_fs_t. Yeni bir vtable dondurur. */
 asi_fs_t *volfs_install(asi_fs_t *base);
+void      volfs_refresh(void);
 
 #endif /* ARCTIAN_VOLFS_H */

@@ -20,6 +20,7 @@
 #include "mouse.h"
 #include "serial.h"
 #include "clock.h"
+#include "i2c_hid.h"
 
 /* USB HID fare state (PS/2 donanimina bagli olmadan calisir) */
 static int usb_mouse_dx = 0;
@@ -346,22 +347,49 @@ static bool mouse_prob_elantech(void) {
 }
 
 /**
- * Synaptics'i mutlak (absolute) 6-bayt moduna alir.
- * Magic knock sonrasinda 200/100/80 hizi gonderilir ve cihaz 3 yetenek
- * bayti dondurur. Herhangi bir adim basarisiz olursa cihaz eski
- * 3/4-bayt akisina geri birakilir (cagiran taraf SET_DEFAULTS yapar).
+ * Synaptics ozel komut argumani gonderir:
+ * 4 kez Set Resolution (0xE8) ile 8 bit MSB'den LSB'ye 2'ser bit kodlanir.
  */
-static bool mouse_synaptics_absolute(void) {
-    if (mouse_set_rate(0xC8) != 0) return false;
-    if (mouse_set_rate(0x64) != 0) return false;
-    if (mouse_set_rate(0x50) != 0) return false;
-
-    /* Yetenek/model baytlari: icerigi kullanilmiyor, senkron icin okunur. */
-    uint8_t caps[3];
-    for (int i = 0; i < 3; i++) {
-        if (ps2_read_data(&caps[i]) != 0)
+static bool synaptics_send_arg(uint8_t arg) {
+    for (int shift = 6; shift >= 0; shift -= 2) {
+        if (mouse_send_cmd(MOUSE_CMD_SET_RES) != 0)
+            return false;
+        if (mouse_send_cmd((uint8_t)((arg >> shift) & 0x03u)) != 0)
             return false;
     }
+    return true;
+}
+
+/**
+ * Synaptics'i mutlak (absolute) 6-bayt moduna alir.
+ * Gercek Synaptics PS/2 protokolu:
+ *   1) Query capabilities (0x02) -> Set Resolution (0xE8) x4 + Status Request (0xE9)
+ *   2) Set Mode (0x81 = Absolute + W-mode, destek yoksa 0x80) -> Set Resolution (0xE8) x4
+ *   3) Set Sample Rate 20 (0xF3 0x14) ile modu uygula.
+ */
+static bool mouse_synaptics_absolute(void) {
+    uint8_t caps[3] = {0, 0, 0};
+    uint8_t mode = 0x80u;
+
+    if (synaptics_send_arg(0x02u) && mouse_send_cmd(MOUSE_CMD_STATUS_REQ) == 0) {
+        bool ok = true;
+        for (int i = 0; i < 3; i++) {
+            if (ps2_read_data(&caps[i]) != 0) {
+                ok = false;
+                break;
+            }
+        }
+        /* capExtended (byte0 bit7) veya capMultiFinger (byte2 bit1) varsa W-mode ac */
+        if (ok && ((caps[0] & 0x80u) || (caps[2] & 0x02u)))
+            mode = 0x81u;
+    }
+
+    if (!synaptics_send_arg(mode))
+        return false;
+    if (mouse_set_rate(20) != 0)
+        return false;
+
+    ps2_flush_buffer();
     return true;
 }
 
@@ -496,30 +524,96 @@ static void mouse_process_usb(void) {
 /* ================================================================== */
 
 /**
- * Gelismis 6-bayt paketi cozer (Synaptics mutlak modu).
+ * Gercek Synaptics 6-bayt mutlak (absolute + W-mode) paketi cozer:
+ *   p[0] : bit7=1, bit6=0, bit5..4=W[3:2], bit3=0, bit2=W[1], bit1=R, bit0=L
+ *   p[1] : bit7..4=Y[11:8], bit3..0=X[11:8]
+ *   p[2] : Z basinc (0..255)
+ *   p[3] : bit7..6=11, bit5=Y[12], bit4=X[12], bit2=W[0]
+ *   p[4] : X[7:0]
+ *   p[5] : Y[7:0]
  *
- *   p[0] : durum bayti (3-bayt ile ayni: butonlar + tasma bitleri)
- *   p[1] : x alt 8 bit
- *   p[2] : y alt 8 bit
- *   p[3] : bit 0-1 = x ust 2 bit, bit 2-3 = y ust 2 bit
- *   p[4] : Z basinc (0..255)
- *   p[5] : tekerlek/kaydirma (isaretli 8 bit)
- *
- * x/y 10-bit isaretli degerdir. 3-bayt yoluna dokunulmaz: bu islev
- * yalnizca mouse_packet_size == PACKET_6BYTE iken cagrilir.
+ * 13-bit mutlak X/Y koordinatlarini yumusak goreceli delta'ya cevirir;
+ * W=0/1 (2+ parmak) algilandiginda dikey iki-parmak kaydirma uretir.
  */
 static void mouse_decode_packet6(void) {
-    uint8_t status_byte = mouse_packet[0];
-    int dx, dy;
+    static bool syn_touching = false;
+    static bool syn_two_finger = false;
+    static int  syn_prev_x = 0;
+    static int  syn_prev_y = 0;
+    static int  syn_prev_scroll_y = 0;
+    static int  syn_acc_dx = 0;
+    static int  syn_acc_dy = 0;
+    static int  syn_acc_scroll = 0;
 
-    dx = (int)mouse_packet[1] | ((int)(mouse_packet[3] & 0x03) << 8);
-    dy = (int)mouse_packet[2] | ((int)(mouse_packet[3] & 0x0C) << 6);
-    if (dx & 0x200) dx -= 0x400;    /* 10-bit isaret uzatma */
-    if (dy & 0x200) dy -= 0x400;
+    const uint8_t *p = mouse_packet;
+    int x = (int)p[4] | ((int)(p[1] & 0x0Fu) << 8) | ((int)(p[3] & 0x10u) << 8);
+    int y = (int)p[5] | ((int)(p[1] & 0xF0u) << 4) | ((int)(p[3] & 0x20u) << 7);
+    int z = (int)p[2];
+    int w = ((p[0] & 0x30u) >> 2) | ((p[0] & 0x04u) >> 1) | ((p[3] & 0x04u) >> 2);
 
-    /* Tasma bitleri ust bitlerden daha guvenilir */
-    if (status_byte & 0x40) dx = (dx > 0) ? 511 : -512;
-    if (status_byte & 0x80) dy = (dy > 0) ? 511 : -512;
+    mouse_state.buttons[MOUSE_BUTTON_LEFT]   = (p[0] & 0x01u) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_RIGHT]  = (p[0] & 0x02u) != 0;
+    mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = false;
+    mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
+    mouse_track_pressure(z);
+
+    if (z < 10) {
+        syn_touching = false;
+        syn_two_finger = false;
+        syn_acc_dx = 0;
+        syn_acc_dy = 0;
+        syn_acc_scroll = 0;
+        mouse_state.dx = 0;
+        mouse_state.dy = 0;
+        return;
+    }
+
+    bool two_f = (z >= 15) && (w == 0 || w == 1);
+    if (!syn_touching || two_f != syn_two_finger) {
+        syn_touching = true;
+        syn_two_finger = two_f;
+        syn_prev_x = x;
+        syn_prev_y = y;
+        syn_prev_scroll_y = y;
+        syn_acc_dx = 0;
+        syn_acc_dy = 0;
+        syn_acc_scroll = 0;
+        mouse_state.dx = 0;
+        mouse_state.dy = 0;
+        return;
+    }
+
+    if (two_f) {
+        int dy_raw = y - syn_prev_scroll_y;
+        syn_prev_scroll_y = y;
+        if (dy_raw > -1500 && dy_raw < 1500) {
+            syn_acc_scroll += dy_raw;
+            int steps = syn_acc_scroll / 120;
+            syn_acc_scroll -= steps * 120;
+            if (steps != 0) {
+                s_scroll_delta += steps;
+                mouse_state.scroll += steps;
+            }
+        }
+        mouse_state.dx = 0;
+        mouse_state.dy = 0;
+        return;
+    }
+
+    int rx = x - syn_prev_x;
+    int ry = y - syn_prev_y;
+    syn_prev_x = x;
+    syn_prev_y = y;
+
+    if (rx < -1500 || rx > 1500) rx = 0;
+    if (ry < -1500 || ry > 1500) ry = 0;
+
+    syn_acc_dx += rx;
+    syn_acc_dy += ry;
+    int dx = syn_acc_dx / 4;
+    int dy = syn_acc_dy / 4;
+    syn_acc_dx -= dx * 4;
+    syn_acc_dy -= dy * 4;
 
     mouse_state.dx = dx;
     mouse_state.dy = dy;
@@ -533,20 +627,6 @@ static void mouse_decode_packet6(void) {
     if (mouse_state.y < 0) mouse_state.y = 0;
     if (mouse_state.y >= mouse_screen_height)
         mouse_state.y = mouse_screen_height - 1;
-
-    mouse_state.buttons[MOUSE_BUTTON_LEFT]   = (status_byte & 0x01) != 0;
-    mouse_state.buttons[MOUSE_BUTTON_RIGHT]  = (status_byte & 0x02) != 0;
-    mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (status_byte & 0x04) != 0;
-    mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
-
-    /* Z basinc: tap algilama. Tekerlek bayti kaydirma uretir. */
-    mouse_track_pressure((int)mouse_packet[4]);
-
-    int wheel = (int)(int8_t)mouse_packet[5];
-    if (wheel != 0) {
-        s_scroll_delta += wheel;
-        mouse_state.scroll += wheel;
-    }
 }
 
 /**
@@ -620,15 +700,16 @@ void mouse_irq_handler(void) {
 /* PS/2 baytini paket durum makinesine verir. Hem IRQ12 hem de yoklama
  * (mouse_poll) yolu ayni makineyi kullanir. */
 void mouse_feed_byte(uint8_t data) {
+    bool syn6 = (mouse_device == MOUSE_DEV_SYNAPTICS && mouse_packet_size == PACKET_6BYTE);
+
     switch (mouse_packet_cycle) {
         case 0:
-            /*
-             * Byte 0: status byte.
-             * Bit 3 should always be 1 (start-of-packet marker).
-             * If not, we've lost sync - discard and resync.
-             */
-            if (!(data & 0x08)) {
-                return;  /* out of sync, wait for next start byte */
+            if (syn6) {
+                /* Synaptics absolute byte 0: bit7=1, bit6=0, bit3=0 */
+                if ((data & 0xC8u) != 0x80u) return;
+            } else {
+                /* Standart PS/2 byte 0: bit3=1 */
+                if (!(data & 0x08u)) return;
             }
             mouse_packet[0] = data;
             mouse_packet_cycle = 1;
@@ -650,9 +731,21 @@ void mouse_feed_byte(uint8_t data) {
             }
             break;
 
-        case 3:     /* 4. bayt (tekerlek) veya 6-baytlik paketin 4. bayti */
-        case 4:     /* 5. bayt: Z basinc (6-bayt) */
-        case 5:     /* 6. bayt: kaydirma (6-bayt) */
+        case 3:     /* 4. bayt (tekerlek) veya Synaptics 6-baytlik paketin 4. bayti */
+            if (syn6 && (data & 0xC0u) != 0xC0u) {
+                mouse_packet_cycle = 0;
+                return;
+            }
+            mouse_packet[3] = data;
+            mouse_packet_cycle++;
+            if (mouse_packet_cycle >= mouse_packet_size) {
+                mouse_packet_cycle = 0;
+                mouse_decode_packet();
+            }
+            break;
+
+        case 4:
+        case 5:
             mouse_packet[mouse_packet_cycle] = data;
             mouse_packet_cycle++;
             if (mouse_packet_cycle >= mouse_packet_size) {
@@ -662,18 +755,35 @@ void mouse_feed_byte(uint8_t data) {
             break;
 
         default:
-            /* Should never happen - reset state machine */
             mouse_packet_cycle = 0;
             break;
     }
 }
 
-/* Yumusak yoklama: bazi ortamlarda (or. QEMU + bazi IRQ yonlendirmeleri,
- * ya da bozuk ACPI tablolu gercek donanim) IRQ12 hic gelmiyor ve fare donuyor.
- * Masaustu her karede imleci okurken burayi cagirir; 8042 cikis tamponundaki
- * AUX baytlari ayni durum makinesine beslenir. IRQ yoluyla cakismaz: bayt
- * yalnizca bir kez tuketilir. */
 void mouse_poll(void) {
+    if (i2c_hid_present()) {
+        int dx = 0, dy = 0, scroll = 0;
+        uint8_t btns = 0;
+        if (i2c_hid_poll_event(&dx, &dy, &btns, &scroll)) {
+            mouse_state.dx = dx;
+            mouse_state.dy = dy;
+            mouse_state.x += dx;
+            mouse_state.y -= dy;
+            if (mouse_state.x < 0) mouse_state.x = 0;
+            if (mouse_state.x >= mouse_screen_width) mouse_state.x = mouse_screen_width - 1;
+            if (mouse_state.y < 0) mouse_state.y = 0;
+            if (mouse_state.y >= mouse_screen_height) mouse_state.y = mouse_screen_height - 1;
+            mouse_state.buttons[MOUSE_BUTTON_LEFT] = (btns & 0x01u) != 0;
+            mouse_state.buttons[MOUSE_BUTTON_RIGHT] = (btns & 0x02u) != 0;
+            mouse_state.buttons[MOUSE_BUTTON_MIDDLE] = (btns & 0x04u) != 0;
+            mouse_track_left(mouse_state.buttons[MOUSE_BUTTON_LEFT]);
+            if (scroll != 0) {
+                s_scroll_delta += scroll;
+                mouse_state.scroll += scroll;
+            }
+        }
+    }
+
     if (!mouse_state.present) return;
     int guard = 64;
     while (guard-- > 0) {
@@ -740,6 +850,10 @@ void mouse_init(void) {
     uint8_t config;
     if (ps2_read_data(&config) != 0) {
         kernel_warning("PS/2 mouse: config okunamadi!");
+        if (i2c_hid_init()) {
+            mouse_state.present = true;
+            mouse_state.scroll_wheel = true;
+        }
         return;
     }
 
@@ -771,6 +885,10 @@ void mouse_init(void) {
      */
     if (ret != 0) {
         kernel_warning("PS/2 mouse: reset basarisiz!");
+        if (i2c_hid_init()) {
+            mouse_state.present = true;
+            mouse_state.scroll_wheel = true;
+        }
         return;
     }
 
@@ -846,6 +964,14 @@ void mouse_init(void) {
 
     mouse_state.present = true;
     kernel_debug("PS/2 mouse basariyla baslatildi (IRQ12)");
+
+    if (i2c_hid_init()) {
+        mouse_state.scroll_wheel = true;
+    }
+}
+
+bool mouse_i2c_hid_present(void) {
+    return i2c_hid_present();
 }
 
 /* ================================================================== */

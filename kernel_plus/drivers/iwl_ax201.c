@@ -24,14 +24,27 @@
 #include "kernel.h"
 #include "pci.h"
 #include "wifi.h"
+#include "net.h"
 #include "asi.h"
 #include "afs.h"
 #include "alloc.h"
 #include "clock.h"
+#include "mbedtls/ccm.h"
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+
+extern void wpa2_derive_pmk(const char *passphrase, const uint8_t *ssid,
+                            uint32_t ssid_len, uint8_t pmk[32]);
+extern void wpa2_derive_ptk(const uint8_t pmk[32], const uint8_t aa[6],
+                            const uint8_t spa[6], const uint8_t anonce[32],
+                            const uint8_t snonce[32], uint8_t ptk[64]);
+extern void wpa2_mic(const uint8_t kck[16], const uint8_t *eapol,
+                     uint32_t eapol_len, uint8_t mic[16]);
+extern int  wpa2_unwrap_gtk(const uint8_t kek[16], const uint8_t *wrapped,
+                            uint32_t wrapped_len, uint8_t *gtk,
+                            uint32_t *gtk_len);
 
 extern const uint8_t iwl_fw_blob[];
 extern const uint8_t iwl_fw_blob_end[];
@@ -129,17 +142,35 @@ extern const uint8_t iwl_fw_blob_end[];
 /* Gen2/gen3 host komut basligi 8 bayt: cmd, grup, sira, uzunluk,
  * yedek, surum. Linux her komutu bu baslikla gonderiyor. */
 #define IWL_CMD_HDR_WIDE                 8
-#define IWL_HOST_CMD_MAX                 480
+#define IWL_HOST_CMD_MAX                 1800
 
 #define CMD_ALIVE                        0x01
 #define CMD_INIT_COMPLETE                0x04
 #define CMD_INIT_EXTENDED_CFG            0x03
 #define CMD_NVM_ACCESS_COMPLETE          0x00
+#define CMD_PHY_CONTEXT_CMD              0x08
+#define CMD_SCAN_CFG_CMD                 0x0C
+#define CMD_SCAN_REQ_UMAC                0x0D
+#define CMD_SCAN_ABORT_UMAC              0x0E
+#define CMD_SCAN_COMPLETE_UMAC           0x0F
+#define CMD_ADD_STA                      0x18
+#define CMD_TX_CMD                       0x1C
+#define CMD_MAC_CONTEXT_CMD              0x28
+#define CMD_BINDING_CONTEXT_CMD          0x2B
+#define CMD_REPLY_RX_MPDU                0xC1
 #define GRP_LEGACY                       0x00
 #define GRP_SYSTEM                       0x02
 #define GRP_REG_NVM                      0x0c
 #define IWL_INIT_NVM_BIT                 (1u << 1)
 #define IWL_ALIVE_OK                     0xCAFE
+
+#define IWL_FW_CTXT_ACTION_ADD           1u
+#define IWL_FW_CTXT_ACTION_MODIFY        2u
+#define IWL_FW_CTXT_ACTION_REMOVE        3u
+#define IWL_FW_MAC_TYPE_BSS_STA          5u
+#define IWL_STA_ID_AP                    0u
+#define IWL_UMAC_SCAN_MAX_CHAN           22
+#define IWL_BSS_MAX                      16
 
 #define FH_FRAME_SIZE_MSK                0x00003FFFu
 #define FH_FRAME_ALIGN                   64u
@@ -282,8 +313,148 @@ struct rx_view {
     uint8_t  group;
     uint16_t seq;
     uint16_t len;
-    uint8_t  data[256];
+    uint8_t  data[1600];
 };
+
+/* ---- Intel UMAC / MVM Komut Yapilari (fw-api) ---- */
+typedef struct __attribute__((packed)) {
+    uint8_t  band;
+    uint8_t  channel;
+    uint8_t  width;
+    uint8_t  ctrl_pos;
+} iwl_fw_channel_info_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t              id_and_color;
+    uint32_t              action;
+    uint32_t              apply_time;
+    uint32_t              tx_param_color;
+    iwl_fw_channel_info_t channel_info;
+    uint32_t              txchain_info;
+    uint32_t              rxchain_info;
+    uint32_t              acquisition_data;
+    uint32_t              dsp_cfg_flags;
+} iwl_phy_ctxt_cmd_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t cw_min;
+    uint32_t cw_max;
+    uint32_t aifsn;
+    uint32_t fifos_mask;
+    uint32_t edca_txop;
+} iwl_ac_qos_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t     id_and_color;
+    uint32_t     action;
+    uint32_t     mac_type;
+    uint32_t     tsf_id;
+    uint8_t      node_addr[6];
+    uint16_t     reserved_for_node_addr;
+    uint8_t      bssid_addr[6];
+    uint16_t     reserved_for_bssid_addr;
+    uint32_t     cck_rates;
+    uint32_t     ofdm_rates;
+    uint32_t     protection_flags;
+    uint32_t     cck_short_preamble;
+    uint32_t     short_slot;
+    uint32_t     filter_flags;
+    uint32_t     qos_flags;
+    iwl_ac_qos_t ac[4];
+    uint32_t     is_assoc;
+    uint32_t     dtim_interval;
+    uint32_t     assoc_id;
+    uint32_t     bi;
+} iwl_mac_ctxt_cmd_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t id_and_color;
+    uint32_t action;
+    uint32_t macs[4];
+    uint32_t phy;
+    uint32_t lmac_id;
+} iwl_binding_cmd_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  add_modify;
+    uint8_t  awake_acs;
+    uint16_t tid_disable_tx;
+    uint32_t mac_id_n_color;
+    uint8_t  addr[6];
+    uint16_t reserved2;
+    uint8_t  sta_id;
+    uint8_t  modify_mask;
+    uint16_t reserved3;
+    uint32_t station_flags;
+    uint32_t station_flags_msk;
+    uint8_t  add_immediate_ba_tid;
+    uint8_t  remove_immediate_ba_tid;
+    uint16_t add_immediate_ba_ssn;
+    uint16_t sleep_tx_count;
+    uint8_t  sleep_state_flags;
+    uint8_t  station_type;
+    uint16_t assoc_id;
+    uint16_t beamform_flags;
+    uint32_t tfd_queue_msk;
+} iwl_add_sta_cmd_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  channel_num;
+    uint8_t  iter_count;
+    uint16_t iter_interval;
+    uint32_t flags;
+} iwl_scan_chan_cfg_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t            flags;
+    uint32_t            uid;
+    uint32_t            ooc_priority;
+    uint16_t            general_flags;
+    uint8_t             scan_start_mac_id;
+    uint8_t             n_channels;
+    uint32_t            active_dwell;
+    uint32_t            passive_dwell;
+    uint32_t            fragmented_dwell;
+    uint32_t            extended_dwell;
+    uint32_t            max_out_time;
+    uint32_t            suspend_time;
+    uint32_t            scan_priority;
+    uint32_t            channel_flags;
+    iwl_scan_chan_cfg_t channels[IWL_UMAC_SCAN_MAX_CHAN];
+} iwl_scan_req_umac_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t len;
+    uint16_t next_frame_len;
+    uint32_t tx_flags;
+    uint32_t rate_n_flags;
+    uint8_t  sta_id;
+    uint8_t  sec_ctl;
+    uint8_t  initial_rate_index;
+    uint8_t  reserved2;
+    uint8_t  key[16];
+    uint16_t next_frame_flags;
+    uint16_t reserved3;
+    uint32_t life_time;
+    uint32_t dram_lsb_ptr;
+    uint8_t  dram_msb_ptr;
+    uint8_t  rts_retry_limit;
+    uint8_t  data_retry_limit;
+    uint8_t  tid_tspec;
+    uint16_t pm_frame_timeout;
+    uint16_t driver_txop;
+    uint8_t  scratch[4];
+} iwl_tx_cmd_t;
+
+typedef struct {
+    uint8_t bssid[6];
+    char    ssid[33];
+    int     rssi;
+    int     secure;
+    int     channel;
+    uint8_t rsn[64];
+    uint8_t rsn_len;
+} iwl_bss_info_t;
 
 static volatile uint32_t *g_mmio;
 static net_controller_t  *g_nc;
@@ -291,7 +462,26 @@ static bool               g_alive;
 static bool               g_init_done;
 static int                g_state = ASI_WIFI_OFF;
 static char               g_ssid[33];
+static char               g_pass[64];
 static uint8_t            g_my_mac[6];
+static uint8_t            g_bssid[6];
+static int                g_channel = 1;
+static uint16_t           g_seq = 0;
+static uint32_t           g_pn = 1;
+static bool               g_ptk_ready = false;
+static bool               g_have_gtk = false;
+static uint8_t            g_pmk[32], g_ptk[64], g_tk[32], g_gtk[16];
+static uint8_t            g_anonce[32], g_snonce[32];
+static iwl_bss_info_t     g_bss_list[IWL_BSS_MAX];
+static int                g_bss_count = 0;
+
+#define IWL_RX_ETH_RING 16
+static uint8_t  g_rx_eth_buf[IWL_RX_ETH_RING][1600];
+static uint16_t g_rx_eth_len[IWL_RX_ETH_RING];
+static uint8_t  g_rx_eth_head = 0, g_rx_eth_tail = 0, g_rx_eth_cnt = 0;
+static uint8_t  g_eapol_buf[1400];
+static uint16_t g_eapol_len = 0;
+static bool     g_eapol_ready = false;
 
 static const uint8_t     *g_fw;
 static uint32_t           g_fw_len;
@@ -404,11 +594,15 @@ static int fw_pick(void) {
     static const char *paths[] = {
         "C:/firmware/iwlwifi-so-a0-hr-b0-86.ucode",
         "C:/firmware/iwlwifi-so-a0-hr-b0.ucode",
+        "C:/firmware/iwlwifi-ty-a0-gf-a0.ucode",
+        "C:/firmware/iwlwifi-cc-a0.ucode",
+        "C:/firmware/iwlwifi-9260-th-b0-jf-b0.ucode",
+        "C:/firmware/iwlwifi-9000-pu-b0-jf-b0.ucode",
     };
     uint32_t cap = 1600u * 1024u;
     g_fw_owned = (uint8_t *)kmalloc(cap);
     if (g_fw_owned) {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
             uint32_t n = afs_read_path(paths[i], g_fw_owned, cap);
             if (n > 128 && n < cap) {
                 g_fw = g_fw_owned;
@@ -566,7 +760,7 @@ static int rings_init(void) {
 
     for (int i = 0; i < IWL_CMD_QSIZE; i++) {
         uint64_t p = 0;
-        g_cmd_buf[i] = dma_zalloc(512, &p);
+        g_cmd_buf[i] = dma_zalloc(2048, &p);
         if (!g_cmd_buf[i]) return -1;
     }
     /* Tamponlar tek parca ayrilir (16 MB, 4K hizali). Halkaya
@@ -832,7 +1026,7 @@ static int host_cmd(uint8_t group, uint8_t cmd, const void *payload,
     uint16_t seq = (uint16_t)idx;
     uint16_t total;
     if (!buf || plen > IWL_HOST_CMD_MAX) return -1;
-    memset(buf, 0, 512);
+    memset(buf, 0, 2048);
     /* Gen2/gen3 her komutu 8 baytlik genis baslikla gonderiyor:
      * +0 cmd, +1 grup, +2 sira, +4 uzunluk (yalnizca yuk), +7 surum.
      * Governin yuku +8'den baslar. */
@@ -971,11 +1165,400 @@ static int start_fw(void) {
     return 0;
 }
 
+static const char *iwl_dev_name(uint16_t dev) {
+    switch (dev) {
+        case 0x2526: return "Intel Wireless-AC 9260";
+        case 0x9DF0: case 0xA370: case 0x31DC: return "Intel Wireless-AC 9560";
+        case 0x2723: return "Intel Wi-Fi 6 AX200";
+        case 0x02F0: case 0x06F0: case 0xA0F0:
+        case 0x43F0: case 0x51F0: return "Intel Wi-Fi 6 AX201";
+        case 0x2725: return "Intel Wi-Fi 6E AX210";
+        case 0x51F1: case 0x54F0: case 0x7A70:
+        case 0x7E40: return "Intel Wi-Fi 6E AX211";
+        case 0x7AF0: return "Intel Wi-Fi 6E AX411";
+        default: return 0;
+    }
+}
+
+static bool iwl_dev_supported(uint16_t vendor, uint16_t dev) {
+    return (vendor == PCI_VENDOR_INTEL) && (iwl_dev_name(dev) != 0);
+}
+
+static inline uint16_t iwl_g16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+static inline void iwl_p16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(v >> 8); }
+
+/* 802.11 Beacon / Probe Response MPDU ayristiricisi (sahte ag uretmez) */
+static int iwl_parse_beacon_mpdu(const uint8_t *mpdu, uint16_t len, int rssi,
+                                 iwl_bss_info_t *out) {
+    if (!mpdu || !out || len < 36u) return 0;
+    uint16_t fc = iwl_g16(mpdu);
+    if ((fc & 0x00FCu) != 0x0080u && (fc & 0x00FCu) != 0x0050u) return 0;
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out->bssid, mpdu + 16, 6);
+    out->rssi = rssi;
+
+    uint16_t pos = 36u; /* 24B 802.11 hdr + 8B timestamp + 2B interval + 2B cap */
+    while (pos + 2u <= len) {
+        uint8_t id = mpdu[pos];
+        uint8_t elen = mpdu[pos + 1u];
+        if ((uint32_t)pos + 2u + elen > len) break;
+        const uint8_t *val = mpdu + pos + 2u;
+
+        if (id == 0 && elen > 0 && out->ssid[0] == 0) {
+            uint8_t sl = (elen > 32u) ? 32u : elen;
+            memcpy(out->ssid, val, sl);
+            out->ssid[sl] = 0;
+        } else if (id == 3 && elen == 1) {
+            out->channel = val[0];
+        } else if (id == 48) {
+            out->secure = 1;
+            if (elen > 0 && elen <= 64u && out->rsn_len == 0) {
+                memcpy(out->rsn, val, elen);
+                out->rsn_len = elen;
+            }
+        } else if (id == 221 && elen >= 4 &&
+                   val[0] == 0x00 && val[1] == 0x50 &&
+                   val[2] == 0xF2 && val[3] == 0x01) {
+            out->secure = 1;
+        }
+        pos = (uint16_t)(pos + 2u + elen);
+    }
+    return (out->ssid[0] != 0) ? 1 : 0;
+}
+
+/* CCMP (AES-CCM) host sifreleme/cozme — wpa2.c anahtarlariyla uyumlu */
+static void iwl_ccmp_nonce(uint8_t nonce[13], const uint8_t *a2, const uint8_t pn[6]) {
+    nonce[0] = 0;
+    memcpy(nonce + 1, a2, 6);
+    nonce[7]  = pn[5]; nonce[8]  = pn[4]; nonce[9]  = pn[3];
+    nonce[10] = pn[2]; nonce[11] = pn[1]; nonce[12] = pn[0];
+}
+
+static int iwl_ccmp_aad(uint8_t *aad, const uint8_t *f, int hdrlen) {
+    uint16_t fc = (uint16_t)(iwl_g16(f) & ~0xBC00u);
+    aad[0] = 0; aad[1] = 0;
+    iwl_p16(aad + 2, fc);
+    memcpy(aad + 4, f + 4, 6);
+    aad[4] &= (uint8_t)~0x01u;
+    memcpy(aad + 10, f + 10, 6);
+    memcpy(aad + 16, f + 16, 6);
+    iwl_p16(aad + 22, (uint16_t)(iwl_g16(f + 22) & 0xFFF0u));
+    int n = 24;
+    if (hdrlen > 24) {
+        memcpy(aad + 24, f + 24, 6);
+        n = 30;
+    }
+    iwl_p16(aad, (uint16_t)(n - 2));
+    return n;
+}
+
+static int iwl_ccmp_encrypt(const uint8_t *tk, uint8_t *frame, int hdrlen,
+                            int *len, uint32_t pn) {
+    uint8_t nonce[13], aad[40], pn_b[6], tag[8], tmp[1536];
+    int body = *len - hdrlen;
+    if (!tk || !frame || body <= 0 || body + 16 > (int)sizeof(tmp)) return -1;
+
+    pn_b[0] = (uint8_t)(pn & 0xFFu);        pn_b[1] = (uint8_t)((pn >> 8) & 0xFFu);
+    pn_b[2] = (uint8_t)((pn >> 16) & 0xFFu); pn_b[3] = (uint8_t)((pn >> 24) & 0xFFu);
+    pn_b[4] = 0; pn_b[5] = 0;
+
+    frame[1] |= 0x40u; /* Protected bit */
+    iwl_ccmp_nonce(nonce, frame + 10, pn_b);
+    int aad_len = iwl_ccmp_aad(aad, frame, hdrlen);
+
+    mbedtls_ccm_context ctx;
+    mbedtls_ccm_init(&ctx);
+    if (mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, tk, 128) != 0 ||
+        mbedtls_ccm_encrypt_and_tag(&ctx, (size_t)body, nonce, 13, aad,
+                                    (size_t)aad_len, frame + hdrlen, tmp, tag, 8) != 0) {
+        mbedtls_ccm_free(&ctx);
+        return -1;
+    }
+    mbedtls_ccm_free(&ctx);
+
+    frame[hdrlen + 0] = pn_b[0];
+    frame[hdrlen + 1] = 0;
+    frame[hdrlen + 2] = 0x20;
+    frame[hdrlen + 3] = pn_b[1];
+    frame[hdrlen + 4] = pn_b[2];
+    frame[hdrlen + 5] = pn_b[3];
+    frame[hdrlen + 6] = pn_b[4];
+    frame[hdrlen + 7] = pn_b[5];
+    memcpy(frame + hdrlen + 8, tmp, (size_t)body);
+    memcpy(frame + hdrlen + 8 + body, tag, 8);
+    *len = hdrlen + 8 + body + 8;
+    return 0;
+}
+
+static int iwl_ccmp_decrypt(const uint8_t *tk, uint8_t *frame, int hdrlen, int *len) {
+    uint8_t nonce[13], aad[40], pn_b[6], tag[8], tmp[1536];
+    int body = *len - hdrlen - 8 - 8;
+    if (!tk || !frame || body <= 0 || body > (int)sizeof(tmp)) return -1;
+
+    pn_b[0] = frame[hdrlen + 0]; pn_b[1] = frame[hdrlen + 3];
+    pn_b[2] = frame[hdrlen + 4]; pn_b[3] = frame[hdrlen + 5];
+    pn_b[4] = frame[hdrlen + 6]; pn_b[5] = frame[hdrlen + 7];
+    memcpy(tag, frame + hdrlen + 8 + body, 8);
+
+    iwl_ccmp_nonce(nonce, frame + 10, pn_b);
+    int aad_len = iwl_ccmp_aad(aad, frame, hdrlen);
+
+    mbedtls_ccm_context ctx;
+    mbedtls_ccm_init(&ctx);
+    if (mbedtls_ccm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, tk, 128) != 0 ||
+        mbedtls_ccm_auth_decrypt(&ctx, (size_t)body, nonce, 13, aad,
+                                 (size_t)aad_len, frame + hdrlen + 8, tmp, tag, 8) != 0) {
+        mbedtls_ccm_free(&ctx);
+        return -1;
+    }
+    mbedtls_ccm_free(&ctx);
+
+    frame[1] &= (uint8_t)~0x40u;
+    memcpy(frame + hdrlen, tmp, (size_t)body);
+    *len = hdrlen + body;
+    return 0;
+}
+
+/* UMAC PHY / MAC / Binding / STA baglamlari */
+static int iwl_setup_contexts(uint8_t channel, bool associated, uint16_t aid) {
+    if (!g_alive || !g_init_done) return -1;
+
+    iwl_phy_ctxt_cmd_t phy;
+    memset(&phy, 0, sizeof(phy));
+    phy.id_and_color = 0;
+    phy.action = associated ? IWL_FW_CTXT_ACTION_MODIFY : IWL_FW_CTXT_ACTION_ADD;
+    phy.channel_info.band = (channel > 14) ? 1u : 0u;
+    phy.channel_info.channel = channel;
+    phy.txchain_info = 0x3u;
+    phy.rxchain_info = 0x3u;
+    if (host_cmd(GRP_LEGACY, CMD_PHY_CONTEXT_CMD, &phy, sizeof(phy), 1000) != 0)
+        return -1;
+
+    iwl_mac_ctxt_cmd_t mac;
+    memset(&mac, 0, sizeof(mac));
+    mac.id_and_color = 0;
+    mac.action = associated ? IWL_FW_CTXT_ACTION_MODIFY : IWL_FW_CTXT_ACTION_ADD;
+    mac.mac_type = IWL_FW_MAC_TYPE_BSS_STA;
+    memcpy(mac.node_addr, g_my_mac, 6);
+    if (associated) memcpy(mac.bssid_addr, g_bssid, 6);
+    else memset(mac.bssid_addr, 0xFF, 6);
+    mac.cck_rates = 0x0Fu;
+    mac.ofdm_rates = 0xFFu;
+    mac.filter_flags = associated ? 0x01u : 0x00u;
+    mac.is_assoc = associated ? 1u : 0u;
+    mac.assoc_id = aid;
+    mac.bi = 100u;
+    mac.dtim_interval = 1u;
+    if (host_cmd(GRP_LEGACY, CMD_MAC_CONTEXT_CMD, &mac, sizeof(mac), 1000) != 0)
+        return -1;
+
+    iwl_binding_cmd_t bind;
+    memset(&bind, 0, sizeof(bind));
+    bind.id_and_color = 0;
+    bind.action = associated ? IWL_FW_CTXT_ACTION_MODIFY : IWL_FW_CTXT_ACTION_ADD;
+    bind.macs[0] = 0u;
+    bind.macs[1] = 0xFFFFFFFFu;
+    bind.macs[2] = 0xFFFFFFFFu;
+    bind.macs[3] = 0xFFFFFFFFu;
+    bind.phy = 0u;
+    if (host_cmd(GRP_LEGACY, CMD_BINDING_CONTEXT_CMD, &bind, sizeof(bind), 1000) != 0)
+        return -1;
+
+    if (associated) {
+        iwl_add_sta_cmd_t sta;
+        memset(&sta, 0, sizeof(sta));
+        sta.add_modify = 0;
+        sta.mac_id_n_color = 0;
+        memcpy(sta.addr, g_bssid, 6);
+        sta.sta_id = IWL_STA_ID_AP;
+        sta.assoc_id = aid;
+        sta.tfd_queue_msk = 0x0Fu;
+        if (host_cmd(GRP_LEGACY, CMD_ADD_STA, &sta, sizeof(sta), 1000) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int iwl_tx_80211(const uint8_t *frame, uint16_t flen) {
+    if (!g_alive || !g_init_done || !frame || flen < 24 ||
+        sizeof(iwl_tx_cmd_t) + flen > IWL_HOST_CMD_MAX) {
+        return -1;
+    }
+    uint8_t cmd_pay[IWL_HOST_CMD_MAX];
+    iwl_tx_cmd_t *tx = (iwl_tx_cmd_t *)cmd_pay;
+    memset(tx, 0, sizeof(*tx));
+    tx->len = flen;
+    tx->sta_id = IWL_STA_ID_AP;
+    tx->sec_ctl = 0; /* Host-side CCMP */
+    tx->life_time = 0xFFFFFFFFu;
+    tx->rts_retry_limit = 7;
+    tx->data_retry_limit = 7;
+    memcpy(cmd_pay + sizeof(*tx), frame, flen);
+    return host_cmd(GRP_LEGACY, CMD_TX_CMD, cmd_pay,
+                    (uint16_t)(sizeof(*tx) + flen), 1000);
+}
+
+static void iwl_handle_rx_mpdu(const uint8_t *data, uint16_t len) {
+    if (!data || len <= 12u) return;
+    /* iwl_rx_mpdu_res_start (12B): mac_info + mpdu_len + ... */
+    uint16_t mpdu_len = iwl_g16(data);
+    if (mpdu_len == 0 || mpdu_len > len - 12u) mpdu_len = (uint16_t)(len - 12u);
+    const uint8_t *mpdu = data + 12u;
+    if (mpdu_len < 24u) return;
+
+    uint16_t fc = iwl_g16(mpdu);
+    if ((fc & 0x00FCu) == 0x0080u || (fc & 0x00FCu) == 0x0050u) {
+        iwl_bss_info_t bss;
+        if (iwl_parse_beacon_mpdu(mpdu, mpdu_len, -65, &bss)) {
+            int dup = 0;
+            for (int i = 0; i < g_bss_count; i++) {
+                if (strcmp(g_bss_list[i].ssid, bss.ssid) == 0) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (!dup && g_bss_count < IWL_BSS_MAX) g_bss_list[g_bss_count++] = bss;
+        }
+        return;
+    }
+
+    if (((fc & 0x00FCu) != 0x0008u && (fc & 0x00FCu) != 0x0088u) || !(fc & 0x0100u))
+        return;
+
+    int hdrlen = ((fc & 0x0300u) == 0x0300u) ? 30 : 24;
+    if (fc & 0x0080u) hdrlen += 2;
+    if (mpdu_len < (uint16_t)(hdrlen + 8)) return;
+
+    uint8_t work[1600];
+    if (mpdu_len > sizeof(work)) return;
+    memcpy(work, mpdu, mpdu_len);
+    int wlen = (int)mpdu_len;
+
+    if (fc & 0x4000u) {
+        if (wlen < hdrlen + 16) return;
+        const uint8_t *tk = (work[4] & 0x01u) ? (g_have_gtk ? g_gtk : 0) : (g_ptk_ready ? g_tk : 0);
+        if (!tk || iwl_ccmp_decrypt(tk, work, hdrlen, &wlen) != 0) return;
+    }
+
+    if (wlen < hdrlen + 8) return;
+    if (work[hdrlen] != 0xAA || work[hdrlen + 1] != 0xAA || work[hdrlen + 6] != 0x88) return;
+    uint16_t etype = (uint16_t)((work[hdrlen + 6] << 8) | work[hdrlen + 7]);
+
+    if (etype == 0x888Eu) {
+        int elen = wlen - hdrlen - 8;
+        if (elen > 0 && elen <= (int)sizeof(g_eapol_buf)) {
+            memcpy(g_eapol_buf, work + hdrlen + 8, (size_t)elen);
+            g_eapol_len = (uint16_t)elen;
+            g_eapol_ready = true;
+        }
+        return;
+    }
+
+    int plen = wlen - hdrlen - 8;
+    if (plen <= 0 || 14 + plen > 1514 || g_rx_eth_cnt >= IWL_RX_ETH_RING) return;
+    uint8_t *eth = g_rx_eth_buf[g_rx_eth_head];
+    memcpy(eth + 0, work + 4, 6);
+    memcpy(eth + 6, work + 16, 6);
+    eth[12] = (uint8_t)(etype >> 8);
+    eth[13] = (uint8_t)(etype & 0xFFu);
+    memcpy(eth + 14, work + hdrlen + 8, (size_t)plen);
+    g_rx_eth_len[g_rx_eth_head] = (uint16_t)(14 + plen);
+    g_rx_eth_head = (uint8_t)((g_rx_eth_head + 1u) % IWL_RX_ETH_RING);
+    g_rx_eth_cnt++;
+}
+
+static void iwl_rx_poll(void) {
+    struct rx_view rx;
+    if (!g_alive) return;
+    while (rx_one(&rx)) {
+        if (rx.group == GRP_LEGACY && rx.cmd == CMD_REPLY_RX_MPDU) {
+            iwl_handle_rx_mpdu(rx.data, rx.len);
+        }
+    }
+}
+
+static int iwl_wpa2_handshake(const iwl_bss_info_t *bss) {
+    uint8_t f[1400], mic[16], gtk[16];
+    if (!bss->secure || !g_pass[0]) return 0;
+
+    wpa2_derive_pmk(g_pass, (const uint8_t *)bss->ssid, (uint32_t)strlen(bss->ssid), g_pmk);
+
+    g_eapol_ready = false;
+    for (int t = 0; t < 400 && !g_eapol_ready; t++) {
+        iwl_rx_poll();
+        dly_ms(10);
+    }
+    if (!g_eapol_ready || g_eapol_len < 99 || g_eapol_buf[4] != 2) return -1;
+
+    memcpy(g_anonce, g_eapol_buf + 17, 32);
+    for (int i = 0; i < 32; i++) g_snonce[i] = (uint8_t)(net_rand32() & 0xFFu);
+    wpa2_derive_ptk(g_pmk, g_bssid, g_my_mac, g_anonce, g_snonce, g_ptk);
+
+    /* M2 */
+    uint8_t eap[300];
+    memset(eap, 0, sizeof(eap));
+    eap[0] = 1; eap[1] = 3; eap[4] = 2; eap[5] = 0x0A; eap[6] = 0x01; eap[8] = 16;
+    memcpy(eap + 9, g_eapol_buf + 9, 8);
+    memcpy(eap + 17, g_snonce, 32);
+    int klen = (bss->rsn_len > 0 && bss->rsn_len <= 64) ? bss->rsn_len : 0;
+    if (klen > 0) memcpy(eap + 99, bss->rsn, (size_t)klen);
+    eap[97] = (uint8_t)(klen & 0xFF); eap[98] = (uint8_t)(klen >> 8);
+    int tot = 4 + 95 + klen;
+    eap[2] = (uint8_t)((tot - 4) >> 8); eap[3] = (uint8_t)(tot - 4);
+    wpa2_mic(g_ptk, eap, (uint32_t)tot, mic);
+    memcpy(eap + 81, mic, 16);
+
+    static const uint8_t snap_eapol[8] = {0xAA,0xAA,0x03,0x00,0x00,0x00,0x88,0x8E};
+    iwl_p16(f, 0x0108); iwl_p16(f + 2, 0);
+    memcpy(f + 4, g_bssid, 6); memcpy(f + 10, g_my_mac, 6); memcpy(f + 16, g_bssid, 6);
+    iwl_p16(f + 22, (uint16_t)((g_seq++ & 0x0FFFu) << 4));
+    memcpy(f + 24, snap_eapol, 8);
+    memcpy(f + 32, eap, (size_t)tot);
+    if (iwl_tx_80211(f, (uint16_t)(32 + tot)) != 0) return -1;
+
+    /* M3 */
+    g_eapol_ready = false;
+    for (int t = 0; t < 400 && !g_eapol_ready; t++) {
+        iwl_rx_poll();
+        dly_ms(10);
+    }
+    if (!g_eapol_ready || g_eapol_len < 99) return -1;
+    uint8_t rmic[16], cmic[16];
+    memcpy(rmic, g_eapol_buf + 81, 16);
+    memset(g_eapol_buf + 81, 0, 16);
+    wpa2_mic(g_ptk, g_eapol_buf, g_eapol_len, cmic);
+    if (memcmp(rmic, cmic, 16) != 0) return -1;
+
+    int kdlen = g_eapol_buf[97] | (g_eapol_buf[98] << 8);
+    uint32_t glen32 = 0;
+    if (kdlen > 0 && 99 + kdlen <= g_eapol_len &&
+        wpa2_unwrap_gtk(g_ptk + 16, g_eapol_buf + 99, (uint32_t)kdlen, gtk, &glen32) == 0 &&
+        glen32 >= 16) {
+        memcpy(g_gtk, gtk, 16);
+        g_have_gtk = true;
+    }
+
+    /* M4 */
+    memset(eap, 0, 99);
+    eap[0] = 1; eap[1] = 3; eap[4] = 2; eap[5] = 0x0A; eap[6] = 0x01; eap[8] = 16;
+    memcpy(eap + 9, g_eapol_buf + 9, 8);
+    eap[2] = 0; eap[3] = 95;
+    wpa2_mic(g_ptk, eap, 99, mic);
+    memcpy(eap + 81, mic, 16);
+    memcpy(f + 32, eap, 99);
+    iwl_p16(f + 22, (uint16_t)((g_seq++ & 0x0FFFu) << 4));
+    if (iwl_tx_80211(f, 32 + 99) != 0) return -1;
+
+    memcpy(g_tk, g_ptk + 32, 32);
+    g_ptk_ready = true;
+    return 0;
+}
+
 static int drv_init(net_controller_t *nc) {
     uint16_t cmd, subsys;
     if (!nc) return -1;
-    if (nc->dev.vendor != PCI_VENDOR_INTEL || nc->dev.device != PCI_DEV_IWL_AX201_SO)
-        return -1;
+    if (!iwl_dev_supported(nc->dev.vendor, nc->dev.device)) return -1;
     g_nc = nc;
     g_mmio = (volatile uint32_t *)(uintptr_t)nc->bar[0].address;
     if (!g_mmio || nc->bar[0].address == 0) {
@@ -984,12 +1567,11 @@ static int drv_init(net_controller_t *nc) {
     }
     subsys = pci_config_readw(nc->dev.bus, nc->dev.slot, nc->dev.func, 0x2E);
     cmd = pci_config_readw(nc->dev.bus, nc->dev.slot, nc->dev.func, 0x04);
-    /* Bit 10 (Interrupt Disable) temizlenmeli; Linux pci_enable_device
-     * bunu yapiyor. Kalirsa ALIVE/FH kesmeleri hic gorunmez. */
     pci_config_writew(nc->dev.bus, nc->dev.slot, nc->dev.func, 0x04,
                       (uint16_t)((cmd & ~0x0400u) | 0x0006u));
     pci_enable_bus_mastering(nc->dev.bus, nc->dev.slot, nc->dev.func);
-    kernel_debug("IWL: 8086:51F0 subsys=%04X rev=%02X BAR0=%08X",
+    kernel_debug("IWL: %s (%04X:%04X) subsys=%04X rev=%02X BAR0=%08X",
+                 iwl_dev_name(nc->dev.device), nc->dev.vendor, nc->dev.device,
                  subsys, nc->dev.rev_id, (uint32_t)nc->bar[0].address);
 
     g_alive = false;
@@ -998,35 +1580,113 @@ static int drv_init(net_controller_t *nc) {
     if (fw_pick() != 0 || fw_parse() != 0) return -1;
     if (start_fw() != 0) return -1;
     read_mac();
+    memcpy(net_if.mac, g_my_mac, 6);
+    net_if.valid = true;
     if (mvm_init() != 0)
         kernel_debug("IWL: firmware ayakta, init eksik");
     nc->initialized = true;
-    kernel_debug("IWL: AX201 firmware yuklendi");
+    kernel_debug("IWL: %s firmware yuklendi", iwl_dev_name(nc->dev.device));
     return 0;
 }
 
 static int drv_scan(asi_wifi_net_t *out, int max) {
-    (void)out;
-    (void)max;
-    if (!g_alive) return 0;
-    /* UMAC tarama MAC ve PHY baglami ister. Sahte ag listesi donulmez.
-     * Init tamamsa bir sonraki adim o baglami kurmak. */
-    kernel_debug("IWL: tarama henuz yok (MAC/PHY baglami kurulmadi, init=%d)",
-                 g_init_done);
-    return 0;
+    static const uint8_t chans[IWL_UMAC_SCAN_MAX_CHAN] = {
+        1, 6, 11, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13,
+        36, 40, 44, 48, 149, 153, 157, 161, 165
+    };
+    if (!g_alive || !g_init_done || !out || max <= 0) return 0;
+
+    g_bss_count = 0;
+    if (iwl_setup_contexts(1, false, 0) != 0) return 0;
+
+    uint32_t scan_cfg[4] = { 0x00000003u, 0xFFFFFFFFu, 0x00000000u, 0x00000000u };
+    (void)host_cmd(GRP_LEGACY, CMD_SCAN_CFG_CMD, scan_cfg, sizeof(scan_cfg), 1000);
+
+    iwl_scan_req_umac_t req;
+    memset(&req, 0, sizeof(req));
+    req.n_channels = IWL_UMAC_SCAN_MAX_CHAN;
+    req.active_dwell = 20u;
+    req.passive_dwell = 110u;
+    req.scan_priority = 2u;
+    for (int i = 0; i < IWL_UMAC_SCAN_MAX_CHAN; i++) {
+        req.channels[i].channel_num = chans[i];
+        req.channels[i].iter_count = 1;
+        req.channels[i].iter_interval = 0;
+    }
+    if (host_cmd(GRP_LEGACY, CMD_SCAN_REQ_UMAC, &req, sizeof(req), 1500) != 0)
+        return 0;
+
+    bool scan_done = false;
+    for (int t = 0; t < 300 && !scan_done; t++) {
+        struct rx_view rx;
+        while (rx_one(&rx)) {
+            if (rx.group == GRP_LEGACY && rx.cmd == CMD_REPLY_RX_MPDU) {
+                iwl_handle_rx_mpdu(rx.data, rx.len);
+            } else if (rx.group == GRP_LEGACY && rx.cmd == CMD_SCAN_COMPLETE_UMAC) {
+                scan_done = true;
+            }
+        }
+        dly_ms(10);
+    }
+
+    int n = (g_bss_count < max) ? g_bss_count : max;
+    for (int i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        memcpy(out[i].ssid, g_bss_list[i].ssid, 33);
+        out[i].rssi = g_bss_list[i].rssi;
+        out[i].secure = g_bss_list[i].secure;
+    }
+    return n;
 }
 
 static int drv_connect(const char *ssid, const char *pass) {
-    (void)ssid;
-    (void)pass;
-    g_state = ASI_WIFI_FAILED;
-    kernel_debug("IWL: baglanti yok, once gercek tarama gerekli");
-    return -1;
+    if (!g_alive || !g_init_done || !ssid || !ssid[0]) {
+        g_state = ASI_WIFI_FAILED;
+        return -1;
+    }
+    memset(g_ssid, 0, sizeof(g_ssid));
+    strncpy(g_ssid, ssid, 32);
+    g_pass[0] = 0;
+    if (pass) { strncpy(g_pass, pass, 63); g_pass[63] = 0; }
+    g_ptk_ready = false;
+    g_have_gtk = false;
+    g_state = ASI_WIFI_CONNECTING;
+
+    asi_wifi_net_t tmp[IWL_BSS_MAX];
+    if (g_bss_count == 0) drv_scan(tmp, IWL_BSS_MAX);
+
+    const iwl_bss_info_t *target = 0;
+    for (int i = 0; i < g_bss_count; i++) {
+        if (strcmp(g_bss_list[i].ssid, ssid) == 0) {
+            target = &g_bss_list[i];
+            break;
+        }
+    }
+    if (!target) {
+        g_state = ASI_WIFI_FAILED;
+        return -1;
+    }
+
+    memcpy(g_bssid, target->bssid, 6);
+    g_channel = target->channel ? target->channel : 1;
+    if (iwl_setup_contexts((uint8_t)g_channel, true, 1u) != 0) {
+        g_state = ASI_WIFI_FAILED;
+        return -1;
+    }
+    if (iwl_wpa2_handshake(target) != 0) {
+        g_state = ASI_WIFI_FAILED;
+        return -1;
+    }
+
+    g_state = ASI_WIFI_CONNECTED;
+    return 0;
 }
 
 static int drv_disconnect(void) {
     g_state = ASI_WIFI_OFF;
     g_ssid[0] = 0;
+    g_ptk_ready = false;
+    g_have_gtk = false;
     return 0;
 }
 
@@ -1036,13 +1696,46 @@ static const char *drv_ssid(void) {
 }
 
 static bool drv_send(void *ctx, const uint8_t *data, uint16_t len) {
-    (void)ctx; (void)data; (void)len;
-    return false;
+    uint8_t f[1600];
+    (void)ctx;
+    if (!g_alive || !g_init_done || g_state != ASI_WIFI_CONNECTED) return false;
+    if (!data || len < 14 || len > 1500) return false;
+
+    iwl_p16(f, 0x0108); iwl_p16(f + 2, 0);
+    memcpy(f + 4, g_bssid, 6);
+    memcpy(f + 10, g_my_mac, 6);
+    memcpy(f + 16, g_bssid, 6);
+    iwl_p16(f + 22, (uint16_t)((g_seq++ & 0x0FFFu) << 4));
+    f[24] = 0xAA; f[25] = 0xAA; f[26] = 0x03;
+    f[27] = 0x00; f[28] = 0x00; f[29] = 0x00;
+    f[30] = data[12]; f[31] = data[13];
+    memcpy(f + 32, data + 14, (size_t)(len - 14));
+    int n = 32 + (int)len - 14;
+
+    if (g_ptk_ready && iwl_ccmp_encrypt(g_tk, f, 24, &n, g_pn++) != 0)
+        return false;
+    return iwl_tx_80211(f, (uint16_t)n) == 0;
 }
-static bool drv_has(void *ctx) { (void)ctx; return false; }
+
+static bool drv_has(void *ctx) {
+    (void)ctx;
+    if (!g_alive) return false;
+    iwl_rx_poll();
+    return g_rx_eth_cnt > 0;
+}
+
 static bool drv_recv(void *ctx, uint8_t *buf, uint16_t *len) {
-    (void)ctx; (void)buf; (void)len;
-    return false;
+    (void)ctx;
+    if (!g_alive || !buf || !len) return false;
+    iwl_rx_poll();
+    if (g_rx_eth_cnt == 0) return false;
+    uint16_t plen = g_rx_eth_len[g_rx_eth_tail];
+    if (*len < plen) { *len = plen; return false; }
+    memcpy(buf, g_rx_eth_buf[g_rx_eth_tail], plen);
+    *len = plen;
+    g_rx_eth_tail = (uint8_t)((g_rx_eth_tail + 1u) % IWL_RX_ETH_RING);
+    g_rx_eth_cnt--;
+    return true;
 }
 
 static const wifi_driver_t g_drv = {
@@ -1059,3 +1752,43 @@ static const wifi_driver_t g_drv = {
 };
 
 void iwl_ax201_register(void) { wifi_register_driver(&g_drv); }
+
+int iwl_ax201_selftest(void) {
+    if (!iwl_dev_supported(PCI_VENDOR_INTEL, 0x2723) ||
+        !iwl_dev_supported(PCI_VENDOR_INTEL, 0x51F0) ||
+        !iwl_dev_supported(PCI_VENDOR_INTEL, 0x2725) ||
+        !iwl_dev_supported(PCI_VENDOR_INTEL, 0x51F1) ||
+        !iwl_dev_supported(PCI_VENDOR_INTEL, 0x9DF0) ||
+        !iwl_dev_supported(PCI_VENDOR_INTEL, 0x2526))
+        return -1;
+
+    /* Durustluk: donanim yokken tarama 0, baglanti -1 donmeli */
+    asi_wifi_net_t dummy[4];
+    if (!g_alive && drv_scan(dummy, 4) != 0) return -2;
+
+    /* Beacon MPDU ayristirma testi */
+    uint8_t bcn[64];
+    memset(bcn, 0, sizeof(bcn));
+    iwl_p16(bcn, 0x0080); /* Beacon */
+    bcn[16] = 0xAA; bcn[17] = 0xBB; bcn[18] = 0xCC; bcn[19] = 0xDD; bcn[20] = 0xEE; bcn[21] = 0x01;
+    bcn[36] = 0; bcn[37] = 7; memcpy(bcn + 38, "Arctian", 7);
+    bcn[45] = 3; bcn[46] = 1; bcn[47] = 6;
+    bcn[48] = 48; bcn[49] = 4; bcn[50] = 1; bcn[51] = 0;
+    iwl_bss_info_t parsed;
+    if (!iwl_parse_beacon_mpdu(bcn, 54, -55, &parsed)) return -3;
+    if (strcmp(parsed.ssid, "Arctian") != 0 || parsed.channel != 6 || !parsed.secure) return -4;
+
+    /* CCMP sifreleme/cozme dongu testi */
+    uint8_t tk[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
+    uint8_t frm[96];
+    memset(frm, 0, sizeof(frm));
+    iwl_p16(frm, 0x0108);
+    frm[10] = 0x02; frm[15] = 0x01;
+    const char *msg = "Hello-IWL-CCMP";
+    memcpy(frm + 24, msg, 14);
+    int flen = 24 + 14;
+    if (iwl_ccmp_encrypt(tk, frm, 24, &flen, 42) != 0 || flen != 24 + 8 + 14 + 8) return -5;
+    if (iwl_ccmp_decrypt(tk, frm, 24, &flen) != 0 || flen != 24 + 14) return -6;
+    if (memcmp(frm + 24, msg, 14) != 0) return -7;
+    return 0;
+}
